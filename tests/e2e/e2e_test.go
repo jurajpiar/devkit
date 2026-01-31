@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// skipIfNoPodman skips the test if podman is not available or not running
+// skipIfNoPodman skips the test if podman is not available or devkit machine not running
 func skipIfNoPodman(t *testing.T) {
 	t.Helper()
 
@@ -26,8 +26,43 @@ func skipIfNoPodman(t *testing.T) {
 	cmd = exec.Command("podman", "info", "--format", "{{.Host.RemoteSocket.Exists}}")
 	output, err := cmd.CombinedOutput()
 	if err != nil || strings.Contains(string(output), "Cannot connect") {
-		t.Skip("Podman not running (try 'podman machine start'), skipping e2e test")
+		t.Skip("Podman not running (try 'devkit machine init && devkit machine start'), skipping e2e test")
 	}
+}
+
+// skipIfNoDevkitMachine skips if the devkit machine specifically is not running
+func skipIfNoDevkitMachine(t *testing.T) {
+	t.Helper()
+
+	// First check basic podman availability
+	skipIfNoPodman(t)
+
+	// Then check for devkit machine specifically
+	cmd := exec.Command("podman", "machine", "list", "--format", "{{.Name}}")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Skip("Cannot list Podman machines")
+	}
+
+	if !strings.Contains(string(output), "devkit") {
+		t.Skip("Devkit machine not found. Run 'devkit machine init && devkit machine start'")
+	}
+
+	// Check if devkit machine is running
+	cmd = exec.Command("podman", "machine", "list", "--format", "{{.Name}} {{.Running}}")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Skip("Cannot check machine status")
+	}
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "devkit") && strings.Contains(line, "true") {
+			return // Machine is running
+		}
+	}
+
+	t.Skip("Devkit machine not running. Run 'devkit machine start'")
 }
 
 // buildDevkit builds the devkit binary and returns the path
