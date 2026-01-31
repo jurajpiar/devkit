@@ -142,11 +142,15 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		if !m.config.Features.AllowMount {
 			return "", fmt.Errorf("mount method requires features.allow_mount to be enabled")
 		}
-		// Mount current directory as workspace
 		cwd, _ := os.Getwd()
-		args = append(args, "--volume", fmt.Sprintf("%s:/home/developer/workspace:rw", cwd))
-		// Use separate volume for node_modules to avoid permission issues
-		// This is a common pattern - keeps node_modules container-local
+		// Default: READ-ONLY mount for security (prevents container from injecting backdoors)
+		// Writable mount requires explicit opt-in via allow_writable_mount
+		mountOpts := "ro"
+		if m.config.Features.AllowWritableMount {
+			mountOpts = "rw"
+		}
+		args = append(args, "--volume", fmt.Sprintf("%s:/home/developer/workspace:%s", cwd, mountOpts))
+		// node_modules is always a separate writable volume (container-local)
 		args = append(args, "--volume", fmt.Sprintf("%s-node_modules:/home/developer/workspace/node_modules:rw", m.config.ContainerName()))
 	case "copy":
 		if !m.config.Features.AllowCopy {

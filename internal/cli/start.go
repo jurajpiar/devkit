@@ -213,6 +213,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Fix node_modules permissions for mount method
 	if cfg.Source.Method == "mount" {
+		if cfg.Features.AllowWritableMount {
+			fmt.Println("WARNING: Writable mount enabled - container can modify your source files!")
+		}
 		mgr.FixNodeModulesPermissions(ctx)
 	}
 

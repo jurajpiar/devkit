@@ -40,8 +40,9 @@ type DependenciesConfig struct {
 
 // FeaturesConfig holds feature flags
 type FeaturesConfig struct {
-	AllowCopy  bool `yaml:"allow_copy" mapstructure:"allow_copy"`
-	AllowMount bool `yaml:"allow_mount" mapstructure:"allow_mount"`
+	AllowCopy          bool `yaml:"allow_copy" mapstructure:"allow_copy"`
+	AllowMount         bool `yaml:"allow_mount" mapstructure:"allow_mount"`
+	AllowWritableMount bool `yaml:"allow_writable_mount" mapstructure:"allow_writable_mount"` // DANGEROUS: allows container to modify host files
 }
 
 // SSHConfig holds SSH server settings
