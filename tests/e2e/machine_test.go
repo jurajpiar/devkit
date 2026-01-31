@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -11,22 +13,94 @@ import (
 )
 
 // checkPodmanConnected verifies Podman can connect to a running machine
+// If DEVKIT_AUTO_START_MACHINE=1 is set, it will attempt to start a machine
 func checkPodmanConnected(t *testing.T) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// Try to run a simple container - this is the definitive test
 	cmd := exec.CommandContext(ctx, "podman", "run", "--rm", "alpine", "echo", "ok")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if strings.Contains(string(output), "Cannot connect") ||
+		notConnected := strings.Contains(string(output), "Cannot connect") ||
 			strings.Contains(string(output), "unable to connect") ||
-			strings.Contains(string(output), "connection refused") {
-			t.Skip("Podman not connected to any machine. Start a machine with 'podman machine start'")
+			strings.Contains(string(output), "connection refused")
+
+		// Check if we should auto-start a machine
+		if notConnected && os.Getenv("DEVKIT_AUTO_START_MACHINE") == "1" {
+			t.Log("Podman not connected. Attempting to auto-start a machine...")
+			if startErr := autoStartMachine(ctx, t); startErr != nil {
+				t.Skipf("Failed to auto-start machine: %v", startErr)
+			}
+			// Retry the connection
+			cmd = exec.CommandContext(ctx, "podman", "run", "--rm", "alpine", "echo", "ok")
+			output, err = cmd.CombinedOutput()
+			if err != nil {
+				t.Skipf("Podman still cannot run containers after starting machine: %s", output)
+			}
+			return
+		}
+
+		if notConnected {
+			t.Skip("Podman not connected. Start a machine with 'podman machine start' or set DEVKIT_AUTO_START_MACHINE=1")
 		}
 		t.Skipf("Podman cannot run containers: %s", output)
 	}
+}
+
+// autoStartMachine attempts to start a Podman machine
+func autoStartMachine(ctx context.Context, t *testing.T) error {
+	t.Helper()
+
+	// Check for existing machines
+	listCmd := exec.CommandContext(ctx, "podman", "machine", "list", "--format", "{{.Name}}")
+	output, err := listCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to list machines: %w", err)
+	}
+
+	machines := strings.Split(strings.TrimSpace(string(output)), "\n")
+
+	var machineToStart string
+	for _, m := range machines {
+		m = strings.TrimSpace(m)
+		if m == "devkit" {
+			machineToStart = "devkit"
+			break
+		}
+		if m != "" && machineToStart == "" {
+			machineToStart = m
+		}
+	}
+
+	if machineToStart == "" {
+		// No machine exists, create one
+		t.Log("No Podman machine found. Creating devkit machine...")
+		initCmd := exec.CommandContext(ctx, "podman", "machine", "init", "devkit",
+			"--cpus", "2", "--memory", "4096", "--disk-size", "20")
+		if output, err := initCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to init machine: %s", output)
+		}
+		machineToStart = "devkit"
+	}
+
+	t.Logf("Starting Podman machine: %s", machineToStart)
+	startCmd := exec.CommandContext(ctx, "podman", "machine", "start", machineToStart)
+	if output, err := startCmd.CombinedOutput(); err != nil {
+		// Check if another machine is running
+		if strings.Contains(string(output), "already") {
+			t.Logf("A machine is already running")
+			return nil
+		}
+		return fmt.Errorf("failed to start machine: %s", output)
+	}
+
+	// Wait for machine to be ready
+	t.Log("Waiting for machine to be ready...")
+	time.Sleep(10 * time.Second)
+
+	return nil
 }
 
 // TestMachineIntegration tests the devkit machine integration

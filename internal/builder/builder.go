@@ -63,11 +63,17 @@ ARG DEV_UID=1000
 ARG DEV_GID=1000
 
 {{if .IsAlpine}}
-RUN addgroup -g ${DEV_GID} ${DEV_USER} \
+# Handle case where GID/UID already exists (common in Alpine)
+RUN deluser --remove-home $(getent passwd ${DEV_UID} | cut -d: -f1) 2>/dev/null || true \
+    && delgroup $(getent group ${DEV_GID} | cut -d: -f1) 2>/dev/null || true \
+    && addgroup -g ${DEV_GID} ${DEV_USER} \
     && adduser -D -u ${DEV_UID} -G ${DEV_USER} -s /bin/bash ${DEV_USER} \
     && echo "${DEV_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${DEV_USER}
 {{else}}
-RUN groupadd -g ${DEV_GID} ${DEV_USER} \
+# Handle case where GID/UID already exists
+RUN userdel -r $(getent passwd ${DEV_UID} | cut -d: -f1) 2>/dev/null || true \
+    && groupdel $(getent group ${DEV_GID} | cut -d: -f1) 2>/dev/null || true \
+    && groupadd -g ${DEV_GID} ${DEV_USER} \
     && useradd -m -u ${DEV_UID} -g ${DEV_USER} -s /bin/bash ${DEV_USER} \
     && echo "${DEV_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${DEV_USER}
 {{end}}
