@@ -266,6 +266,13 @@ func (m *Manager) CloneRepo(ctx context.Context) error {
 	return nil
 }
 
+// FixNodeModulesPermissions fixes ownership of node_modules volume for mount method
+func (m *Manager) FixNodeModulesPermissions(ctx context.Context) {
+	// The node_modules volume may be created with root ownership
+	// Fix it so developer user can write to it
+	m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/workspace/node_modules")
+}
+
 // InstallDependencies installs project dependencies
 func (m *Manager) InstallDependencies(ctx context.Context, installCmd string) error {
 	if installCmd == "" {

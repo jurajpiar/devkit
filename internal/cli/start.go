@@ -211,6 +211,11 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Fix node_modules permissions for mount method
+	if cfg.Source.Method == "mount" {
+		mgr.FixNodeModulesPermissions(ctx)
+	}
+
 	// Install dependencies
 	noDeps, _ := cmd.Flags().GetBool("no-deps")
 	if !noDeps && detection != nil && detection.InstallCommand != "" {
