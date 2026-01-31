@@ -64,24 +64,28 @@ ARG DEV_GID=1000
 
 {{if .IsAlpine}}
 # Handle case where GID/UID already exists (common in Alpine)
+# Unlock account (-U) to allow SSH pubkey auth
 RUN deluser --remove-home $(getent passwd ${DEV_UID} | cut -d: -f1) 2>/dev/null || true \
     && delgroup $(getent group ${DEV_GID} | cut -d: -f1) 2>/dev/null || true \
     && addgroup -g ${DEV_GID} ${DEV_USER} \
     && adduser -D -u ${DEV_UID} -G ${DEV_USER} -s /bin/bash ${DEV_USER} \
+    && passwd -u ${DEV_USER} \
     && echo "${DEV_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${DEV_USER}
 {{else}}
 # Handle case where GID/UID already exists
+# Unlock account to allow SSH pubkey auth
 RUN userdel -r $(getent passwd ${DEV_UID} | cut -d: -f1) 2>/dev/null || true \
     && groupdel $(getent group ${DEV_GID} | cut -d: -f1) 2>/dev/null || true \
     && groupadd -g ${DEV_GID} ${DEV_USER} \
     && useradd -m -u ${DEV_UID} -g ${DEV_USER} -s /bin/bash ${DEV_USER} \
+    && passwd -u ${DEV_USER} 2>/dev/null || true \
     && echo "${DEV_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${DEV_USER}
 {{end}}
 
-# Setup SSH for the dev user
+# Create .ssh directory (will be overlayed by tmpfs at runtime for security)
 RUN mkdir -p /home/${DEV_USER}/.ssh \
     && chmod 700 /home/${DEV_USER}/.ssh \
-    && chown -R ${DEV_USER}:${DEV_USER} /home/${DEV_USER}/.ssh
+    && chown ${DEV_USER}:${DEV_USER} /home/${DEV_USER}/.ssh
 
 # Configure SSH daemon
 RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
@@ -99,23 +103,43 @@ RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
 {{.GlobalPackages}}
 {{end}}
 
-# Set working directory
-WORKDIR /home/${DEV_USER}/workspace
-RUN chown -R ${DEV_USER}:${DEV_USER} /home/${DEV_USER}
+# Create sshd config (host keys will be generated at startup in /tmp)
+RUN mkdir -p /var/empty && chmod 755 /var/empty \
+    && echo 'Port 2222' > /etc/ssh/sshd_devkit.conf \
+    && echo 'HostKey /tmp/ssh_host_ed25519_key' >> /etc/ssh/sshd_devkit.conf \
+    && echo 'HostKey /tmp/ssh_host_rsa_key' >> /etc/ssh/sshd_devkit.conf \
+    && echo 'AuthorizedKeysFile /home/developer/.ssh/authorized_keys' >> /etc/ssh/sshd_devkit.conf \
+    && echo 'PasswordAuthentication no' >> /etc/ssh/sshd_devkit.conf \
+    && echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_devkit.conf \
+    && echo 'PermitRootLogin no' >> /etc/ssh/sshd_devkit.conf \
+    && echo 'StrictModes no' >> /etc/ssh/sshd_devkit.conf \
+    && echo 'PidFile /tmp/sshd.pid' >> /etc/ssh/sshd_devkit.conf \
+    && chmod 644 /etc/ssh/sshd_devkit.conf
 
-# Switch to dev user for subsequent operations
-USER ${DEV_USER}
+# Create entrypoint script that generates host keys and starts sshd
+# Note: .ssh, .npm, .cache are tmpfs mounted at runtime
+RUN echo '#!/bin/sh' > /entrypoint.sh \
+    && echo '# Generate SSH host keys in /tmp' >> /entrypoint.sh \
+    && echo 'ssh-keygen -t ed25519 -f /tmp/ssh_host_ed25519_key -N "" -q' >> /entrypoint.sh \
+    && echo 'ssh-keygen -t rsa -f /tmp/ssh_host_rsa_key -N "" -q' >> /entrypoint.sh \
+    && echo '# Start sshd' >> /entrypoint.sh \
+    && echo 'exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_devkit.conf' >> /entrypoint.sh \
+    && chmod +x /entrypoint.sh
+
+# Set working directory (don't chown entire home - causes issues with rootless podman)
+WORKDIR /home/${DEV_USER}/workspace
+RUN chown ${DEV_USER}:${DEV_USER} /home/${DEV_USER}/workspace
 
 # Expose SSH port
-EXPOSE 22
+EXPOSE 2222
 
 # Expose debug port
 {{if .DebugPort}}
 EXPOSE {{.DebugPort}}
 {{end}}
 
-# Default command: start SSH daemon
-CMD ["sudo", "/usr/sbin/sshd", "-D", "-e"]
+# Start sshd via entrypoint (generates keys then runs sshd)
+ENTRYPOINT ["/entrypoint.sh"]
 `
 
 // TemplateData holds data for Containerfile generation

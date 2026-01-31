@@ -73,6 +73,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 		if name == "" {
 			cfg.Project.Name = extractRepoName(repoURL)
 		}
+	} else {
+		// No repo URL - use mount for local development
+		cfg.Source.Method = "mount"
+		cfg.Features.AllowMount = true
 	}
 
 	// Set branch

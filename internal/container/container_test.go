@@ -201,8 +201,8 @@ func TestBuildCreateArgsNamedVolumes(t *testing.T) {
 		t.Error("Expected named volume for workspace")
 	}
 
-	if !strings.Contains(argsStr, "devkit-test-project-home") {
-		t.Error("Expected named volume for home")
+	if !strings.Contains(argsStr, "devkit-test-project-ssh") {
+		t.Error("Expected named volume for ssh")
 	}
 
 	// Should NOT contain bind mounts to host paths (except for specific allowed paths)

@@ -48,15 +48,21 @@ func (m *Manager) buildCreateArgs() []string {
 	args := []string{
 		"create",
 		"--name", containerName,
-		"--userns=keep-id", // Rootless: map current user
 		"--hostname", "devkit",
 	}
 
 	// === SECURITY HARDENING (configurable) ===
 
-	// Capability dropping
+	// Capability dropping (keep minimal caps for sshd and container operations)
 	if m.config.Security.DropAllCapabilities {
-		args = append(args, "--cap-drop=ALL")
+		args = append(args,
+			"--cap-drop=ALL",
+			"--cap-add=SYS_CHROOT",   // For sshd privilege separation
+			"--cap-add=SETUID",       // For sshd to switch to user
+			"--cap-add=SETGID",       // For sshd to set groups
+			"--cap-add=CHOWN",        // For file ownership changes
+			"--cap-add=FOWNER",       // For file permission changes
+		)
 	}
 
 	// Privilege escalation prevention
@@ -67,12 +73,18 @@ func (m *Manager) buildCreateArgs() []string {
 	// Read-only root filesystem
 	if m.config.Security.ReadOnlyRootfs {
 		args = append(args, "--read-only")
-		// Writable tmpfs for necessary paths only
-		args = append(args,
-			"--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
-			"--tmpfs", "/run:rw,noexec,nosuid,size=64m",
-		)
 	}
+
+	// Writable tmpfs for system paths
+	args = append(args,
+		"--tmpfs", "/tmp:rw,nosuid,size=512m",
+		"--tmpfs", "/run:rw,noexec,nosuid,size=64m",
+		"--tmpfs", "/home/developer/.npm:rw,nosuid,size=512m",
+		"--tmpfs", "/home/developer/.cache:rw,nosuid,size=512m",
+	)
+
+	// Use named volume for .ssh (works better with user namespaces)
+	args = append(args, "--volume", fmt.Sprintf("%s-ssh:/home/developer/.ssh:rw", containerName))
 
 	// Network mode
 	switch m.config.Security.NetworkMode {
@@ -96,19 +108,17 @@ func (m *Manager) buildCreateArgs() []string {
 	}
 
 	// SSH port - bind to localhost only, not all interfaces
-	args = append(args, "--publish", fmt.Sprintf("127.0.0.1:%d:22", m.config.SSH.Port))
+	args = append(args, "--publish", fmt.Sprintf("127.0.0.1:%d:2222", m.config.SSH.Port))
 
 	// Add debug port for Node.js - localhost only (unless disabled)
 	if m.config.Project.Type == "nodejs" && !m.config.Security.DisableDebugPort {
 		args = append(args, "--publish", "127.0.0.1:9229:9229")
 	}
 
-	// Writable volumes for developer workspace and home
-	// These are container-local named volumes, not host mounts
-	args = append(args,
-		"--volume", fmt.Sprintf("%s-workspace:/home/developer/workspace:rw", containerName),
-		"--volume", fmt.Sprintf("%s-home:/home/developer:rw", containerName),
-	)
+	// Workspace volume - only for git/copy methods, not mount
+	if m.config.Source.Method != "mount" {
+		args = append(args, "--volume", fmt.Sprintf("%s-workspace:/home/developer/workspace:rw", containerName))
+	}
 
 	return args
 }
@@ -123,9 +133,9 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		if !m.config.Features.AllowMount {
 			return "", fmt.Errorf("mount method requires features.allow_mount to be enabled")
 		}
-		// Mount current directory as workspace (read-only, noexec for security)
+		// Mount current directory as workspace
 		cwd, _ := os.Getwd()
-		args = append(args, "--volume", fmt.Sprintf("%s:/home/developer/workspace:ro,noexec", cwd))
+		args = append(args, "--volume", fmt.Sprintf("%s:/home/developer/workspace:rw", cwd))
 	case "copy":
 		if !m.config.Features.AllowCopy {
 			return "", fmt.Errorf("copy method requires features.allow_copy to be enabled")
@@ -268,12 +278,16 @@ func (m *Manager) SetupSSHKey(ctx context.Context) error {
 		return fmt.Errorf("no SSH public key found in ~/.ssh/")
 	}
 
-	// Add key to container's authorized_keys
+	// Add key to container's authorized_keys (run as developer user due to user namespace)
 	containerName := m.config.ContainerName()
 	keyStr := strings.TrimSpace(string(pubKey))
 
-	cmd := fmt.Sprintf("mkdir -p /home/developer/.ssh && echo '%s' >> /home/developer/.ssh/authorized_keys && chmod 600 /home/developer/.ssh/authorized_keys", keyStr)
-	_, err = m.runPodman(ctx, "exec", containerName, "bash", "-c", cmd)
+	// Create .ssh directory, add key, and set permissions
+	cmd := fmt.Sprintf(`mkdir -p /home/developer/.ssh && \
+echo '%s' >> /home/developer/.ssh/authorized_keys && \
+chmod 700 /home/developer/.ssh && \
+chmod 600 /home/developer/.ssh/authorized_keys`, keyStr)
+	_, err = m.runPodman(ctx, "exec", "-u", "developer", containerName, "bash", "-c", cmd)
 	if err != nil {
 		return fmt.Errorf("failed to setup SSH key: %w", err)
 	}
@@ -406,10 +420,9 @@ func (m *Manager) Commit(ctx context.Context, imageName string) (string, error) 
 func (m *Manager) RemoveVolumes(ctx context.Context) error {
 	containerName := m.config.ContainerName()
 
-	// Remove workspace volume
+	// Remove volumes (if they exist)
 	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-workspace")
-	// Remove home volume
-	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-home")
+	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-ssh")
 
 	return nil
 }

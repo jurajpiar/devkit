@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ProjectType represents a detected project type
@@ -170,8 +171,8 @@ func (d *Detector) collectDependencies(pkg *PackageJSON) []string {
 
 // sanitizeVersion cleans up version strings for use in image tags
 func sanitizeVersion(version string) string {
-	// Remove common prefixes/suffixes
-	v := version
+	// Trim whitespace and newlines
+	v := strings.TrimSpace(version)
 	if len(v) > 0 && (v[0] == 'v' || v[0] == '=' || v[0] == '^' || v[0] == '~' || v[0] == '>') {
 		v = v[1:]
 	}
