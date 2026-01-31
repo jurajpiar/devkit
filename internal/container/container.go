@@ -120,6 +120,15 @@ func (m *Manager) buildCreateArgs() []string {
 		args = append(args, "--volume", fmt.Sprintf("%s-workspace:/home/developer/workspace:rw", containerName))
 	}
 
+	// SSH agent forwarding for secure git operations (key never enters container)
+	if sshAuthSock := os.Getenv("SSH_AUTH_SOCK"); sshAuthSock != "" && m.config.Source.Method == "git" {
+		// Mount the SSH agent socket (read-only for extra safety)
+		args = append(args,
+			"--volume", sshAuthSock+":/run/ssh-agent.sock:ro",
+			"--env", "SSH_AUTH_SOCK=/run/ssh-agent.sock",
+		)
+	}
+
 	return args
 }
 
@@ -269,9 +278,11 @@ func (m *Manager) InstallDependencies(ctx context.Context, installCmd string) er
 	return nil
 }
 
-// SetupSSHKey copies the user's SSH public key to the container
+// SetupSSHKey sets up SSH for the container:
+// - Copies user's public key to authorized_keys (for SSH login)
+// - Adds known_hosts for common git providers (safe - just public host keys)
+// Note: Private key is NOT copied - we use SSH agent forwarding instead
 func (m *Manager) SetupSSHKey(ctx context.Context) error {
-	// Read user's SSH public key
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %w", err)
@@ -295,19 +306,35 @@ func (m *Manager) SetupSSHKey(ctx context.Context) error {
 		return fmt.Errorf("no SSH public key found in ~/.ssh/")
 	}
 
-	// Add key to container's authorized_keys (run as developer user due to user namespace)
 	containerName := m.config.ContainerName()
 	keyStr := strings.TrimSpace(string(pubKey))
 
-	// Create .ssh directory, add key, and set permissions
+	// Create .ssh directory, add authorized_keys for SSH login
 	cmd := fmt.Sprintf(`mkdir -p /home/developer/.ssh && \
 echo '%s' >> /home/developer/.ssh/authorized_keys && \
 chmod 700 /home/developer/.ssh && \
 chmod 600 /home/developer/.ssh/authorized_keys`, keyStr)
+
 	_, err = m.runPodman(ctx, "exec", "-u", "developer", containerName, "bash", "-c", cmd)
 	if err != nil {
-		return fmt.Errorf("failed to setup SSH key: %w", err)
+		return fmt.Errorf("failed to setup SSH authorized_keys: %w", err)
 	}
+
+	// Add known_hosts for common git providers (these are public host keys - safe to include)
+	knownHosts := `github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf
+gitlab.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFSMqzJeV9rUzU4kWitGjeR4PWSa29SPqJ1fVkhtj3Hw9xjLVXVYrU9QlYWrOLXBpQ6KWjbjTDTdDkoohFzgbEY=
+bitbucket.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIazEu89wgQZ4bqs3d63QSMzYVa0MuJ2e2gKTKqu+UUO
+bitbucket.org ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPIQmuzMBuKdWeF4+a2sjSSpBK0iqitSQ+5BM9KhpexuGt20JpTVM7u5BDZngncgrqDMbWdxMWWOGtZ9UgbqgZE=`
+
+	cmd = fmt.Sprintf(`cat >> /home/developer/.ssh/known_hosts << 'EOF'
+%s
+EOF
+chmod 644 /home/developer/.ssh/known_hosts`, knownHosts)
+
+	_, _ = m.runPodman(ctx, "exec", "-u", "developer", containerName, "bash", "-c", cmd)
+	// Non-fatal if this fails
 
 	return nil
 }
