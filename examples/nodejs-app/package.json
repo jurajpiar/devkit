@@ -1,0 +1,19 @@
+{
+  "name": "devkit-example-nodejs",
+  "version": "1.0.0",
+  "description": "Example Node.js app for devkit",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --inspect=0.0.0.0:9229 src/index.js",
+    "test": "node --test src/**/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": ["devkit", "example"],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

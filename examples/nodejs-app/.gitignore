@@ -1,0 +1,4 @@
+node_modules/
+devkit.yaml
+.devkit/
+*.log
