@@ -16,6 +16,7 @@ type Config struct {
 	Dependencies DependenciesConfig `yaml:"dependencies" mapstructure:"dependencies"`
 	Features     FeaturesConfig     `yaml:"features" mapstructure:"features"`
 	SSH          SSHConfig          `yaml:"ssh" mapstructure:"ssh"`
+	Security     SecurityConfig     `yaml:"security" mapstructure:"security"`
 }
 
 // ProjectConfig holds project metadata
@@ -48,6 +49,22 @@ type SSHConfig struct {
 	Port int `yaml:"port" mapstructure:"port"`
 }
 
+// SecurityConfig holds security-related settings
+type SecurityConfig struct {
+	// NetworkMode: "restricted" (default) blocks localhost, "none" disables network entirely, "full" allows all (dangerous)
+	NetworkMode string `yaml:"network_mode" mapstructure:"network_mode"`
+	// MemoryLimit in bytes (default 4GB)
+	MemoryLimit string `yaml:"memory_limit" mapstructure:"memory_limit"`
+	// PidsLimit max number of processes (default 512)
+	PidsLimit int `yaml:"pids_limit" mapstructure:"pids_limit"`
+	// ReadOnlyRootfs makes root filesystem read-only (default true)
+	ReadOnlyRootfs bool `yaml:"read_only_rootfs" mapstructure:"read_only_rootfs"`
+	// DropAllCapabilities drops all Linux capabilities (default true)
+	DropAllCapabilities bool `yaml:"drop_all_capabilities" mapstructure:"drop_all_capabilities"`
+	// NoNewPrivileges prevents privilege escalation (default true)
+	NoNewPrivileges bool `yaml:"no_new_privileges" mapstructure:"no_new_privileges"`
+}
+
 // DefaultConfig returns a config with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -67,6 +84,14 @@ func DefaultConfig() *Config {
 		},
 		SSH: SSHConfig{
 			Port: 2222,
+		},
+		Security: SecurityConfig{
+			NetworkMode:         "restricted", // Blocks localhost access
+			MemoryLimit:         "4g",
+			PidsLimit:           512,
+			ReadOnlyRootfs:      true,
+			DropAllCapabilities: true,
+			NoNewPrivileges:     true,
 		},
 	}
 }
@@ -160,6 +185,26 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid SSH port: %d", c.SSH.Port)
 	}
 
+	// Validate security settings
+	validNetworkModes := map[string]bool{"none": true, "restricted": true, "full": true}
+	if !validNetworkModes[c.Security.NetworkMode] {
+		return fmt.Errorf("invalid network_mode: %s (must be none, restricted, or full)", c.Security.NetworkMode)
+	}
+
+	// Warn about dangerous settings (but allow them)
+	if c.Security.NetworkMode == "full" {
+		fmt.Println("WARNING: network_mode=full allows container to access host localhost services")
+	}
+	if !c.Security.DropAllCapabilities {
+		fmt.Println("WARNING: drop_all_capabilities=false gives container additional privileges")
+	}
+	if !c.Security.NoNewPrivileges {
+		fmt.Println("WARNING: no_new_privileges=false allows privilege escalation")
+	}
+	if !c.Security.ReadOnlyRootfs {
+		fmt.Println("WARNING: read_only_rootfs=false allows persistent malware in container")
+	}
+
 	return nil
 }
 
@@ -172,6 +217,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("features.allow_copy", false)
 	v.SetDefault("features.allow_mount", false)
 	v.SetDefault("ssh.port", 2222)
+	// Security defaults - maximum security by default
+	v.SetDefault("security.network_mode", "restricted")
+	v.SetDefault("security.memory_limit", "4g")
+	v.SetDefault("security.pids_limit", 512)
+	v.SetDefault("security.read_only_rootfs", true)
+	v.SetDefault("security.drop_all_capabilities", true)
+	v.SetDefault("security.no_new_privileges", true)
 }
 
 // ContainerName returns the container name for this project

@@ -142,13 +142,55 @@ Debug port 9229 is automatically forwarded. Add this to your `.vscode/launch.jso
 
 ## Security Model
 
-Devkit is designed with security as a primary concern:
+Devkit is designed for maximum isolation to protect against supply-chain attacks and 0-day exploits.
 
-1. **Rootless Podman**: Containers run without root privileges on the host
-2. **No Host FS Access**: By default, containers cannot access host filesystem
-3. **Git Clone**: Code is cloned inside the container, not mounted from host
-4. **Feature Flags**: Potentially risky features (copy, mount) are disabled by default
-5. **SSH Key Auth**: Password authentication is disabled in the container
+### Default Security Measures (Always On)
+
+| Protection | Description |
+|------------|-------------|
+| **Rootless Podman** | Containers run without root privileges on host |
+| **No Host FS Access** | Code is git-cloned inside container, no host mounts |
+| **Drop All Capabilities** | `--cap-drop=ALL` removes all Linux capabilities |
+| **No New Privileges** | `--security-opt=no-new-privileges` prevents privilege escalation |
+| **Read-Only Root FS** | `--read-only` prevents persistent malware |
+| **Localhost Blocked** | `slirp4netns:allow_host_loopback=false` blocks access to host services |
+| **Localhost-Only Ports** | SSH/debug ports bind to `127.0.0.1` only |
+| **Resource Limits** | Memory (4GB) and process limits (512) prevent DoS |
+| **Named Volumes** | Workspace uses container-local volumes, not host paths |
+
+### Network Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `restricted` (default) | Outbound internet allowed, localhost blocked | Normal development |
+| `none` | No network access at all | Maximum security after deps installed |
+| `full` | Full network including localhost (dangerous) | Only if explicitly needed |
+
+### Configuration
+
+```yaml
+security:
+  network_mode: restricted    # none | restricted | full
+  memory_limit: 4g
+  pids_limit: 512
+  read_only_rootfs: true
+  drop_all_capabilities: true
+  no_new_privileges: true
+```
+
+### What This Protects Against
+
+- **Supply-chain attacks**: Malicious npm packages cannot access host filesystem or localhost services
+- **Container escape**: Rootless + dropped capabilities + no-new-privileges significantly reduces attack surface
+- **Data exfiltration to host**: Container cannot read host files or connect to host databases
+- **Lateral movement**: Cannot scan or attack local network services
+- **Persistent malware**: Read-only rootfs prevents trojans from persisting
+
+### Limitations
+
+- Outbound internet access is allowed by default (for git clone, npm install)
+- Kernel-level container escape CVEs may still apply (mitigated by rootless)
+- Use `network_mode: none` after initial setup for maximum isolation
 
 ## Project Structure
 

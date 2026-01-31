@@ -49,13 +49,65 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		"--name", containerName,
 		"--userns=keep-id", // Rootless: map current user
 		"--hostname", "devkit",
-		"--publish", fmt.Sprintf("%d:22", m.config.SSH.Port), // SSH port
 	}
 
-	// Add debug port for Node.js
-	if m.config.Project.Type == "nodejs" {
-		args = append(args, "--publish", "9229:9229")
+	// === SECURITY HARDENING (configurable) ===
+
+	// Capability dropping
+	if m.config.Security.DropAllCapabilities {
+		args = append(args, "--cap-drop=ALL")
 	}
+
+	// Privilege escalation prevention
+	if m.config.Security.NoNewPrivileges {
+		args = append(args, "--security-opt=no-new-privileges:true")
+	}
+
+	// Read-only root filesystem
+	if m.config.Security.ReadOnlyRootfs {
+		args = append(args, "--read-only")
+		// Writable tmpfs for necessary paths only
+		args = append(args,
+			"--tmpfs=/tmp:rw,noexec,nosuid,size=512m",
+			"--tmpfs=/run:rw,noexec,nosuid,size=64m",
+		)
+	}
+
+	// Network mode
+	switch m.config.Security.NetworkMode {
+	case "none":
+		// Complete network isolation - most secure
+		args = append(args, "--network=none")
+	case "restricted":
+		// Block access to host's localhost services (prevent lateral movement)
+		args = append(args, "--network=slirp4netns:allow_host_loopback=false")
+	case "full":
+		// Full network access (dangerous, but user explicitly requested)
+		// Uses default podman networking
+	}
+
+	// Resource limits
+	if m.config.Security.MemoryLimit != "" {
+		args = append(args, "--memory="+m.config.Security.MemoryLimit)
+	}
+	if m.config.Security.PidsLimit > 0 {
+		args = append(args, fmt.Sprintf("--pids-limit=%d", m.config.Security.PidsLimit))
+	}
+
+	// SSH port - bind to localhost only, not all interfaces
+	args = append(args, "--publish", fmt.Sprintf("127.0.0.1:%d:22", m.config.SSH.Port))
+
+	// Add debug port for Node.js - localhost only
+	if m.config.Project.Type == "nodejs" {
+		args = append(args, "--publish", "127.0.0.1:9229:9229")
+	}
+
+	// Writable volumes for developer workspace and home
+	// These are container-local named volumes, not host mounts
+	args = append(args,
+		"--volume", fmt.Sprintf("%s-workspace:/home/developer/workspace:rw", containerName),
+		"--volume", fmt.Sprintf("%s-home:/home/developer:rw", containerName),
+	)
 
 	// Handle source method
 	switch m.config.Source.Method {
@@ -63,9 +115,9 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		if !m.config.Features.AllowMount {
 			return "", fmt.Errorf("mount method requires features.allow_mount to be enabled")
 		}
-		// Mount current directory as workspace (read-only by default for security)
+		// Mount current directory as workspace (read-only, noexec for security)
 		cwd, _ := os.Getwd()
-		args = append(args, "--volume", fmt.Sprintf("%s:/home/developer/workspace:ro", cwd))
+		args = append(args, "--volume", fmt.Sprintf("%s:/home/developer/workspace:ro,noexec", cwd))
 	case "copy":
 		if !m.config.Features.AllowCopy {
 			return "", fmt.Errorf("copy method requires features.allow_copy to be enabled")
