@@ -74,9 +74,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 			cfg.Project.Name = extractRepoName(repoURL)
 		}
 	} else {
-		// No repo URL - use mount for local development
-		cfg.Source.Method = "mount"
-		cfg.Features.AllowMount = true
+		// No repo URL - use copy for secure local development
+		// Copy method: files copied into isolated container, host never accessed after
+		cfg.Source.Method = "copy"
+		cfg.Features.AllowCopy = true
 	}
 
 	// Set branch

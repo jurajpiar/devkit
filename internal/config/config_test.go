@@ -15,7 +15,7 @@ func TestDefaultConfig(t *testing.T) {
 	}
 
 	// Check source defaults
-	if cfg.Source.Method != "git" {
+	if cfg.Source.Method != "copy" {
 		t.Errorf("Source.Method = %s, want git", cfg.Source.Method)
 	}
 	if cfg.Source.Branch != "main" {
@@ -27,9 +27,9 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("Dependencies.Runtime = %s, want node:22-alpine", cfg.Dependencies.Runtime)
 	}
 
-	// Check features defaults (should be secure by default)
-	if cfg.Features.AllowCopy {
-		t.Error("Features.AllowCopy should be false by default")
+	// Check features defaults (copy enabled since it's the default secure method)
+	if !cfg.Features.AllowCopy {
+		t.Error("Features.AllowCopy should be true by default (copy is the default method)")
 	}
 	if cfg.Features.AllowMount {
 		t.Error("Features.AllowMount should be false by default")
@@ -80,8 +80,7 @@ func TestConfigValidation(t *testing.T) {
 		{
 			name:      "valid default config",
 			config:    DefaultConfig(),
-			expectErr: true, // No repo set for git method
-			errMsg:    "source.repo",
+			expectErr: false, // Copy method doesn't require repo
 		},
 		{
 			name: "valid config with repo",

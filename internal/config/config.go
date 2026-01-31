@@ -79,14 +79,14 @@ func DefaultConfig() *Config {
 			Type: "nodejs",
 		},
 		Source: SourceConfig{
-			Method: "git",
+			Method: "copy", // Most secure default - isolated copy, no host access
 			Branch: "main",
 		},
 		Dependencies: DependenciesConfig{
 			Runtime: "node:22-alpine",
 		},
 		Features: FeaturesConfig{
-			AllowCopy:  false,
+			AllowCopy:  true, // Enabled by default since copy is the default method
 			AllowMount: false,
 		},
 		SSH: SSHConfig{
@@ -221,7 +221,7 @@ func (c *Config) Validate() error {
 // setDefaults sets default values in viper
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("project.type", "nodejs")
-	v.SetDefault("source.method", "git")
+	v.SetDefault("source.method", "copy") // Most secure default
 	v.SetDefault("source.branch", "main")
 	v.SetDefault("dependencies.runtime", "node:22-alpine")
 	v.SetDefault("features.allow_copy", false)
