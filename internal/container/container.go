@@ -40,8 +40,9 @@ type PortMapping struct {
 	Protocol      string
 }
 
-// Create creates a new container but doesn't start it
-func (m *Manager) Create(ctx context.Context, imageName string) (string, error) {
+// buildCreateArgs builds the argument list for container creation
+// This is exported (via method) for testing purposes
+func (m *Manager) buildCreateArgs() []string {
 	containerName := m.config.ContainerName()
 
 	args := []string{
@@ -68,8 +69,8 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		args = append(args, "--read-only")
 		// Writable tmpfs for necessary paths only
 		args = append(args,
-			"--tmpfs=/tmp:rw,noexec,nosuid,size=512m",
-			"--tmpfs=/run:rw,noexec,nosuid,size=64m",
+			"--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
+			"--tmpfs", "/run:rw,noexec,nosuid,size=64m",
 		)
 	}
 
@@ -83,7 +84,7 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		args = append(args, "--network=slirp4netns:allow_host_loopback=false")
 	case "full":
 		// Full network access (dangerous, but user explicitly requested)
-		// Uses default podman networking
+		args = append(args, "--network=slirp4netns")
 	}
 
 	// Resource limits
@@ -108,6 +109,13 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		"--volume", fmt.Sprintf("%s-workspace:/home/developer/workspace:rw", containerName),
 		"--volume", fmt.Sprintf("%s-home:/home/developer:rw", containerName),
 	)
+
+	return args
+}
+
+// Create creates a new container but doesn't start it
+func (m *Manager) Create(ctx context.Context, imageName string) (string, error) {
+	args := m.buildCreateArgs()
 
 	// Handle source method
 	switch m.config.Source.Method {
