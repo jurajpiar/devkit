@@ -24,6 +24,7 @@ The image includes:
 
 Examples:
   devkit build              # Build from devkit.yaml
+  devkit build --proxy      # Also build the debug proxy image
   devkit build --no-cache   # Build without cache
   devkit build --save-containerfile  # Save generated Containerfile`,
 	RunE: runBuild,
@@ -35,6 +36,7 @@ func init() {
 	buildCmd.Flags().Bool("no-cache", false, "Build without using cache")
 	buildCmd.Flags().Bool("save-containerfile", false, "Save the generated Containerfile to current directory")
 	buildCmd.Flags().Bool("force", false, "Force rebuild even if image exists")
+	buildCmd.Flags().Bool("proxy", false, "Also build the debug proxy image")
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
@@ -98,8 +100,29 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nSuccessfully built image: %s\n", b.GetImageName())
+
+	// Build proxy image if requested
+	buildProxy, _ := cmd.Flags().GetBool("proxy")
+	if buildProxy {
+		fmt.Println("\nBuilding debug proxy image...")
+		proxyMgr := container.NewProxyManager(cfg)
+
+		// Get the path to the devkit source (where templates are)
+		// For now, assume current directory has the templates
+		proxyImage, err := proxyMgr.BuildProxyImage(ctx, ".")
+		if err != nil {
+			fmt.Printf("Warning: failed to build proxy image: %v\n", err)
+			fmt.Println("Debug proxy will not be available.")
+		} else {
+			fmt.Printf("Successfully built proxy image: %s\n", proxyImage)
+		}
+	}
+
 	fmt.Println("\nNext steps:")
 	fmt.Println("  devkit start    - Start the development container")
+	if buildProxy {
+		fmt.Println("  devkit start --debug-proxy  - Start with debug proxy filtering")
+	}
 
 	return nil
 }

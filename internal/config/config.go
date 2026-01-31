@@ -65,6 +65,10 @@ type SecurityConfig struct {
 	NoNewPrivileges bool `yaml:"no_new_privileges" mapstructure:"no_new_privileges"`
 	// DisableDebugPort prevents exposure of debug ports like Node.js 9229 (default false)
 	DisableDebugPort bool `yaml:"disable_debug_port" mapstructure:"disable_debug_port"`
+	// UseDebugProxy routes debug traffic through a filtering proxy (default false)
+	UseDebugProxy bool `yaml:"use_debug_proxy" mapstructure:"use_debug_proxy"`
+	// DebugProxyFilterLevel sets the proxy filter level: strict, filtered, audit, passthrough
+	DebugProxyFilterLevel string `yaml:"debug_proxy_filter_level" mapstructure:"debug_proxy_filter_level"`
 }
 
 // DefaultConfig returns a config with sensible defaults
@@ -88,13 +92,15 @@ func DefaultConfig() *Config {
 			Port: 2222,
 		},
 		Security: SecurityConfig{
-			NetworkMode:         "restricted", // Blocks localhost access
-			MemoryLimit:         "4g",
-			PidsLimit:           512,
-			ReadOnlyRootfs:      true,
-			DropAllCapabilities: true,
-			NoNewPrivileges:     true,
-			DisableDebugPort:    false, // Enable by default for dev convenience
+			NetworkMode:           "restricted", // Blocks localhost access
+			MemoryLimit:           "4g",
+			PidsLimit:             512,
+			ReadOnlyRootfs:        true,
+			DropAllCapabilities:   true,
+			NoNewPrivileges:       true,
+			DisableDebugPort:      false,     // Enable by default for dev convenience
+			UseDebugProxy:         false,     // Disabled by default
+			DebugProxyFilterLevel: "filtered", // Default filter level
 		},
 	}
 }
@@ -228,6 +234,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.drop_all_capabilities", true)
 	v.SetDefault("security.no_new_privileges", true)
 	v.SetDefault("security.disable_debug_port", false)
+	v.SetDefault("security.use_debug_proxy", false)
+	v.SetDefault("security.debug_proxy_filter_level", "filtered")
 }
 
 // ContainerName returns the container name for this project

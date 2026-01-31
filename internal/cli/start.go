@@ -25,17 +25,23 @@ This command will:
   5. Install project dependencies
 
 Security Modes:
-  --paranoid    Maximum security for untrusted code:
-                - Network enabled only during clone/install
-                - Automatically air-gaps after setup
-                - Disables debug port
-                - Stricter resource limits
+  --paranoid      Maximum security for untrusted code:
+                  - Network enabled only during clone/install
+                  - Automatically air-gaps after setup
+                  - Uses debug proxy with strict filtering
+                  - Stricter resource limits
+
+  --debug-proxy   Route debug traffic through filtering proxy:
+                  - Blocks dangerous CDP commands (eval, compile)
+                  - Rate-limits code execution
+                  - Audit logs all debug activity
 
 Examples:
-  devkit start              # Start container from devkit.yaml
-  devkit start --shell      # Start and open a shell
-  devkit start --paranoid   # Maximum security for untrusted code
-  devkit start --offline    # Start with no network access`,
+  devkit start                  # Start container from devkit.yaml
+  devkit start --shell          # Start and open a shell
+  devkit start --paranoid       # Maximum security for untrusted code
+  devkit start --debug-proxy    # Enable debug proxy filtering
+  devkit start --offline        # Start with no network access`,
 	RunE: runStart,
 }
 
@@ -48,9 +54,11 @@ func init() {
 	startCmd.Flags().Bool("rebuild", false, "Remove existing container and create new one")
 
 	// Security flags
-	startCmd.Flags().Bool("paranoid", false, "Maximum security: air-gap after setup, disable debug port")
+	startCmd.Flags().Bool("paranoid", false, "Maximum security: air-gap after setup, strict debug proxy")
 	startCmd.Flags().Bool("offline", false, "Start with no network access (network_mode=none)")
-	startCmd.Flags().Bool("no-debug-port", false, "Disable debug port exposure")
+	startCmd.Flags().Bool("no-debug-port", false, "Disable debug port exposure entirely")
+	startCmd.Flags().Bool("debug-proxy", false, "Route debug traffic through filtering proxy")
+	startCmd.Flags().String("proxy-filter", "filtered", "Debug proxy filter level: strict, filtered, audit")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -76,16 +84,19 @@ func runStart(cmd *cobra.Command, args []string) error {
 	paranoid, _ := cmd.Flags().GetBool("paranoid")
 	offline, _ := cmd.Flags().GetBool("offline")
 	noDebugPort, _ := cmd.Flags().GetBool("no-debug-port")
+	useDebugProxy, _ := cmd.Flags().GetBool("debug-proxy")
+	proxyFilterLevel, _ := cmd.Flags().GetString("proxy-filter")
 
 	// Apply paranoid mode settings
 	if paranoid {
 		fmt.Println("=== PARANOID MODE ENABLED ===")
 		fmt.Println("- Network will be disabled after setup")
-		fmt.Println("- Debug port disabled")
+		fmt.Println("- Debug proxy with STRICT filtering enabled")
 		fmt.Println("- Stricter resource limits applied")
 		fmt.Println()
 
-		noDebugPort = true
+		useDebugProxy = true
+		proxyFilterLevel = "strict"
 		cfg.Security.MemoryLimit = "2g"    // Stricter limit
 		cfg.Security.PidsLimit = 256       // Stricter limit
 	}
@@ -98,6 +109,14 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Apply debug port setting
 	if noDebugPort {
 		cfg.Security.DisableDebugPort = true
+		useDebugProxy = false // Can't use proxy if port is disabled
+	}
+
+	// Apply debug proxy settings
+	if useDebugProxy {
+		cfg.Security.UseDebugProxy = true
+		cfg.Security.DebugProxyFilterLevel = proxyFilterLevel
+		cfg.Security.DisableDebugPort = false // Need port for proxy
 	}
 
 	// Create container manager
@@ -248,6 +267,49 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Println("No data can be exfiltrated from this container.")
 	}
 
+	// Setup debug proxy if enabled
+	if useDebugProxy && !noDebugPort {
+		fmt.Println("\nSetting up debug proxy...")
+		proxyMgr := container.NewProxyManager(cfg)
+
+		// Check if proxy image exists
+		if !proxyMgr.ProxyImageExists(ctx) {
+			fmt.Println("Debug proxy image not found.")
+			fmt.Println("Build it with: devkit build --proxy")
+			fmt.Println("Continuing without proxy...")
+			useDebugProxy = false
+		} else {
+			// Create network and connect dev container
+			if err := proxyMgr.CreateNetwork(ctx); err != nil {
+				fmt.Printf("Warning: failed to create proxy network: %v\n", err)
+				useDebugProxy = false
+			} else {
+				// Connect dev container to internal network
+				if err := proxyMgr.ConnectContainerToNetwork(ctx, cfg.ContainerName()); err != nil {
+					fmt.Printf("Warning: failed to connect container to network: %v\n", err)
+					useDebugProxy = false
+				} else {
+					// Remove existing proxy if any
+					proxyMgr.StopProxyContainer(ctx)
+					proxyMgr.RemoveProxyContainer(ctx)
+
+					// Create and start proxy
+					if err := proxyMgr.CreateProxyContainer(ctx, "devkit/debugproxy:latest", cfg.ContainerName(), proxyFilterLevel); err != nil {
+						fmt.Printf("Warning: failed to create proxy container: %v\n", err)
+						useDebugProxy = false
+					} else {
+						if err := proxyMgr.StartProxyContainer(ctx); err != nil {
+							fmt.Printf("Warning: failed to start proxy container: %v\n", err)
+							useDebugProxy = false
+						} else {
+							fmt.Printf("Debug proxy started (filter level: %s)\n", proxyFilterLevel)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	fmt.Println("\nContainer started successfully!")
 	fmt.Printf("\nSSH connection available at: localhost:%d\n", cfg.SSH.Port)
 
@@ -256,6 +318,11 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	if noDebugPort || cfg.Security.DisableDebugPort {
 		fmt.Println("SECURITY: Debug port is DISABLED")
+	}
+	if useDebugProxy {
+		fmt.Println("SECURITY: Debug traffic routed through filtering proxy")
+		fmt.Printf("          Filter level: %s\n", proxyFilterLevel)
+		fmt.Println("          Audit log: podman logs " + cfg.ContainerName() + "-debugproxy")
 	}
 
 	fmt.Println("\nConnect with VS Code:")
