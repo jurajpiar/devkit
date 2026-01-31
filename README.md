@@ -49,6 +49,23 @@ devkit shell
 devkit stop
 ```
 
+## Security Modes
+
+```bash
+# Standard mode (localhost blocked, all hardening enabled)
+devkit start
+
+# Paranoid mode - for untrusted code
+# Automatically air-gaps after clone/install
+devkit start --paranoid
+
+# Offline mode - no network at all
+devkit start --offline
+
+# Disable debug port only
+devkit start --no-debug-port
+```
+
 ## Commands
 
 | Command | Description |

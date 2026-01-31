@@ -63,6 +63,8 @@ type SecurityConfig struct {
 	DropAllCapabilities bool `yaml:"drop_all_capabilities" mapstructure:"drop_all_capabilities"`
 	// NoNewPrivileges prevents privilege escalation (default true)
 	NoNewPrivileges bool `yaml:"no_new_privileges" mapstructure:"no_new_privileges"`
+	// DisableDebugPort prevents exposure of debug ports like Node.js 9229 (default false)
+	DisableDebugPort bool `yaml:"disable_debug_port" mapstructure:"disable_debug_port"`
 }
 
 // DefaultConfig returns a config with sensible defaults
@@ -92,6 +94,7 @@ func DefaultConfig() *Config {
 			ReadOnlyRootfs:      true,
 			DropAllCapabilities: true,
 			NoNewPrivileges:     true,
+			DisableDebugPort:    false, // Enable by default for dev convenience
 		},
 	}
 }
@@ -224,6 +227,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.read_only_rootfs", true)
 	v.SetDefault("security.drop_all_capabilities", true)
 	v.SetDefault("security.no_new_privileges", true)
+	v.SetDefault("security.disable_debug_port", false)
 }
 
 // ContainerName returns the container name for this project

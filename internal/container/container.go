@@ -97,8 +97,8 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 	// SSH port - bind to localhost only, not all interfaces
 	args = append(args, "--publish", fmt.Sprintf("127.0.0.1:%d:22", m.config.SSH.Port))
 
-	// Add debug port for Node.js - localhost only
-	if m.config.Project.Type == "nodejs" {
+	// Add debug port for Node.js - localhost only (unless disabled)
+	if m.config.Project.Type == "nodejs" && !m.config.Security.DisableDebugPort {
 		args = append(args, "--publish", "127.0.0.1:9229:9229")
 	}
 
@@ -369,6 +369,39 @@ func (m *Manager) CopyToContainer(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to copy files: %w", err)
 	}
+
+	return nil
+}
+
+// Commit saves the current container state as a new image
+// This is used for paranoid mode to preserve installed dependencies before air-gapping
+func (m *Manager) Commit(ctx context.Context, imageName string) (string, error) {
+	containerName := m.config.ContainerName()
+
+	// Commit with security-focused options
+	args := []string{
+		"commit",
+		"--change", "CMD [\"sudo\", \"/usr/sbin/sshd\", \"-D\", \"-e\"]",
+		containerName,
+		imageName,
+	}
+
+	output, err := m.runPodman(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("failed to commit container: %w", err)
+	}
+
+	return strings.TrimSpace(output), nil
+}
+
+// RemoveVolumes removes the named volumes associated with this container
+func (m *Manager) RemoveVolumes(ctx context.Context) error {
+	containerName := m.config.ContainerName()
+
+	// Remove workspace volume
+	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-workspace")
+	// Remove home volume
+	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-home")
 
 	return nil
 }

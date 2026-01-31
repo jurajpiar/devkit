@@ -24,10 +24,18 @@ This command will:
   4. Setup SSH keys for VS Code connection
   5. Install project dependencies
 
+Security Modes:
+  --paranoid    Maximum security for untrusted code:
+                - Network enabled only during clone/install
+                - Automatically air-gaps after setup
+                - Disables debug port
+                - Stricter resource limits
+
 Examples:
   devkit start              # Start container from devkit.yaml
   devkit start --shell      # Start and open a shell
-  devkit start --no-deps    # Start without installing dependencies`,
+  devkit start --paranoid   # Maximum security for untrusted code
+  devkit start --offline    # Start with no network access`,
 	RunE: runStart,
 }
 
@@ -38,6 +46,11 @@ func init() {
 	startCmd.Flags().Bool("no-deps", false, "Skip dependency installation")
 	startCmd.Flags().Bool("no-clone", false, "Skip git clone (use existing workspace)")
 	startCmd.Flags().Bool("rebuild", false, "Remove existing container and create new one")
+
+	// Security flags
+	startCmd.Flags().Bool("paranoid", false, "Maximum security: air-gap after setup, disable debug port")
+	startCmd.Flags().Bool("offline", false, "Start with no network access (network_mode=none)")
+	startCmd.Flags().Bool("no-debug-port", false, "Disable debug port exposure")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -57,6 +70,34 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w\n\nRun 'devkit init' to create a configuration file", err)
+	}
+
+	// Parse security flags
+	paranoid, _ := cmd.Flags().GetBool("paranoid")
+	offline, _ := cmd.Flags().GetBool("offline")
+	noDebugPort, _ := cmd.Flags().GetBool("no-debug-port")
+
+	// Apply paranoid mode settings
+	if paranoid {
+		fmt.Println("=== PARANOID MODE ENABLED ===")
+		fmt.Println("- Network will be disabled after setup")
+		fmt.Println("- Debug port disabled")
+		fmt.Println("- Stricter resource limits applied")
+		fmt.Println()
+
+		noDebugPort = true
+		cfg.Security.MemoryLimit = "2g"    // Stricter limit
+		cfg.Security.PidsLimit = 256       // Stricter limit
+	}
+
+	// Apply offline mode
+	if offline {
+		cfg.Security.NetworkMode = "none"
+	}
+
+	// Apply debug port setting
+	if noDebugPort {
+		cfg.Security.DisableDebugPort = true
 	}
 
 	// Create container manager
@@ -105,6 +146,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("image %s not found\n\nRun 'devkit build' first to build the container image", imageName)
 	}
 
+	// For paranoid mode, we need a two-phase startup:
+	// Phase 1: Network enabled for clone/install
+	// Phase 2: Recreate container with network disabled
+	needsNetworkSetup := paranoid && !offline && cfg.Source.Method == "git"
+
+	if needsNetworkSetup {
+		// Phase 1: Create with restricted network for setup
+		fmt.Println("[Phase 1/2] Starting with network for initial setup...")
+		cfg.Security.NetworkMode = "restricted"
+	}
+
 	// Create container if it doesn't exist
 	if !exists {
 		fmt.Printf("Creating container %s...\n", cfg.ContainerName())
@@ -149,8 +201,63 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Phase 2: For paranoid mode, recreate container with network disabled
+	if needsNetworkSetup {
+		fmt.Println("\n[Phase 2/2] Air-gapping container (disabling network)...")
+
+		// Stop current container
+		if err := mgr.Stop(ctx); err != nil {
+			return fmt.Errorf("failed to stop container for air-gap: %w", err)
+		}
+
+		// Commit the container state to preserve installed deps
+		fmt.Println("Saving container state...")
+		committedImage, err := mgr.Commit(ctx, cfg.ImageName()+"-airgapped")
+		if err != nil {
+			return fmt.Errorf("failed to save container state: %w", err)
+		}
+
+		// Remove old container
+		if err := mgr.Remove(ctx); err != nil {
+			return fmt.Errorf("failed to remove container: %w", err)
+		}
+
+		// Recreate with network disabled
+		cfg.Security.NetworkMode = "none"
+		mgr = container.New(cfg)
+
+		fmt.Println("Creating air-gapped container...")
+		_, err = mgr.Create(ctx, committedImage)
+		if err != nil {
+			return fmt.Errorf("failed to create air-gapped container: %w", err)
+		}
+
+		// Start the air-gapped container
+		if err := mgr.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start air-gapped container: %w", err)
+		}
+
+		// Re-setup SSH keys in the new container
+		time.Sleep(2 * time.Second)
+		if err := mgr.SetupSSHKey(ctx); err != nil {
+			fmt.Printf("Warning: failed to setup SSH key: %v\n", err)
+		}
+
+		fmt.Println("\n=== CONTAINER IS NOW AIR-GAPPED ===")
+		fmt.Println("Network access is completely disabled.")
+		fmt.Println("No data can be exfiltrated from this container.")
+	}
+
 	fmt.Println("\nContainer started successfully!")
 	fmt.Printf("\nSSH connection available at: localhost:%d\n", cfg.SSH.Port)
+
+	if cfg.Security.NetworkMode == "none" {
+		fmt.Println("\nSECURITY: Network is DISABLED (air-gapped mode)")
+	}
+	if noDebugPort || cfg.Security.DisableDebugPort {
+		fmt.Println("SECURITY: Debug port is DISABLED")
+	}
+
 	fmt.Println("\nConnect with VS Code:")
 	fmt.Printf("  1. Install 'Remote - SSH' extension\n")
 	fmt.Printf("  2. Connect to: ssh -p %d developer@localhost\n", cfg.SSH.Port)
