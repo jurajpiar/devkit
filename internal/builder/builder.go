@@ -34,10 +34,11 @@ ARG BASE_IMAGE={{.Runtime}}
 
 FROM ${BASE_IMAGE}
 
-# Install essential tools and SSH server
+# Install essential tools, SSH server and client
 {{if .IsAlpine}}
 RUN apk add --no-cache \
     openssh-server \
+    openssh-client \
     git \
     curl \
     bash \
@@ -48,6 +49,7 @@ RUN apk add --no-cache \
 {{else}}
 RUN apt-get update && apt-get install -y \
     openssh-server \
+    openssh-client \
     git \
     curl \
     sudo \
