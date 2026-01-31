@@ -156,7 +156,8 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		if !m.config.Features.AllowCopy {
 			return "", fmt.Errorf("copy method requires features.allow_copy to be enabled")
 		}
-		// Copy will be handled after container creation
+		// Copy method uses a workspace volume, files are copied after start
+		// This is the most secure method - container has isolated copy, host never touched
 	}
 
 	// Set environment variables
@@ -275,6 +276,31 @@ func (m *Manager) FixNodeModulesPermissions(ctx context.Context) {
 	// The node_modules volume may be created with root ownership
 	// Fix it so developer user can write to it
 	m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/workspace/node_modules")
+}
+
+// CopySourceToContainer copies the current directory into the container's workspace
+// This is the most secure method - container gets isolated copy, host is never touched again
+func (m *Manager) CopySourceToContainer(ctx context.Context) error {
+	containerName := m.config.ContainerName()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Use podman cp to copy current directory contents to container
+	// The trailing /. copies contents, not the directory itself
+	_, err = m.runPodman(ctx, "cp", cwd+"/.", containerName+":/home/developer/workspace/")
+	if err != nil {
+		return fmt.Errorf("failed to copy files to container: %w", err)
+	}
+
+	// Fix ownership so developer user can access the files
+	_, err = m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/workspace")
+	if err != nil {
+		return fmt.Errorf("failed to fix workspace ownership: %w", err)
+	}
+
+	return nil
 }
 
 // InstallDependencies installs project dependencies

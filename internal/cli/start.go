@@ -202,13 +202,19 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Println("You may need to manually add your SSH key to the container")
 	}
 
-	// Clone repository
+	// Clone repository (git method) or copy files (copy method)
 	noClone, _ := cmd.Flags().GetBool("no-clone")
 	if cfg.Source.Method == "git" && cfg.Source.Repo != "" && !noClone {
 		fmt.Printf("Cloning repository %s...\n", cfg.Source.Repo)
 		if err := mgr.CloneRepo(ctx); err != nil {
 			fmt.Printf("Warning: failed to clone repository: %v\n", err)
 		}
+	} else if cfg.Source.Method == "copy" {
+		fmt.Println("Copying source files to container...")
+		if err := mgr.CopySourceToContainer(ctx); err != nil {
+			return fmt.Errorf("failed to copy source files: %w", err)
+		}
+		fmt.Println("Source files copied successfully (container has isolated copy)")
 	}
 
 	// Fix node_modules permissions for mount method
