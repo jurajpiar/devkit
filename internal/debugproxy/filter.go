@@ -235,32 +235,48 @@ var dangerousPatterns = []struct {
 	{regexp.MustCompile(`child_process`), "child_process reference blocked"},
 	{regexp.MustCompile(`\bexec\s*\(`), "exec() blocked"},
 	{regexp.MustCompile(`\bexecSync\s*\(`), "execSync() blocked"},
+	{regexp.MustCompile(`\bexecFile\s*\(`), "execFile() blocked"},
 	{regexp.MustCompile(`\bspawn\s*\(`), "spawn() blocked"},
 	{regexp.MustCompile(`\bspawnSync\s*\(`), "spawnSync() blocked"},
 	{regexp.MustCompile(`\bfork\s*\(`), "fork() blocked"},
 
-	// Process/system access
+	// Process/system access - including bracket notation and alternative methods
 	{regexp.MustCompile(`process\.binding\s*\(`), "process.binding blocked"},
+	{regexp.MustCompile(`process\s*\[\s*['"]binding['"]\s*\]`), "process.binding blocked"},
+	{regexp.MustCompile(`process\._linkedBinding`), "process._linkedBinding blocked"},
 	{regexp.MustCompile(`process\.dlopen\s*\(`), "process.dlopen blocked"},
 	{regexp.MustCompile(`process\.kill\s*\(`), "process.kill blocked"},
 	{regexp.MustCompile(`process\.exit\s*\(`), "process.exit blocked"},
+	{regexp.MustCompile(`process\.mainModule`), "process.mainModule blocked"},
 
-	// File system writes
+	// File system - both read and write operations (reads can leak sensitive data)
+	{regexp.MustCompile(`fs\.readFile`), "fs.readFile blocked"},
+	{regexp.MustCompile(`fs\.readFileSync`), "fs.readFileSync blocked"},
+	{regexp.MustCompile(`fs\.readdir`), "fs.readdir blocked"},
 	{regexp.MustCompile(`fs\.writeFile`), "fs.writeFile blocked"},
 	{regexp.MustCompile(`fs\.writeFileSync`), "fs.writeFileSync blocked"},
 	{regexp.MustCompile(`fs\.appendFile`), "fs.appendFile blocked"},
 	{regexp.MustCompile(`fs\.unlink`), "fs.unlink blocked"},
 	{regexp.MustCompile(`fs\.rmdir`), "fs.rmdir blocked"},
+	{regexp.MustCompile(`fs\.rmSync`), "fs.rmSync blocked"},
 	{regexp.MustCompile(`fs\.rm\s*\(`), "fs.rm blocked"},
 	{regexp.MustCompile(`fs\.rename`), "fs.rename blocked"},
 	{regexp.MustCompile(`fs\.chmod`), "fs.chmod blocked"},
 	{regexp.MustCompile(`fs\.chown`), "fs.chown blocked"},
+	{regexp.MustCompile(`fs\.symlink`), "fs.symlink blocked"},
+	{regexp.MustCompile(`fs\.link`), "fs.link blocked"},
+	{regexp.MustCompile(`fs\.mkdir`), "fs.mkdir blocked"},
+	{regexp.MustCompile(`require\s*\(\s*['"]fs['"]\s*\)`), "fs module blocked"},
+	{regexp.MustCompile(`require\s*\(\s*['"]node:fs['"]\s*\)`), "fs module blocked"},
 
-	// Network operations
+	// Network operations - including DNS for exfiltration
 	{regexp.MustCompile(`require\s*\(\s*['"]https?['"]\s*\)`), "http/https module blocked"},
 	{regexp.MustCompile(`require\s*\(\s*['"]node:https?['"]\s*\)`), "http/https module blocked"},
 	{regexp.MustCompile(`require\s*\(\s*['"]net['"]\s*\)`), "net module blocked"},
+	{regexp.MustCompile(`require\s*\(\s*['"]node:net['"]\s*\)`), "net module blocked"},
 	{regexp.MustCompile(`require\s*\(\s*['"]dgram['"]\s*\)`), "dgram module blocked"},
+	{regexp.MustCompile(`require\s*\(\s*['"]dns['"]\s*\)`), "dns module blocked"},
+	{regexp.MustCompile(`require\s*\(\s*['"]node:dns['"]\s*\)`), "dns module blocked"},
 	{regexp.MustCompile(`fetch\s*\(`), "fetch() blocked"},
 	{regexp.MustCompile(`XMLHttpRequest`), "XMLHttpRequest blocked"},
 	{regexp.MustCompile(`WebSocket`), "WebSocket blocked"},
@@ -269,18 +285,36 @@ var dangerousPatterns = []struct {
 	{regexp.MustCompile(`\beval\s*\(`), "eval() blocked"},
 	{regexp.MustCompile(`\bFunction\s*\(`), "Function constructor blocked"},
 	{regexp.MustCompile(`new\s+Function\s*\(`), "Function constructor blocked"},
+	{regexp.MustCompile(`\.constructor\s*\(\s*['"]`), "constructor string execution blocked"},
+	{regexp.MustCompile(`\.constructor\s*\(\s*` + "`"), "constructor template execution blocked"},
 	{regexp.MustCompile(`vm\.runIn`), "vm module blocked"},
 	{regexp.MustCompile(`require\s*\(\s*['"]vm['"]\s*\)`), "vm module blocked"},
+	{regexp.MustCompile(`setTimeout\s*\(\s*['"]`), "setTimeout with string blocked"},
+	{regexp.MustCompile(`setInterval\s*\(\s*['"]`), "setInterval with string blocked"},
 
 	// Native addons
 	{regexp.MustCompile(`\.node['"]\s*\)`), "native addon loading blocked"},
 	{regexp.MustCompile(`process\.dlopen`), "dlopen blocked"},
 
-	// Obfuscation attempts
+	// Obfuscation attempts - comprehensive
 	{regexp.MustCompile(`\\x[0-9a-fA-F]{2}`), "hex escape sequences blocked"},
+	{regexp.MustCompile(`\\u[0-9a-fA-F]{4}`), "unicode escape sequences blocked"},
 	{regexp.MustCompile(`\\u\{[0-9a-fA-F]+\}`), "unicode escape sequences blocked"},
 	{regexp.MustCompile(`atob\s*\(`), "base64 decode blocked"},
+	{regexp.MustCompile(`btoa\s*\(`), "base64 encode blocked"},
 	{regexp.MustCompile(`Buffer\.from\s*\([^)]+,\s*['"]base64['"]\)`), "base64 decode blocked"},
+	{regexp.MustCompile(`String\.fromCharCode`), "fromCharCode blocked"},
+	{regexp.MustCompile(`String\.fromCodePoint`), "fromCodePoint blocked"},
+
+	// String manipulation that could hide payloads
+	{regexp.MustCompile(`\['child'\s*\+`), "string concatenation obfuscation blocked"},
+	{regexp.MustCompile(`'child'\s*\+\s*'_'\s*\+\s*'process'`), "string concatenation obfuscation blocked"},
+	{regexp.MustCompile(`\[\s*['"]child['"]\s*,\s*['"]process['"]\s*\]\.join`), "array join obfuscation blocked"},
+	{regexp.MustCompile(`\.join\s*\(\s*['"]_['"]\s*\)`), "suspicious join pattern blocked"},
+
+	// Reflect/Proxy abuse
+	{regexp.MustCompile(`Reflect\.apply`), "Reflect.apply blocked"},
+	{regexp.MustCompile(`Reflect\.construct`), "Reflect.construct blocked"},
 }
 
 // Additional string patterns (case-insensitive simple contains)
@@ -289,12 +323,21 @@ var dangerousStrings = []struct {
 	reason  string
 }{
 	{"child_process", "child_process reference blocked"},
+	{"child'}_${'process", "template obfuscation blocked"}, // Template literal obfuscation
 	{"shelljs", "shelljs blocked"},
 	{"execa", "execa blocked"},
 	{"/bin/sh", "shell path blocked"},
 	{"/bin/bash", "shell path blocked"},
+	{"bash -c", "shell command blocked"},
+	{"sh -c", "shell command blocked"},
 	{"cmd.exe", "cmd.exe blocked"},
+	{"cmd /c", "cmd command blocked"},
 	{"powershell", "powershell blocked"},
+	{"; rm ", "shell injection blocked"},
+	{"| nc ", "shell injection blocked"},
+	{"$(", "command substitution blocked"},
+	{"`id`", "backtick execution blocked"},
+	{"`whoami`", "backtick execution blocked"},
 }
 
 // checkDangerousPatterns checks if an expression contains dangerous patterns
