@@ -208,6 +208,19 @@ func (m *Manager) Exec(ctx context.Context, command ...string) (string, error) {
 	return output, nil
 }
 
+// ExecAsUser executes a command inside the container as a specific user
+func (m *Manager) ExecAsUser(ctx context.Context, user string, command ...string) (string, error) {
+	containerName := m.config.ContainerName()
+
+	args := append([]string{"exec", "-u", user, containerName}, command...)
+	output, err := m.runPodman(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("failed to exec command: %w", err)
+	}
+
+	return output, nil
+}
+
 // ExecInteractive runs an interactive command in the container
 func (m *Manager) ExecInteractive(ctx context.Context, command ...string) error {
 	containerName := m.config.ContainerName()
@@ -226,11 +239,14 @@ func (m *Manager) CloneRepo(ctx context.Context) error {
 		return fmt.Errorf("no git repository configured")
 	}
 
-	// Clone the repository
+	// First, ensure workspace directory has proper ownership (fix for user namespace issues)
+	_, _ = m.Exec(ctx, "bash", "-c", "chown -R developer:developer /home/developer/workspace 2>/dev/null || true")
+
+	// Clone the repository (run as developer user for proper permissions)
 	cloneCmd := fmt.Sprintf("git clone --branch %s %s /home/developer/workspace",
 		m.config.Source.Branch, m.config.Source.Repo)
 
-	_, err := m.Exec(ctx, "bash", "-c", cloneCmd)
+	_, err := m.ExecAsUser(ctx, "developer", "bash", "-c", cloneCmd)
 	if err != nil {
 		return fmt.Errorf("failed to clone repository: %w", err)
 	}
@@ -244,7 +260,8 @@ func (m *Manager) InstallDependencies(ctx context.Context, installCmd string) er
 		return nil
 	}
 
-	_, err := m.Exec(ctx, "bash", "-c", fmt.Sprintf("cd /home/developer/workspace && %s", installCmd))
+	// Run as developer user for proper permissions
+	_, err := m.ExecAsUser(ctx, "developer", "bash", "-c", fmt.Sprintf("cd /home/developer/workspace && %s", installCmd))
 	if err != nil {
 		return fmt.Errorf("failed to install dependencies: %w", err)
 	}
