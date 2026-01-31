@@ -145,6 +145,9 @@ func (m *Manager) Create(ctx context.Context, imageName string) (string, error) 
 		// Mount current directory as workspace
 		cwd, _ := os.Getwd()
 		args = append(args, "--volume", fmt.Sprintf("%s:/home/developer/workspace:rw", cwd))
+		// Use separate volume for node_modules to avoid permission issues
+		// This is a common pattern - keeps node_modules container-local
+		args = append(args, "--volume", fmt.Sprintf("%s-node_modules:/home/developer/workspace/node_modules:rw", m.config.ContainerName()))
 	case "copy":
 		if !m.config.Features.AllowCopy {
 			return "", fmt.Errorf("copy method requires features.allow_copy to be enabled")
@@ -467,6 +470,7 @@ func (m *Manager) RemoveVolumes(ctx context.Context) error {
 	// Remove volumes (if they exist)
 	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-workspace")
 	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-ssh")
+	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-node_modules")
 
 	return nil
 }
