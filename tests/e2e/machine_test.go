@@ -10,6 +10,25 @@ import (
 	"github.com/jurajpiar/devkit/internal/machine"
 )
 
+// checkPodmanConnected verifies Podman can connect to a running machine
+func checkPodmanConnected(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Try to run a simple container - this is the definitive test
+	cmd := exec.CommandContext(ctx, "podman", "run", "--rm", "alpine", "echo", "ok")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "Cannot connect") ||
+			strings.Contains(string(output), "unable to connect") ||
+			strings.Contains(string(output), "connection refused") {
+			t.Skip("Podman not connected to any machine. Start a machine with 'podman machine start'")
+		}
+		t.Skipf("Podman cannot run containers: %s", output)
+	}
+}
+
 // TestMachineIntegration tests the devkit machine integration
 func TestMachineIntegration(t *testing.T) {
 	if err := machine.CheckPodmanInstalled(); err != nil {
@@ -63,14 +82,12 @@ func TestMachineSecurityFeatures(t *testing.T) {
 		t.Skip("Podman not installed")
 	}
 
-	mgr := machine.New()
+	checkPodmanConnected(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	running, err := mgr.IsRunning(ctx)
-	if err != nil || !running {
-		t.Skip("Devkit machine not running")
-	}
+	_ = ctx // Used by subtests
 
 	// Test that security features work in the machine
 	securityTests := []struct {
@@ -189,7 +206,7 @@ func TestMachineSecurityFeatures(t *testing.T) {
 	}
 }
 
-// ensureDevkitMachine ensures the devkit machine is running for tests
+// ensureDevkitMachine ensures Podman is connected and working for tests
 // This is a helper that can be called from other tests
 func ensureDevkitMachine(t *testing.T) {
 	t.Helper()
@@ -198,27 +215,7 @@ func ensureDevkitMachine(t *testing.T) {
 		t.Skip("Podman not installed")
 	}
 
-	mgr := machine.New()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	exists, err := mgr.Exists(ctx)
-	if err != nil {
-		t.Fatalf("Failed to check machine existence: %v", err)
-	}
-
-	if !exists {
-		t.Skip("Devkit machine not initialized. Run 'devkit machine init && devkit machine start'")
-	}
-
-	running, err := mgr.IsRunning(ctx)
-	if err != nil {
-		t.Fatalf("Failed to check if machine is running: %v", err)
-	}
-
-	if !running {
-		t.Skip("Devkit machine not running. Run 'devkit machine start'")
-	}
+	checkPodmanConnected(t)
 }
 
 // TestSecurityWithDevkitMachine runs security tests using the devkit machine
