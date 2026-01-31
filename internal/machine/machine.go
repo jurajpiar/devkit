@@ -175,6 +175,22 @@ func (m *Manager) Start(ctx context.Context) error {
 		return nil // Already running
 	}
 
+	// Check if another machine is running (Podman only allows one VM at a time)
+	otherRunning, otherName, err := m.GetRunningMachine(ctx)
+	if err != nil {
+		return err
+	}
+
+	if otherRunning && otherName != MachineName {
+		return fmt.Errorf("another Podman machine '%s' is already running.\n"+
+			"Podman only allows one VM at a time.\n"+
+			"Options:\n"+
+			"  1. Stop the other machine: podman machine stop %s\n"+
+			"  2. Use the existing machine: devkit machine use-existing\n"+
+			"  3. Stop all machines: devkit machine stop-all",
+			otherName, otherName)
+	}
+
 	_, err = m.runPodman(ctx, "machine", "start", MachineName)
 	if err != nil {
 		return fmt.Errorf("failed to start machine: %w", err)
@@ -182,6 +198,56 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Wait for machine to be ready
 	return m.waitForReady(ctx, 60*time.Second)
+}
+
+// GetRunningMachine returns the name of the currently running machine, if any
+func (m *Manager) GetRunningMachine(ctx context.Context) (bool, string, error) {
+	machines, err := m.List(ctx)
+	if err != nil {
+		return false, "", err
+	}
+
+	for _, machine := range machines {
+		if machine.Running {
+			return true, machine.Name, nil
+		}
+	}
+
+	return false, "", nil
+}
+
+// StopAll stops all running Podman machines
+func (m *Manager) StopAll(ctx context.Context) error {
+	machines, err := m.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, machine := range machines {
+		if machine.Running {
+			fmt.Printf("Stopping machine: %s\n", machine.Name)
+			_, err := m.runPodman(ctx, "machine", "stop", machine.Name)
+			if err != nil {
+				return fmt.Errorf("failed to stop machine %s: %w", machine.Name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// UseExisting checks if an existing running machine can be used
+func (m *Manager) UseExisting(ctx context.Context) (string, error) {
+	running, name, err := m.GetRunningMachine(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	if !running {
+		return "", fmt.Errorf("no Podman machine is currently running")
+	}
+
+	return name, nil
 }
 
 // Stop stops the devkit machine

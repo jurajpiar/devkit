@@ -59,6 +59,21 @@ var machineSSHCmd = &cobra.Command{
 	RunE:  runMachineSSH,
 }
 
+var machineStopAllCmd = &cobra.Command{
+	Use:   "stop-all",
+	Short: "Stop all running Podman machines",
+	Long:  `Stop all running Podman machines. Useful before starting the devkit machine.`,
+	RunE:  runMachineStopAll,
+}
+
+var machineUseExistingCmd = &cobra.Command{
+	Use:   "use-existing",
+	Short: "Use an existing running Podman machine",
+	Long: `Use an existing running Podman machine instead of the dedicated devkit machine.
+This is useful if you already have a Podman machine running and don't want to stop it.`,
+	RunE: runMachineUseExisting,
+}
+
 // Machine init flags
 var (
 	machineCPUs     int
@@ -77,6 +92,8 @@ func init() {
 	machineCmd.AddCommand(machineRemoveCmd)
 	machineCmd.AddCommand(machineStatusCmd)
 	machineCmd.AddCommand(machineSSHCmd)
+	machineCmd.AddCommand(machineStopAllCmd)
+	machineCmd.AddCommand(machineUseExistingCmd)
 
 	// Init flags
 	machineInitCmd.Flags().IntVar(&machineCPUs, "cpus", machine.DefaultCPUs, "Number of CPUs")
@@ -332,6 +349,50 @@ func runMachineSSH(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(output)
+
+	return nil
+}
+
+func runMachineStopAll(cmd *cobra.Command, args []string) error {
+	if err := machine.CheckPodmanInstalled(); err != nil {
+		return fmt.Errorf("podman is required: %w", err)
+	}
+
+	mgr := machine.New()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	fmt.Println("Stopping all Podman machines...")
+
+	if err := mgr.StopAll(ctx); err != nil {
+		return fmt.Errorf("failed to stop machines: %w", err)
+	}
+
+	fmt.Println("All machines stopped.")
+	fmt.Println()
+	fmt.Println("You can now start the devkit machine with: devkit machine start")
+
+	return nil
+}
+
+func runMachineUseExisting(cmd *cobra.Command, args []string) error {
+	if err := machine.CheckPodmanInstalled(); err != nil {
+		return fmt.Errorf("podman is required: %w", err)
+	}
+
+	mgr := machine.New()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	name, err := mgr.UseExisting(ctx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Using existing Podman machine: %s\n", name)
+	fmt.Println()
+	fmt.Println("Note: This machine may not have the same configuration as a dedicated devkit machine.")
+	fmt.Println("For full isolation, use 'devkit machine stop-all' then 'devkit machine start'.")
 
 	return nil
 }
