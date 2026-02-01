@@ -127,13 +127,22 @@ The primary adversary is **malicious code executing inside the container** that 
    - Container state committed (preserves installed deps)
 
 2. **Phase 2 - Air-gapped** (network disabled):
-   - Container recreated with `--network=none`
+   - **Podman backend:** Container recreated with `--network=none`
+   - **Lima backend:** Container uses bridge network with iptables rules blocking outgoing traffic
    - Debug port disabled
    - Stricter resource limits (2GB RAM, 256 PIDs)
-   - **Zero network access** - no exfiltration possible
+   - **Zero outbound network access** - no exfiltration possible
+
+**Lima-specific implementation:**
+The Lima backend cannot use `--network=none` because it would break SSH port forwarding needed for IDE connection. Instead, iptables rules are applied to block all outgoing traffic while preserving incoming SSH:
+```bash
+iptables -A OUTPUT -o lo -j ACCEPT           # Allow loopback
+iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT  # Allow responses
+iptables -A OUTPUT -j DROP                   # Block all outgoing
+```
 
 **Additional protections over default:**
-- Complete network isolation after setup
+- Complete network isolation after setup (outbound blocked)
 - Debug port disabled (eliminates local RCE vector)
 - Stricter resource limits
 - DNS blocked (no DNS exfiltration)
@@ -282,7 +291,14 @@ Container isolation depends on kernel features (namespaces, seccomp, cgroups). H
 - User's running processes
 - User's network connections
 
-**Additional mitigation:** Run devkit inside a VM for hardware-level isolation.
+**Additional mitigation:** Use Lima backend with per-project VMs for hypervisor-level isolation:
+```yaml
+runtime:
+  backend: lima
+  lima:
+    per_project_vm: true
+```
+This provides true double isolation - even if a container escape occurs, the attacker is still confined to a dedicated VM with no access to other projects or the host system.
 
 ### 2. Resource Exhaustion (DoS)
 
@@ -590,17 +606,17 @@ features:
 
 ## Comparison with Alternatives
 
-| Feature | Devkit (default) | Devkit (proxy) | Devkit (paranoid) | Docker (default) | VM |
-|---------|------------------|----------------|-------------------|------------------|-----|
+| Feature | Devkit (Podman) | Devkit (Lima) | Devkit (paranoid) | Docker (default) | VM |
+|---------|-----------------|---------------|-------------------|------------------|-----|
 | Host filesystem isolation | ✅ Full | ✅ Full | ✅ Full | ❌ Often mounted | ✅ Full |
 | Localhost network isolation | ✅ Blocked | ✅ Blocked | ✅ Blocked | ❌ Accessible | ✅ Separate |
 | Outbound network isolation | ❌ Allowed | ❌ Allowed | ✅ Blocked | ❌ Allowed | Configurable |
 | Privilege escalation prevention | ✅ Hardened | ✅ Hardened | ✅ Hardened | ❌ Default caps | ✅ Separate |
-| Debug port security | ⚠️ Localhost | ✅ Filtered | ✅ Strict filter | ⚠️ Varies | N/A |
-| Debug audit logging | ❌ None | ✅ Full | ✅ Full | ❌ None | N/A |
-| Kernel-level isolation | ⚠️ Shared | ⚠️ Shared | ⚠️ Shared | ⚠️ Shared | ✅ Separate |
-| Performance | ✅ Native | ✅ Native | ✅ Native | ✅ Native | ⚠️ Overhead |
+| Debug port security | ⚠️ Localhost | ⚠️ Localhost | ✅ Disabled | ⚠️ Varies | N/A |
+| Kernel-level isolation | ⚠️ Shared | ✅ Per-project VM | ✅ Per-project VM | ⚠️ Shared | ✅ Separate |
+| Performance | ✅ Native | ⚠️ VM overhead | ⚠️ VM overhead | ✅ Native | ⚠️ Overhead |
 | Setup complexity | ✅ Simple | ✅ Simple | ✅ Simple | ⚠️ Manual hardening | ⚠️ Complex |
+| Container escape impact | ⚠️ User access | ✅ VM confined | ✅ VM confined | ⚠️ User access | ✅ Separate |
 
 ---
 
@@ -677,3 +693,8 @@ If you discover a security vulnerability in devkit, please report it responsibly
 | 0.2.0 | Added `--paranoid` mode with automatic air-gapping |
 | 0.2.0 | Added `--offline` and `--no-debug-port` flags |
 | 0.2.0 | Debug port disabled in paranoid mode |
+| 0.3.0 | Multi-runtime support with Lima backend |
+| 0.3.0 | Per-project VM isolation (hypervisor-level security) |
+| 0.3.0 | Two-phase network setup for paranoid mode |
+| 0.3.0 | TUI init wizard with port availability checking |
+| 0.3.0 | iptables-based air-gapping for Lima (preserves SSH) |

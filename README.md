@@ -18,7 +18,7 @@ Secure local development infrastructure kit that orchestrates rootless container
 
 ## Requirements
 
-- [Podman](https://podman.io/getting-started/installation) (rootless mode)
+- [Podman](https://podman.io/getting-started/installation) (rootless mode) **OR** [Lima](https://lima-vm.io/) (for per-project VM isolation)
 - SSH key in `~/.ssh/` (for VS Code connection)
 - Go 1.22+ (for building from source)
 
@@ -36,8 +36,14 @@ sudo mv devkit /usr/local/bin/
 ## Quick Start
 
 ```bash
-# Initialize a new project
+# Initialize a new project (interactive TUI wizard)
+devkit init
+
+# Or initialize with a git repository
 devkit init git@github.com:user/my-nodejs-app.git
+
+# Or non-interactive mode
+devkit init --no-tui
 
 # Build the container image
 devkit build
@@ -55,6 +61,14 @@ devkit shell
 devkit stop
 ```
 
+The `devkit init` command launches an interactive TUI wizard that guides you through:
+- Project name and type (auto-detected)
+- Runtime backend selection (Podman or Lima)
+- Source method and port configuration
+- Security level settings
+
+Ports are automatically checked for availability.
+
 ## Security Modes
 
 ```bash
@@ -68,7 +82,7 @@ devkit start --total-isolation
 devkit start -t  # short flag
 
 # Paranoid mode - for untrusted code
-# Automatically air-gaps after clone/install
+# Two-phase setup: network enabled for clone/install, then air-gapped
 devkit start --paranoid
 
 # Total isolation + paranoid = maximum security
@@ -79,6 +93,40 @@ devkit start --offline
 
 # Disable debug port only
 devkit start --no-debug-port
+```
+
+### Runtime Backends
+
+Devkit supports multiple container runtime backends:
+
+| Backend | Description | Use Case |
+|---------|-------------|----------|
+| `podman` | Default, fast startup, shared VM | Standard development |
+| `lima` | Per-project VMs, stronger isolation | Untrusted code, security-focused |
+
+```bash
+# Check current runtime status
+devkit runtime status
+
+# Switch backend (updates devkit.yaml)
+devkit runtime switch lima
+devkit runtime switch podman
+
+# Manage VMs directly
+devkit vm list
+devkit vm start <name>
+devkit vm stop <name>
+```
+
+Configure in `devkit.yaml`:
+```yaml
+runtime:
+  backend: lima  # or podman
+  lima:
+    cpus: 4
+    memory_gb: 8
+    disk_gb: 50
+    per_project_vm: true  # Each project gets its own VM
 ```
 
 ### Total Isolation Mode
@@ -107,7 +155,7 @@ devkit stop --stop-machine    # Stops container AND dedicated machine
 
 | Command | Description |
 |---------|-------------|
-| `devkit init [repo-url]` | Initialize devkit.yaml config |
+| `devkit init [repo-url]` | Initialize devkit.yaml config (TUI wizard) |
 | `devkit build` | Build the container image |
 | `devkit start` | Start the development container |
 | `devkit stop` | Stop the container |
@@ -116,6 +164,10 @@ devkit stop --stop-machine    # Stops container AND dedicated machine
 | `devkit forward <port>` | Forward ports via SSH tunnel |
 | `devkit shell` | Open a shell in the container |
 | `devkit list` | List all devkit containers |
+| `devkit runtime status` | Show current runtime backend status |
+| `devkit runtime switch` | Switch between podman/lima backends |
+| `devkit vm list` | List all devkit VMs |
+| `devkit vm start/stop` | Start or stop a VM |
 
 ## Configuration
 
@@ -125,6 +177,14 @@ Devkit uses a `devkit.yaml` file for configuration:
 project:
   name: my-app
   type: nodejs
+
+runtime:
+  backend: podman       # podman | lima
+  lima:
+    cpus: 4
+    memory_gb: 8
+    disk_gb: 50
+    per_project_vm: true
 
 source:
   method: git           # git | copy | mount
@@ -331,7 +391,13 @@ devkit/
 │   ├── config/                  # Configuration parsing
 │   ├── detector/                # Project type detection
 │   ├── builder/                 # Image building
-│   └── container/               # Podman interaction
+│   ├── container/               # Podman container interaction
+│   ├── machine/                 # Podman machine management
+│   └── runtime/                 # Multi-runtime abstraction
+│       ├── runtime.go           # Runtime interfaces
+│       ├── factory.go           # Runtime factory
+│       ├── podman/              # Podman implementation
+│       └── lima/                # Lima implementation
 ├── templates/                   # Base Containerfiles
 ├── go.mod
 └── README.md
@@ -339,6 +405,10 @@ devkit/
 
 ## Roadmap
 
+- [x] Multi-runtime support (Podman and Lima backends)
+- [x] TUI init wizard
+- [x] Per-project VM isolation with Lima
+- [x] Two-phase network setup (paranoid mode)
 - [ ] Support for more languages (Python, Go, Rust)
 - [ ] GUI using raylib
 - [ ] Container persistence options
