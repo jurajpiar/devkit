@@ -45,6 +45,11 @@ RUN apk add --no-cache \
     procps \
     sudo \
     socat \
+    python3 \
+    make \
+    g++ \
+    linux-headers \
+    eudev-dev \
     {{.ExtraPackages}} \
     && mkdir -p /run/sshd \
     && ssh-keygen -A
