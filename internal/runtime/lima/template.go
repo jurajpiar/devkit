@@ -117,11 +117,31 @@ systemctl enable --now buildkitd || true
 		},
 		// Security: No mounts by default
 		Mounts: []Mount{},
-		// Port forwards for SSH (auto-assigned)
+		// Port forwards for VM SSH and container SSH + common dev ports
 		PortForwards: []PortForward{
 			{
 				GuestPort: 22,
-				HostPort:  0, // Auto-assign
+				HostPort:  0, // Auto-assign for VM SSH
+				HostIP:    "127.0.0.1",
+			},
+			{
+				GuestPort: 2222, // Container SSH
+				HostPort:  2222,
+				HostIP:    "127.0.0.1",
+			},
+			{
+				GuestPort: 9229, // Node.js debug
+				HostPort:  9229,
+				HostIP:    "127.0.0.1",
+			},
+			{
+				GuestPort: 3000, // Common dev port
+				HostPort:  3000,
+				HostIP:    "127.0.0.1",
+			},
+			{
+				GuestPort: 8080, // Common dev port
+				HostPort:  8080,
 				HostIP:    "127.0.0.1",
 			},
 		},
