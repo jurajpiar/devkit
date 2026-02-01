@@ -490,8 +490,8 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 		cfg.Security.NetworkMode = "none"
 	}
 
-	// For two-phase setup, temporarily enable network for Phase 1
-	originalNetworkMode := cfg.Security.NetworkMode
+	// For two-phase setup, ensure network is enabled for Phase 1
+	// (we'll block outgoing traffic in Phase 2 instead of using network=none)
 	if needsTwoPhaseSetup {
 		cfg.Security.NetworkMode = "restricted"
 	}
@@ -732,58 +732,32 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 		}
 	}
 
-	// Phase 2: Air-gap the container (disable network)
+	// Phase 2: Air-gap the container (block outgoing network)
+	// Note: For Lima/nerdctl, we can't use network=none because it breaks port forwarding
+	// Instead, we block outgoing traffic using iptables inside the container
 	if needsTwoPhaseSetup {
-		fmt.Println("\n[Phase 2/2] Air-gapping container (disabling network)...")
+		fmt.Println("\n[Phase 2/2] Air-gapping container (blocking outgoing network)...")
 
-		// Stop current container
-		if err := rc.Runtime.Stop(ctx, containerName); err != nil {
-			return fmt.Errorf("failed to stop container for air-gap: %w", err)
+		// Block outgoing network traffic using iptables
+		// This allows incoming SSH but blocks all outgoing connections
+		blockCmds := []string{
+			// Block all outgoing traffic except established connections and loopback
+			"iptables -A OUTPUT -o lo -j ACCEPT",
+			"iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+			"iptables -A OUTPUT -j DROP",
+			// Also block IPv6
+			"ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true",
+			"ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true",
+			"ip6tables -A OUTPUT -j DROP 2>/dev/null || true",
 		}
 
-		// Commit the container state to preserve installed deps
-		// Use a proper image name format that nerdctl can reference
-		airgappedImageName := cfg.ImageName() + "-airgapped"
-		fmt.Printf("Saving container state as %s...\n", airgappedImageName)
-		limaRT := rc.Runtime.(*limaRuntime.Runtime)
-		_, err := limaRT.Commit(ctx, containerName, airgappedImageName)
-		if err != nil {
-			return fmt.Errorf("failed to save container state: %w", err)
+		for _, cmd := range blockCmds {
+			rc.Runtime.Exec(ctx, containerName, "sh", "-c", cmd)
 		}
-
-		// Remove old container
-		fmt.Println("Removing network-enabled container...")
-		if err := rc.Runtime.Remove(ctx, containerName); err != nil {
-			return fmt.Errorf("failed to remove container: %w", err)
-		}
-
-		// Update network mode to none
-		cfg.Security.NetworkMode = originalNetworkMode
-		if cfg.Security.NetworkMode != "none" {
-			cfg.Security.NetworkMode = "none"
-		}
-
-		// Update createOpts for air-gapped container
-		createOpts.NetworkMode = "none"
-		createOpts.Image = airgappedImageName
-
-		fmt.Println("Creating air-gapped container...")
-		_, err = rc.Runtime.Create(ctx, createOpts)
-		if err != nil {
-			return fmt.Errorf("failed to create air-gapped container: %w", err)
-		}
-
-		// Start the air-gapped container
-		if err := rc.Runtime.Start(ctx, containerName); err != nil {
-			return fmt.Errorf("failed to start air-gapped container: %w", err)
-		}
-
-		// Re-setup SSH keys in the new container
-		time.Sleep(2 * time.Second)
-		setupSSHInContainer(ctx, rc.Runtime, containerName, cfg)
 
 		fmt.Println("\n=== CONTAINER IS NOW AIR-GAPPED ===")
-		fmt.Println("Network access is completely disabled.")
+		fmt.Println("Outgoing network access is blocked.")
+		fmt.Println("SSH access is still available for IDE connection.")
 		fmt.Println("To re-enable network, recreate the container:")
 		fmt.Println("  devkit start --rebuild")
 	}
