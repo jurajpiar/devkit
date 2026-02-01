@@ -132,6 +132,26 @@ func runConnect(cmd *cobra.Command, args []string) error {
   }`)
 	fmt.Println()
 
+	fmt.Println("--- Application Ports ---")
+	fmt.Println()
+	if len(cfg.Ports) > 0 {
+		fmt.Println("  Configured ports (automatically published):")
+		for _, port := range cfg.Ports {
+			fmt.Printf("    - localhost:%d -> container:%d\n", port, port)
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("  No application ports configured.")
+		fmt.Println()
+	}
+	fmt.Println("  To forward ports dynamically:")
+	fmt.Println("    devkit forward 3000           # Forward single port")
+	fmt.Println("    devkit forward 3000 8080      # Forward multiple ports")
+	fmt.Println("    devkit forward 3000 --save    # Forward and save to config")
+	fmt.Println()
+	fmt.Println("  VS Code also auto-forwards ports when connected via Remote-SSH.")
+	fmt.Println()
+
 	return nil
 }
 
