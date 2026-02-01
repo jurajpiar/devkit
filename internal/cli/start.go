@@ -235,17 +235,18 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 		onFile := func(filename string) {
 			fileCount++
-			// Strip tar's "a " prefix if present
-			name := strings.TrimPrefix(filename, "a ")
-			name = strings.TrimPrefix(name, "./")
+			// Strip leading ./
+			name := strings.TrimPrefix(filename, "./")
 			
 			// Truncate long filenames
 			if len(name) > 50 {
 				name = "..." + name[len(name)-47:]
 			}
 			
-			// Use \r to overwrite the same line
-			fmt.Printf("\r         [%d] %s\033[K", fileCount, name)
+			// Update progress every 50 files to avoid slowdown
+			if fileCount%50 == 0 || fileCount < 10 {
+				fmt.Printf("\r         [%d] %s\033[K", fileCount, name)
+			}
 		}
 
 		if err := mgr.CopySourceToContainerWithProgress(ctx, onFile); err != nil {

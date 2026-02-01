@@ -1,7 +1,6 @@
 package container
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -340,74 +339,64 @@ func (m *Manager) CopySourceToContainerWithProgress(ctx context.Context, onFile 
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Build tar command with exclusions and verbose output
-	tarArgs := []string{"-cv", "-f", "-"}
+	// Create a temporary tarball
+	tmpFile, err := os.CreateTemp("", "devkit-source-*.tar")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Build tar command with exclusions
+	tarArgs := []string{"-cf", tmpPath}
 	for _, exclude := range m.config.CopyExclude {
 		tarArgs = append(tarArgs, "--exclude="+exclude)
 	}
 	tarArgs = append(tarArgs, ".")
 
-	// Create tar process
+	// Create tarball
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	tarCmd.Dir = cwd
+	var tarStderr bytes.Buffer
+	tarCmd.Stderr = &tarStderr
 
-	// Create podman exec process to receive tar
-	podmanArgs := []string{"exec", "-i", containerName, "tar", "-xf", "-", "-C", "/home/developer/workspace/"}
-	podmanCmd := exec.CommandContext(ctx, "podman", podmanArgs...)
-
-	// Pipe tar stdout to podman stdin
-	tarOut, err := tarCmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create tar pipe: %w", err)
-	}
-	podmanCmd.Stdin = tarOut
-
-	// Capture tar's verbose output (stderr) for progress display
-	tarStderr, err := tarCmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create tar stderr pipe: %w", err)
+	if err := tarCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create tarball: %w (stderr: %s)", err, tarStderr.String())
 	}
 
-	var podmanStderr bytes.Buffer
-	podmanCmd.Stderr = &podmanStderr
-
-	// Start both processes
-	if err := tarCmd.Start(); err != nil {
-		return fmt.Errorf("failed to start tar: %w", err)
-	}
-	if err := podmanCmd.Start(); err != nil {
-		tarCmd.Process.Kill()
-		return fmt.Errorf("failed to start podman: %w", err)
-	}
-
-	// Read tar's verbose output and call progress callback
-	// Use a channel to signal completion
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		scanner := bufio.NewScanner(tarStderr)
-		for scanner.Scan() {
-			if onFile != nil {
-				onFile(scanner.Text())
+	// Get file count for progress (optional)
+	if onFile != nil {
+		listCmd := exec.CommandContext(ctx, "tar", "-tf", tmpPath)
+		listOut, err := listCmd.Output()
+		if err == nil {
+			lines := strings.Split(string(listOut), "\n")
+			for i, line := range lines {
+				if line != "" {
+					onFile(line)
+					// Only call periodically to avoid slowdown
+					if i%100 == 0 {
+						// Allow UI to update
+					}
+				}
 			}
 		}
-	}()
-
-	// Wait for tar to complete (this closes the stderr pipe)
-	tarErr := tarCmd.Wait()
-	
-	// Wait for stderr reader to finish
-	<-stderrDone
-	
-	// Wait for podman to complete
-	podmanErr := podmanCmd.Wait()
-
-	if tarErr != nil {
-		return fmt.Errorf("tar failed: %w", tarErr)
 	}
-	if podmanErr != nil {
-		return fmt.Errorf("podman extract failed: %w (stderr: %s)", podmanErr, podmanStderr.String())
+
+	// Copy tarball to container
+	_, err = m.runPodman(ctx, "cp", tmpPath, containerName+":/tmp/source.tar")
+	if err != nil {
+		return fmt.Errorf("failed to copy tarball to container: %w", err)
 	}
+
+	// Extract tarball in container
+	_, err = m.Exec(ctx, "tar", "-xf", "/tmp/source.tar", "-C", "/home/developer/workspace/")
+	if err != nil {
+		return fmt.Errorf("failed to extract tarball in container: %w", err)
+	}
+
+	// Clean up tarball in container
+	m.Exec(ctx, "rm", "-f", "/tmp/source.tar")
 
 	// Fix ownership so developer user can access the files
 	_, err = m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/workspace")
