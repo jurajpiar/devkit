@@ -206,10 +206,20 @@ func (b *Builder) GenerateContainerfile() (string, error) {
 		}
 	}
 
-	// Add global packages from config
+	// Add global packages from config (filter out package manager to avoid conflicts)
 	if len(b.config.Dependencies.Install) > 0 {
-		packages := strings.Join(b.config.Dependencies.Install, " ")
-		data.GlobalPackages = fmt.Sprintf("RUN npm install -g %s", packages)
+		var filteredPackages []string
+		for _, pkg := range b.config.Dependencies.Install {
+			// Skip if package is the same as the detected package manager
+			if b.detection != nil && pkg == b.detection.PackageManager {
+				continue
+			}
+			filteredPackages = append(filteredPackages, pkg)
+		}
+		if len(filteredPackages) > 0 {
+			packages := strings.Join(filteredPackages, " ")
+			data.GlobalPackages = fmt.Sprintf("RUN npm install -g %s", packages)
+		}
 	}
 
 	// Parse and execute template
