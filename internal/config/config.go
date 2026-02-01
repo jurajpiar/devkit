@@ -17,6 +17,7 @@ type Config struct {
 	Features     FeaturesConfig     `yaml:"features" mapstructure:"features"`
 	SSH          SSHConfig          `yaml:"ssh" mapstructure:"ssh"`
 	Security     SecurityConfig     `yaml:"security" mapstructure:"security"`
+	Monitoring   MonitoringConfig   `yaml:"monitoring,omitempty" mapstructure:"monitoring"`
 	Ports        []int    `yaml:"ports,omitempty" mapstructure:"ports"`                   // Application ports to expose (bound to localhost)
 	IDEServers   []string `yaml:"ide_servers,omitempty" mapstructure:"ide_servers"`         // IDE server directories (e.g., .vscode-server, .cursor-server)
 	ExtraVolumes []string `yaml:"extra_volumes,omitempty" mapstructure:"extra_volumes"`     // Additional directories to mount as volumes (relative to /home/developer)
@@ -80,6 +81,54 @@ type SecurityConfig struct {
 	TotalIsolation bool `yaml:"total_isolation" mapstructure:"total_isolation"`
 }
 
+// MonitoringConfig holds monitoring settings
+type MonitoringConfig struct {
+	// Enabled enables the monitoring system
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Outputs configures which output backends are enabled
+	Outputs MonitoringOutputsConfig `yaml:"outputs,omitempty" mapstructure:"outputs"`
+	// Performance configures performance monitoring
+	Performance MonitoringPerfConfig `yaml:"performance,omitempty" mapstructure:"performance"`
+	// SecurityMonitoring configures security event monitoring (distinct from SecurityConfig)
+	SecurityMonitoring MonitoringSecurityConfig `yaml:"security_monitoring,omitempty" mapstructure:"security_monitoring"`
+}
+
+// MonitoringOutputsConfig configures output backends
+type MonitoringOutputsConfig struct {
+	// CLI enables terminal output (default: true)
+	CLI bool `yaml:"cli" mapstructure:"cli"`
+	// Daemon enables background daemon with log files
+	Daemon bool `yaml:"daemon" mapstructure:"daemon"`
+	// DaemonLogPath specifies where daemon logs are written (default: ~/.devkit/logs/)
+	DaemonLogPath string `yaml:"daemon_log_path,omitempty" mapstructure:"daemon_log_path"`
+	// Web enables web dashboard
+	Web bool `yaml:"web" mapstructure:"web"`
+	// WebPort specifies the web dashboard port (default: 8080)
+	WebPort int `yaml:"web_port,omitempty" mapstructure:"web_port"`
+	// Prometheus enables Prometheus metrics endpoint
+	Prometheus bool `yaml:"prometheus" mapstructure:"prometheus"`
+	// PrometheusPort specifies the Prometheus metrics port (default: 9090)
+	PrometheusPort int `yaml:"prometheus_port,omitempty" mapstructure:"prometheus_port"`
+}
+
+// MonitoringPerfConfig configures performance monitoring
+type MonitoringPerfConfig struct {
+	// Enabled enables performance monitoring
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// IntervalSeconds specifies collection interval in seconds (default: 5)
+	IntervalSeconds int `yaml:"interval_seconds,omitempty" mapstructure:"interval_seconds"`
+}
+
+// MonitoringSecurityConfig configures security monitoring
+type MonitoringSecurityConfig struct {
+	// Enabled enables security event monitoring
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// AnomalyDetection enables anomaly detection (feature-flagged)
+	AnomalyDetection bool `yaml:"anomaly_detection" mapstructure:"anomaly_detection"`
+	// AlertThreshold sets minimum severity for alerts: info, warning, critical
+	AlertThreshold string `yaml:"alert_threshold,omitempty" mapstructure:"alert_threshold"`
+}
+
 // DefaultConfig returns a config with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -116,6 +165,27 @@ func DefaultConfig() *Config {
 			DisableDebugPort:      false,     // Enable by default for dev convenience
 			UseDebugProxy:         false,     // Disabled by default
 			DebugProxyFilterLevel: "filtered", // Default filter level
+		},
+		Monitoring: MonitoringConfig{
+			Enabled: true,
+			Outputs: MonitoringOutputsConfig{
+				CLI:            true,  // Default output
+				Daemon:         false,
+				DaemonLogPath:  "",    // Will use ~/.devkit/logs/
+				Web:            false,
+				WebPort:        8080,
+				Prometheus:     false,
+				PrometheusPort: 9090,
+			},
+			Performance: MonitoringPerfConfig{
+				Enabled:         true,
+				IntervalSeconds: 5,
+			},
+			SecurityMonitoring: MonitoringSecurityConfig{
+				Enabled:          true,
+				AnomalyDetection: false, // Feature-flagged, off by default
+				AlertThreshold:   "warning",
+			},
 		},
 		IDEServers:   []string{".vscode-server", ".cursor-server"}, // Common IDE server directories
 		ExtraVolumes: []string{".npm", ".cache"},                   // Additional writable directories
@@ -283,6 +353,20 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.use_debug_proxy", false)
 	v.SetDefault("security.debug_proxy_filter_level", "filtered")
 	v.SetDefault("security.total_isolation", false)
+	// Monitoring defaults
+	v.SetDefault("monitoring.enabled", true)
+	v.SetDefault("monitoring.outputs.cli", true)
+	v.SetDefault("monitoring.outputs.daemon", false)
+	v.SetDefault("monitoring.outputs.daemon_log_path", "")
+	v.SetDefault("monitoring.outputs.web", false)
+	v.SetDefault("monitoring.outputs.web_port", 8080)
+	v.SetDefault("monitoring.outputs.prometheus", false)
+	v.SetDefault("monitoring.outputs.prometheus_port", 9090)
+	v.SetDefault("monitoring.performance.enabled", true)
+	v.SetDefault("monitoring.performance.interval_seconds", 5)
+	v.SetDefault("monitoring.security_monitoring.enabled", true)
+	v.SetDefault("monitoring.security_monitoring.anomaly_detection", false)
+	v.SetDefault("monitoring.security_monitoring.alert_threshold", "warning")
 	// IDE server directories (mounted as writable volumes)
 	v.SetDefault("ide_servers", []string{".vscode-server", ".cursor-server"})
 	// Extra writable directories

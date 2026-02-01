@@ -450,6 +450,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	fmt.Println("\nNext steps:")
 	fmt.Printf("  • Connect IDE: ssh -p %d developer@localhost\n", cfg.SSH.Port)
 	fmt.Println("  • Open shell:  devkit shell")
+	fmt.Println("  • View stats:  devkit stats")
+	fmt.Println("  • Monitor:     devkit monitor start")
 	fmt.Println("  • More info:   devkit connect")
 
 	// Open shell if requested
