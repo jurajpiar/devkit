@@ -358,6 +358,8 @@ func (m *Manager) CopySourceToContainerWithProgress(ctx context.Context, onFile 
 	// Create tarball
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	tarCmd.Dir = cwd
+	// Disable macOS Apple Double files (._* metadata) at the tar level
+	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
 	var tarStderr bytes.Buffer
 	tarCmd.Stderr = &tarStderr
 
