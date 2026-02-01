@@ -253,11 +253,11 @@ func (m *Manager) ExecAsUser(ctx context.Context, user string, command ...string
 	return output, nil
 }
 
-// ExecInteractive runs an interactive command in the container
+// ExecInteractive runs an interactive command in the container as developer user
 func (m *Manager) ExecInteractive(ctx context.Context, command ...string) error {
 	containerName := m.config.ContainerName()
 
-	args := append([]string{"exec", "-it", containerName}, command...)
+	args := append([]string{"exec", "-it", "-u", "developer", "-w", "/home/developer/workspace", containerName}, command...)
 	return m.runPodmanInteractive(ctx, args...)
 }
 
