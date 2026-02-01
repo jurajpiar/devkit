@@ -391,8 +391,8 @@ func (m *Manager) CopySourceToContainerWithProgress(ctx context.Context, onFile 
 		return fmt.Errorf("failed to copy tarball to container: %w", err)
 	}
 
-	// Extract tarball in container
-	_, err = m.Exec(ctx, "tar", "-xf", "/tmp/source.tar", "-C", "/home/developer/workspace/")
+	// Extract tarball in container (as developer user to avoid permission issues)
+	_, err = m.ExecAsUser(ctx, "developer", "tar", "-xf", "/tmp/source.tar", "-C", "/home/developer/workspace/")
 	if err != nil {
 		return fmt.Errorf("failed to extract tarball in container: %w", err)
 	}
