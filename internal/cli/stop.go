@@ -92,7 +92,13 @@ func runStop(cmd *cobra.Command, args []string) error {
 		if err := mgr.Remove(ctx); err != nil {
 			return fmt.Errorf("failed to remove container: %w", err)
 		}
-		fmt.Println("Container removed")
+
+		fmt.Println("Removing volumes...")
+		if err := mgr.RemoveVolumes(ctx); err != nil {
+			return fmt.Errorf("failed to remove volumes: %w", err)
+		}
+
+		fmt.Println("Container and volumes removed")
 	}
 
 	return nil
