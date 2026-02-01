@@ -182,9 +182,9 @@ func (r *Runtime) ExecAsUser(ctx context.Context, name, user string, cmd ...stri
 	return output, nil
 }
 
-// ExecInteractive runs an interactive command in the container
+// ExecInteractive runs an interactive command in the container as developer user
 func (r *Runtime) ExecInteractive(ctx context.Context, name string, cmd ...string) error {
-	args := append([]string{"exec", "-it", name}, cmd...)
+	args := append([]string{"exec", "-it", "-u", "developer", "-w", "/home/developer/workspace", name}, cmd...)
 	return r.runNerdctlInteractive(ctx, args...)
 }
 
