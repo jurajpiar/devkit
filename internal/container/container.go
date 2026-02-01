@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -382,23 +381,25 @@ func (m *Manager) CopySourceToContainerWithProgress(ctx context.Context, onFile 
 	}
 
 	// Read tar's verbose output and call progress callback
-	if onFile != nil {
-		go func() {
-			scanner := bufio.NewScanner(tarStderr)
-			for scanner.Scan() {
-				filename := scanner.Text()
-				onFile(filename)
+	// Use a channel to signal completion
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		scanner := bufio.NewScanner(tarStderr)
+		for scanner.Scan() {
+			if onFile != nil {
+				onFile(scanner.Text())
 			}
-		}()
-	} else {
-		// Drain stderr
-		go func() {
-			io.Copy(io.Discard, tarStderr)
-		}()
-	}
+		}
+	}()
 
-	// Wait for both to complete
+	// Wait for tar to complete (this closes the stderr pipe)
 	tarErr := tarCmd.Wait()
+	
+	// Wait for stderr reader to finish
+	<-stderrDone
+	
+	// Wait for podman to complete
 	podmanErr := podmanCmd.Wait()
 
 	if tarErr != nil {
