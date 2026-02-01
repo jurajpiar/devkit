@@ -348,10 +348,8 @@ func (m *Manager) CopySourceToContainerWithProgress(ctx context.Context, onFile 
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
 
-	// Build tar command with exclusions
+	// Build tar command with exclusions from config
 	tarArgs := []string{"-cf", tmpPath}
-	// Exclude macOS metadata files
-	tarArgs = append(tarArgs, "--exclude=._*", "--exclude=.DS_Store")
 	for _, exclude := range m.config.CopyExclude {
 		tarArgs = append(tarArgs, "--exclude="+exclude)
 	}

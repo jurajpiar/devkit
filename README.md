@@ -121,11 +121,13 @@ extra_volumes:          # Additional writable directories in /home/developer
   - .cache              # General cache
   # Add others as needed (e.g., .cargo, .gradle)
 
-copy_exclude:           # Paths to exclude when copying source to container
-  - .next               # Next.js build artifacts
-  - dist                # Vite/TypeScript output
-  - node_modules        # Dependencies (will be installed fresh)
-  - .git                # Git history (optional, saves space)
+copy_exclude:           # Paths to exclude when copying (has sensible defaults)
+  # Defaults include: ._*, .DS_Store, .git, node_modules,
+  # .next, dist, build, .nuxt, .output, .idea, *.swp, *.log, .cache
+  # Add your own or override defaults:
+  - .next
+  - node_modules
+  - my-custom-dir
 
 chown_paths:            # Paths needing explicit ownership fix (relative to workspace)
   - some/path           # If specific paths have permission issues after copy

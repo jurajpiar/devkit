@@ -110,6 +110,20 @@ func DefaultConfig() *Config {
 		},
 		IDEServers:   []string{".vscode-server", ".cursor-server"}, // Common IDE server directories
 		ExtraVolumes: []string{".npm", ".cache"},                   // Additional writable directories
+		CopyExclude: []string{
+			// macOS metadata
+			"._*", ".DS_Store",
+			// Version control
+			".git",
+			// Dependencies (will be installed fresh)
+			"node_modules",
+			// Build artifacts
+			".next", "dist", "build", ".nuxt", ".output",
+			// IDE/editor
+			".idea", "*.swp", "*.swo",
+			// Logs and caches
+			"*.log", ".cache",
+		},
 	}
 }
 
@@ -258,6 +272,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ide_servers", []string{".vscode-server", ".cursor-server"})
 	// Extra writable directories
 	v.SetDefault("extra_volumes", []string{".npm", ".cache"})
+	// Default copy exclusions
+	v.SetDefault("copy_exclude", []string{
+		"._*", ".DS_Store", ".git", "node_modules",
+		".next", "dist", "build", ".nuxt", ".output",
+		".idea", "*.swp", "*.swo", "*.log", ".cache",
+	})
 }
 
 // ContainerName returns the container name for this project
