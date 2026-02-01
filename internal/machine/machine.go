@@ -205,10 +205,11 @@ func (m *Manager) StartNamed(ctx context.Context, name string, stopOthers bool) 
 	if otherRunning && otherName != name {
 		if stopOthers {
 			// For total isolation mode, stop other machines automatically
-			fmt.Printf("Stopping machine '%s' for total isolation...\n", otherName)
+			fmt.Printf("[%s] Stopping machine '%s' for total isolation...\n", timestamp(), otherName)
 			if err := m.StopNamed(ctx, otherName); err != nil {
 				return fmt.Errorf("failed to stop machine '%s': %w", otherName, err)
 			}
+			fmt.Printf("[%s] Machine '%s' stopped\n", timestamp(), otherName)
 		} else {
 			return fmt.Errorf("another Podman machine '%s' is already running.\n"+
 				"Podman only allows one VM at a time.\n"+
@@ -254,11 +255,12 @@ func (m *Manager) StopAll(ctx context.Context) error {
 
 	for _, machine := range machines {
 		if machine.Running {
-			fmt.Printf("Stopping machine: %s\n", machine.Name)
+			fmt.Printf("[%s] Stopping machine: %s\n", timestamp(), machine.Name)
 			_, err := m.runPodman(ctx, "machine", "stop", machine.Name)
 			if err != nil {
 				return fmt.Errorf("failed to stop machine %s: %w", machine.Name, err)
 			}
+			fmt.Printf("[%s] Machine '%s' stopped\n", timestamp(), machine.Name)
 		}
 	}
 
@@ -362,10 +364,11 @@ func (m *Manager) EnsureRunningNamed(ctx context.Context, name string, stopOther
 	}
 
 	if !exists {
-		fmt.Printf("Initializing Podman machine '%s'...\n", name)
+		fmt.Printf("[%s] Initializing Podman machine '%s' (this may take a few minutes)...\n", timestamp(), name)
 		if err := m.InitNamed(ctx, name, DefaultInitOptions()); err != nil {
 			return err
 		}
+		fmt.Printf("[%s] Machine initialized\n", timestamp())
 	}
 
 	running, err := m.IsRunningNamed(ctx, name)
@@ -374,10 +377,11 @@ func (m *Manager) EnsureRunningNamed(ctx context.Context, name string, stopOther
 	}
 
 	if !running {
-		fmt.Printf("Starting Podman machine '%s'...\n", name)
+		fmt.Printf("[%s] Starting Podman machine '%s' (this may take 1-2 minutes)...\n", timestamp(), name)
 		if err := m.StartNamed(ctx, name, stopOthers); err != nil {
 			return err
 		}
+		fmt.Printf("[%s] Machine started\n", timestamp())
 	}
 
 	// Set as default connection
@@ -386,6 +390,11 @@ func (m *Manager) EnsureRunningNamed(ctx context.Context, name string, stopOther
 	}
 
 	return nil
+}
+
+// timestamp returns current time formatted for logs
+func timestamp() string {
+	return time.Now().Format("15:04:05")
 }
 
 // SSH opens an SSH session to the devkit machine
