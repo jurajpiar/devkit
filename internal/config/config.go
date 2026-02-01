@@ -123,6 +123,8 @@ func DefaultConfig() *Config {
 			".idea", "*.swp", "*.swo",
 			// Logs and caches
 			"*.log", ".cache",
+			// Devkit config (local only)
+			"devkit.yaml", ".devkit",
 		},
 	}
 }
@@ -277,6 +279,7 @@ func setDefaults(v *viper.Viper) {
 		"._*", ".DS_Store", ".git", "node_modules",
 		".next", "dist", "build", ".nuxt", ".output",
 		".idea", "*.swp", "*.swo", "*.log", ".cache",
+		"devkit.yaml", ".devkit",
 	})
 }
 
