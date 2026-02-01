@@ -42,7 +42,9 @@ RUN apk add --no-cache \
     git \
     curl \
     bash \
+    procps \
     sudo \
+    socat \
     {{.ExtraPackages}} \
     && mkdir -p /run/sshd \
     && ssh-keygen -A
@@ -119,8 +121,13 @@ RUN mkdir -p /var/empty && chmod 755 /var/empty \
     && chmod 644 /etc/ssh/sshd_devkit.conf
 
 # Create entrypoint script that generates host keys and starts sshd
-# Note: .ssh, .npm, .cache are tmpfs mounted at runtime
+# Note: .ssh, .npm, .cache, .vscode-server are volumes/tmpfs mounted at runtime
 RUN echo '#!/bin/sh' > /entrypoint.sh \
+    && echo '# Fix ownership of mounted directories (tmpfs/volumes are root-owned initially)' >> /entrypoint.sh \
+    && echo 'chown developer:developer /home/developer/.npm 2>/dev/null || true' >> /entrypoint.sh \
+    && echo 'chown developer:developer /home/developer/.cache 2>/dev/null || true' >> /entrypoint.sh \
+    && echo 'chown developer:developer /home/developer/.ssh 2>/dev/null || true' >> /entrypoint.sh \
+    && echo 'chown developer:developer /home/developer/.vscode-server 2>/dev/null || true' >> /entrypoint.sh \
     && echo '# Generate SSH host keys in /tmp' >> /entrypoint.sh \
     && echo 'ssh-keygen -t ed25519 -f /tmp/ssh_host_ed25519_key -N "" -q' >> /entrypoint.sh \
     && echo 'ssh-keygen -t rsa -f /tmp/ssh_host_rsa_key -N "" -q' >> /entrypoint.sh \
