@@ -302,8 +302,8 @@ func GenerateDevkitConfig(projectName string, opts runtime.VMOpts) LimaConfig {
 		cfg.VMType = opts.VMType
 	}
 
-	// Add port forwards for typical dev ports
-	commonPorts := []int{3000, 3001, 5173, 8080, 8000, 9229}
+	// Add port forwards for SSH (2222) and typical dev ports
+	commonPorts := []int{2222, 3000, 3001, 5173, 8080, 8000, 9229}
 	for _, port := range commonPorts {
 		cfg.PortForwards = append(cfg.PortForwards, PortForward{
 			GuestPort: port,
