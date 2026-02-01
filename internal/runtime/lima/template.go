@@ -251,6 +251,37 @@ func (m *VMManager) generateConfig(path string, opts runtime.VMOpts) error {
 		cfg.Arch = opts.Arch
 	}
 
+	// Update SSH port forwarding if specified
+	if opts.SSHPort > 0 {
+		// Find and update the container SSH port forward
+		for i, pf := range cfg.PortForwards {
+			if pf.GuestPort == 2222 {
+				cfg.PortForwards[i].GuestPort = opts.SSHPort
+				cfg.PortForwards[i].HostPort = opts.SSHPort
+				break
+			}
+		}
+	}
+
+	// Add additional port forwards
+	for _, port := range opts.Ports {
+		// Check if port is already configured
+		found := false
+		for _, pf := range cfg.PortForwards {
+			if pf.GuestPort == port {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.PortForwards = append(cfg.PortForwards, PortForward{
+				GuestPort: port,
+				HostPort:  port,
+				HostIP:    "127.0.0.1",
+			})
+		}
+	}
+
 	// Additional provisioning scripts
 	for _, script := range opts.Provision {
 		cfg.Provision = append(cfg.Provision, Provision{

@@ -64,6 +64,8 @@ func setupLimaRuntime(ctx context.Context, cfg *config.Config, rc *RuntimeContex
 		MemoryMB:   cfg.Runtime.Lima.MemoryGB * 1024,
 		DiskSizeGB: cfg.Runtime.Lima.DiskGB,
 		VMType:     cfg.Runtime.Lima.VMType,
+		SSHPort:    cfg.SSH.Port,
+		Ports:      cfg.Ports,
 	}
 
 	fmt.Printf("Using Lima VM: %s\n", vmName)
@@ -104,6 +106,8 @@ func setupPodmanRuntime(ctx context.Context, cfg *config.Config, rc *RuntimeCont
 				CPUs:       cfg.Runtime.Lima.CPUs, // Reuse Lima opts
 				MemoryMB:   cfg.Runtime.Lima.MemoryGB * 1024,
 				DiskSizeGB: cfg.Runtime.Lima.DiskGB,
+				SSHPort:    cfg.SSH.Port,
+				Ports:      cfg.Ports,
 			}
 
 			if err := vmMgr.EnsureRunning(ctx, vmName, opts); err != nil {

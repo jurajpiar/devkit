@@ -102,8 +102,11 @@ type VMOpts struct {
 	VMType     string // vz, qemu for Lima; libkrun for Podman
 	Arch       string
 	// Lima-specific
-	Image      string // VM base image URL
+	Image      string   // VM base image URL
 	Provision  []string // Provisioning scripts
+	// Port forwarding
+	SSHPort    int   // SSH port for container (e.g., 2222)
+	Ports      []int // Additional ports to forward
 }
 
 // DefaultVMOpts returns sensible defaults for VM creation
