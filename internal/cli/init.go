@@ -342,6 +342,10 @@ func validatePort(s string) error {
 	if port < 1 || port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
+	if !isPortAvailable(port) {
+		nextAvailable := findAvailablePort(port)
+		return fmt.Errorf("port %d is in use (try %d)", port, nextAvailable)
+	}
 	return nil
 }
 
