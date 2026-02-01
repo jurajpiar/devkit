@@ -1,5 +1,11 @@
 # Devkit
 
+> **⚠️ WORK IN PROGRESS**
+>
+> This project is under active development and may contain bugs, incomplete features, or breaking changes. Use at your own risk in production environments.
+>
+> **Contributions are welcome!** See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
 Secure local development infrastructure kit that orchestrates rootless containers for isolated development environments.
 
 ## Features
