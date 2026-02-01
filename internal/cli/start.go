@@ -465,6 +465,12 @@ func runStart(cmd *cobra.Command, args []string) error {
 func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, rc *RuntimeContext,
 	paranoid, offline, noDebugPort, useDebugProxy bool, proxyFilterLevel string) error {
 
+	// Determine if we need two-phase network setup:
+	// - paranoid flag is set, OR
+	// - config has network_mode: none (from TUI paranoid selection)
+	// AND we're not starting in offline mode (which skips setup)
+	needsTwoPhaseSetup := (paranoid || cfg.Security.NetworkMode == "none") && !offline
+
 	// Apply paranoid mode settings
 	if paranoid {
 		fmt.Println("=== PARANOID MODE ENABLED ===")
@@ -482,6 +488,12 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 	// Apply offline mode
 	if offline {
 		cfg.Security.NetworkMode = "none"
+	}
+
+	// For two-phase setup, temporarily enable network for Phase 1
+	originalNetworkMode := cfg.Security.NetworkMode
+	if needsTwoPhaseSetup {
+		cfg.Security.NetworkMode = "restricted"
 	}
 
 	// Apply debug port setting
@@ -555,6 +567,11 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 	}
 
 	progress := NewProgress(totalSteps)
+
+	// Set phase prefix for two-phase setup
+	if needsTwoPhaseSetup {
+		progress.SetPrefix("[Phase 1/2] ")
+	}
 
 	// Build CreateOpts for Lima
 	createOpts := runtime.CreateOpts{
@@ -712,6 +729,61 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 				progress.Warn(fmt.Sprintf("Failed to install dependencies: %v", err))
 			}
 		}
+	}
+
+	// Phase 2: Air-gap the container (disable network)
+	if needsTwoPhaseSetup {
+		fmt.Println("\n[Phase 2/2] Air-gapping container (disabling network)...")
+
+		// Stop current container
+		if err := rc.Runtime.Stop(ctx, containerName); err != nil {
+			return fmt.Errorf("failed to stop container for air-gap: %w", err)
+		}
+
+		// Commit the container state to preserve installed deps
+		fmt.Println("Saving container state...")
+		limaRT := rc.Runtime.(*limaRuntime.Runtime)
+		committedImage, err := limaRT.Commit(ctx, containerName, cfg.ImageName()+"-airgapped")
+		if err != nil {
+			return fmt.Errorf("failed to save container state: %w", err)
+		}
+		fmt.Printf("Saved as: %s\n", committedImage)
+
+		// Remove old container
+		fmt.Println("Removing network-enabled container...")
+		if err := rc.Runtime.Remove(ctx, containerName); err != nil {
+			return fmt.Errorf("failed to remove container: %w", err)
+		}
+
+		// Update network mode to none
+		cfg.Security.NetworkMode = originalNetworkMode
+		if cfg.Security.NetworkMode != "none" {
+			cfg.Security.NetworkMode = "none"
+		}
+
+		// Update createOpts for air-gapped container
+		createOpts.NetworkMode = "none"
+		createOpts.Image = committedImage
+
+		fmt.Println("Creating air-gapped container...")
+		_, err = rc.Runtime.Create(ctx, createOpts)
+		if err != nil {
+			return fmt.Errorf("failed to create air-gapped container: %w", err)
+		}
+
+		// Start the air-gapped container
+		if err := rc.Runtime.Start(ctx, containerName); err != nil {
+			return fmt.Errorf("failed to start air-gapped container: %w", err)
+		}
+
+		// Re-setup SSH keys in the new container
+		time.Sleep(2 * time.Second)
+		setupSSHInContainer(ctx, rc.Runtime, containerName, cfg)
+
+		fmt.Println("\n=== CONTAINER IS NOW AIR-GAPPED ===")
+		fmt.Println("Network access is completely disabled.")
+		fmt.Println("To re-enable network, recreate the container:")
+		fmt.Println("  devkit start --rebuild")
 	}
 
 	progress.Done("Container started successfully!")
