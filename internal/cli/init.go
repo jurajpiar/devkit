@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,8 +85,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 	branch, _ := cmd.Flags().GetString("branch")
 	cfg.Source.Branch = branch
 
-	// Set SSH port
+	// Set SSH port (check availability)
 	port, _ := cmd.Flags().GetInt("port")
+	if !isPortAvailable(port) {
+		originalPort := port
+		port = findAvailablePort(port)
+		fmt.Printf("⚠ Port %d is in use, using port %d instead\n", originalPort, port)
+	}
 	cfg.SSH.Port = port
 
 	// Try to detect project type
@@ -144,4 +150,26 @@ func extractRepoName(url string) string {
 	}
 
 	return "project"
+}
+
+// isPortAvailable checks if a port is available for binding
+func isPortAvailable(port int) bool {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
+}
+
+// findAvailablePort finds the next available port starting from the given port
+func findAvailablePort(startPort int) int {
+	for port := startPort; port < startPort+100; port++ {
+		if isPortAvailable(port) {
+			return port
+		}
+	}
+	// Fallback: return a high port
+	return 22222
 }
