@@ -7,7 +7,7 @@ Secure local development infrastructure kit that orchestrates rootless container
 - **Rootless Containers**: Uses Podman rootless mode - no root privileges required
 - **Host Isolation**: Containers have no access to host filesystem by default
 - **Pre-installed Dependencies**: Automatically detects and installs project dependencies
-- **VS Code Integration**: Built-in SSH server for VS Code Remote development
+- **IDE Integration**: Built-in SSH server for VS Code and Cursor Remote development
 - **Project Detection**: Auto-detects Node.js projects (more languages coming soon)
 
 ## Requirements
@@ -73,9 +73,11 @@ devkit start --no-debug-port
 | `devkit init [repo-url]` | Initialize devkit.yaml config |
 | `devkit build` | Build the container image |
 | `devkit start` | Start the development container |
-| `devkit connect` | Show VS Code connection instructions |
-| `devkit shell` | Open a shell in the container |
 | `devkit stop` | Stop the container |
+| `devkit remove` | Remove container and volumes |
+| `devkit connect` | Show IDE connection instructions |
+| `devkit forward <port>` | Forward ports via SSH tunnel |
+| `devkit shell` | Open a shell in the container |
 | `devkit list` | List all devkit containers |
 
 ## Configuration
@@ -103,7 +105,30 @@ features:
   allow_mount: false    # Enable 'mount' source method
 
 ssh:
-  port: 2222            # SSH port for VS Code
+  port: 2222            # SSH port for IDE connection
+
+ports:                  # Application ports to expose
+  - 3000
+  - 8080
+
+ide_servers:            # IDE server directories (mounted as writable volumes)
+  - .vscode-server      # VS Code
+  - .cursor-server      # Cursor
+  # Add other IDEs as needed (e.g., .fleet, .zed-server)
+
+extra_volumes:          # Additional writable directories in /home/developer
+  - .npm                # npm cache
+  - .cache              # General cache
+  # Add others as needed (e.g., .cargo, .gradle)
+
+copy_exclude:           # Paths to exclude when copying source to container
+  - .next               # Next.js build artifacts
+  - dist                # Vite/TypeScript output
+  - node_modules        # Dependencies (will be installed fresh)
+  - .git                # Git history (optional, saves space)
+
+chown_paths:            # Paths needing explicit ownership fix (relative to workspace)
+  - some/path           # If specific paths have permission issues after copy
 ```
 
 ### Source Methods
@@ -114,11 +139,13 @@ ssh:
 | `copy` | Copy files into container at startup | `allow_copy: true` |
 | `mount` | Volume mount project directory (read-only) | `allow_mount: true` |
 
-## VS Code Setup
+## IDE Setup (VS Code / Cursor)
+
+Devkit supports both VS Code and Cursor via their Remote-SSH extensions.
 
 ### Method 1: Remote-SSH Extension
 
-1. Install the "Remote - SSH" extension in VS Code
+1. Install the "Remote - SSH" extension in your IDE
 2. Run `devkit connect` to see connection details
 3. Press `Cmd+Shift+P` and select "Remote-SSH: Connect to Host..."
 4. Enter: `ssh://developer@localhost:2222`
@@ -138,6 +165,48 @@ Host devkit-myproject
 ```
 
 Or run: `devkit connect --add-to-config`
+
+## Port Forwarding
+
+When running applications in the container (e.g., React dev server on port 3000), you have several options to access them:
+
+### Option 1: IDE Auto-Forward (Recommended)
+
+VS Code and Cursor automatically detect and forward ports when connected via Remote-SSH. Just run your app and the IDE will prompt you.
+
+### Option 2: Dynamic SSH Tunnel
+
+```bash
+# Forward a single port
+devkit forward 3000
+
+# Forward multiple ports
+devkit forward 3000 8080
+
+# Forward and save to config for future container starts
+devkit forward 3000 --save
+```
+
+The tunnel runs in the foreground - press Ctrl+C to stop.
+
+### Option 3: Pre-configured Ports
+
+Add ports to `devkit.yaml` to automatically publish them when the container starts:
+
+```yaml
+ports:
+  - 3000
+  - 8080
+```
+
+Then recreate the container:
+
+```bash
+devkit remove
+devkit start
+```
+
+All ports are bound to `127.0.0.1` only for security.
 
 ## Debugging
 
