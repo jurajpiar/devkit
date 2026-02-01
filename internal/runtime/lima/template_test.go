@@ -24,8 +24,9 @@ func TestDefaultLimaConfig(t *testing.T) {
 	if cfg.Arch != "aarch64" {
 		t.Errorf("DefaultLimaConfig().Arch = %q, want %q", cfg.Arch, "aarch64")
 	}
-	if !cfg.Plain {
-		t.Error("DefaultLimaConfig().Plain should be true for security")
+	// Plain must be false to enable Lima guest agent for port forwarding
+	if cfg.Plain {
+		t.Error("DefaultLimaConfig().Plain should be false to enable port forwarding")
 	}
 }
 
@@ -63,21 +64,22 @@ func TestDefaultLimaConfigPortForwards(t *testing.T) {
 		t.Error("DefaultLimaConfig().PortForwards should not be empty")
 	}
 
-	// Should have SSH port forward
+	// Should have container SSH port forward (2222)
+	// Lima guest agent auto-forwards other ports, so we only need SSH explicit
 	sshFound := false
 	for _, pf := range cfg.PortForwards {
-		if pf.GuestPort == 22 {
+		if pf.GuestPort == 2222 {
 			sshFound = true
 			if pf.HostIP != "127.0.0.1" {
-				t.Errorf("SSH port forward HostIP = %q, want 127.0.0.1", pf.HostIP)
+				t.Errorf("Container SSH port forward HostIP = %q, want 127.0.0.1", pf.HostIP)
 			}
-			if pf.HostPort != 0 {
-				t.Errorf("SSH port forward HostPort = %d, want 0 (auto-assign)", pf.HostPort)
+			if pf.HostPort != 2222 {
+				t.Errorf("Container SSH port forward HostPort = %d, want 2222", pf.HostPort)
 			}
 		}
 	}
 	if !sshFound {
-		t.Error("SSH port forward (guest port 22) not found")
+		t.Error("Container SSH port forward (guest port 2222) not found")
 	}
 }
 
@@ -108,26 +110,11 @@ func TestGenerateDevkitConfig(t *testing.T) {
 func TestGenerateDevkitConfigPortForwards(t *testing.T) {
 	cfg := GenerateDevkitConfig("test", runtime.VMOpts{})
 
-	// Should have common development ports
-	commonPorts := map[int]bool{
-		3000: false, // React
-		3001: false,
-		5173: false, // Vite
-		8080: false, // Common
-		8000: false, // Django
-		9229: false, // Node.js debug
-	}
-
-	for _, pf := range cfg.PortForwards {
-		if _, ok := commonPorts[pf.GuestPort]; ok {
-			commonPorts[pf.GuestPort] = true
-		}
-	}
-
-	for port, found := range commonPorts {
-		if !found {
-			t.Errorf("Common port %d not found in port forwards", port)
-		}
+	// Lima guest agent auto-forwards ports when services listen on them
+	// We only verify the base config has the SSH port forward
+	// Other ports don't need explicit configuration
+	if len(cfg.PortForwards) == 0 {
+		t.Error("GenerateDevkitConfig should have at least the SSH port forward")
 	}
 }
 

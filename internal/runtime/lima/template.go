@@ -117,27 +117,12 @@ systemctl enable --now buildkitd || true
 		},
 		// Security: No mounts by default
 		Mounts: []Mount{},
-		// Port forwards for container SSH + common dev ports
-		// Note: Don't include port 22 - Lima handles VM SSH automatically
+		// Minimal port forwards - Lima guest agent auto-forwards most ports
+		// We only explicitly forward SSH to ensure it's always available
 		PortForwards: []PortForward{
 			{
-				GuestPort: 2222, // Container SSH
+				GuestPort: 2222, // Container SSH (overridden by config)
 				HostPort:  2222,
-				HostIP:    "127.0.0.1",
-			},
-			{
-				GuestPort: 9229, // Node.js debug
-				HostPort:  9229,
-				HostIP:    "127.0.0.1",
-			},
-			{
-				GuestPort: 3000, // Common dev port
-				HostPort:  3000,
-				HostIP:    "127.0.0.1",
-			},
-			{
-				GuestPort: 8080, // Common dev port
-				HostPort:  8080,
 				HostIP:    "127.0.0.1",
 			},
 		},
@@ -349,15 +334,8 @@ func GenerateDevkitConfig(projectName string, opts runtime.VMOpts) LimaConfig {
 		cfg.VMType = opts.VMType
 	}
 
-	// Add port forwards for SSH (2222) and typical dev ports
-	commonPorts := []int{2222, 3000, 3001, 5173, 8080, 8000, 9229}
-	for _, port := range commonPorts {
-		cfg.PortForwards = append(cfg.PortForwards, PortForward{
-			GuestPort: port,
-			HostPort:  port,
-			HostIP:    "127.0.0.1",
-		})
-	}
+	// Lima guest agent auto-forwards ports when services listen on them
+	// No need to add explicit port forwards here
 
 	// Add extended provisioning for development
 	devProvision := Provision{
