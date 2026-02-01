@@ -170,67 +170,141 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Phase 2: Recreate container with network disabled
 	needsNetworkSetup := paranoid && !offline && cfg.Source.Method == "git"
 
+	// Calculate total steps for progress
+	totalSteps := 6 // create, start, ssh, permissions, ready
+	noDeps, _ := cmd.Flags().GetBool("no-deps")
+	noClone, _ := cmd.Flags().GetBool("no-clone")
+	if cfg.Source.Method == "git" && cfg.Source.Repo != "" && !noClone {
+		totalSteps++ // clone
+	} else if cfg.Source.Method == "copy" {
+		totalSteps++ // copy
+	}
+	if !noDeps && detection != nil && detection.InstallCommand != "" {
+		totalSteps++ // install deps
+	}
+
+	progress := NewProgress(totalSteps)
+
 	if needsNetworkSetup {
-		// Phase 1: Create with restricted network for setup
-		fmt.Println("[Phase 1/2] Starting with network for initial setup...")
+		progress.SetPrefix("[Phase 1/2] ")
 		cfg.Security.NetworkMode = "restricted"
 	}
 
 	// Create container if it doesn't exist
 	if !exists {
-		fmt.Printf("Creating container %s...\n", cfg.ContainerName())
+		progress.Step(fmt.Sprintf("Creating container %s", cfg.ContainerName()))
 		_, err := mgr.Create(ctx, imageName)
 		if err != nil {
 			return fmt.Errorf("failed to create container: %w", err)
 		}
+	} else {
+		progress.Step("Using existing container")
 	}
 
 	// Start container
-	fmt.Println("Starting container...")
+	progress.Step("Starting container")
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start container: %w", err)
 	}
 
 	// Wait for container to be ready
-	fmt.Println("Waiting for container to be ready...")
+	progress.Step("Waiting for container to be ready")
 	time.Sleep(2 * time.Second)
 
 	// Setup SSH keys
-	fmt.Println("Setting up SSH keys...")
+	progress.Step("Setting up SSH keys")
 	if err := mgr.SetupSSHKey(ctx); err != nil {
-		fmt.Printf("Warning: failed to setup SSH key: %v\n", err)
-		fmt.Println("You may need to manually add your SSH key to the container")
+		progress.Warn(fmt.Sprintf("Failed to setup SSH key: %v", err))
 	}
 
 	// Clone repository (git method) or copy files (copy method)
-	noClone, _ := cmd.Flags().GetBool("no-clone")
 	if cfg.Source.Method == "git" && cfg.Source.Repo != "" && !noClone {
-		fmt.Printf("Cloning repository %s...\n", cfg.Source.Repo)
+		progress.Step(fmt.Sprintf("Cloning repository %s", cfg.Source.Repo))
 		if err := mgr.CloneRepo(ctx); err != nil {
-			fmt.Printf("Warning: failed to clone repository: %v\n", err)
+			progress.Warn(fmt.Sprintf("Failed to clone: %v", err))
 		}
 	} else if cfg.Source.Method == "copy" {
-		fmt.Println("Copying source files to container...")
-		if err := mgr.CopySourceToContainer(ctx); err != nil {
+		progress.Step("Copying source files to container")
+		if len(cfg.CopyExclude) > 0 {
+			progress.SubStep(fmt.Sprintf("Excluding: %v", cfg.CopyExclude))
+		}
+
+		// Progress display for file copying
+		var fileCount int
+		var recentFiles []string
+		const maxRecent = 3
+
+		onFile := func(filename string) {
+			fileCount++
+			// Keep only last N files
+			recentFiles = append(recentFiles, filename)
+			if len(recentFiles) > maxRecent {
+				recentFiles = recentFiles[1:]
+			}
+
+			// Clear previous lines and show current files
+			// Move up maxRecent lines, clear each, then print
+			for i := 0; i < maxRecent; i++ {
+				fmt.Print("\033[A\033[K") // Move up and clear line
+			}
+			for i := 0; i < maxRecent; i++ {
+				if i < len(recentFiles) {
+					// Truncate long filenames
+					name := recentFiles[i]
+					if len(name) > 60 {
+						name = "..." + name[len(name)-57:]
+					}
+					fmt.Printf("       %s\n", name)
+				} else {
+					fmt.Println()
+				}
+			}
+		}
+
+		// Print initial empty lines for the progress window
+		for i := 0; i < maxRecent; i++ {
+			fmt.Println()
+		}
+
+		if err := mgr.CopySourceToContainerWithProgress(ctx, onFile); err != nil {
 			return fmt.Errorf("failed to copy source files: %w", err)
 		}
-		fmt.Println("Source files copied successfully (container has isolated copy)")
+
+		// Clear the progress window
+		for i := 0; i < maxRecent; i++ {
+			fmt.Print("\033[A\033[K")
+		}
+		progress.Success(fmt.Sprintf("Copied %d files to container", fileCount))
+
+		// Fix ownership of specific paths
+		if len(cfg.ChownPaths) > 0 {
+			mgr.FixChownPaths(ctx)
+		}
 	}
 
 	// Fix node_modules permissions for mount method
 	if cfg.Source.Method == "mount" {
 		if cfg.Features.AllowWritableMount {
-			fmt.Println("WARNING: Writable mount enabled - container can modify your source files!")
+			progress.Warn("Writable mount enabled - container can modify your source files!")
 		}
 		mgr.FixNodeModulesPermissions(ctx)
 	}
 
+	// Fix volume permissions (volumes are created with root ownership)
+	progress.Step("Fixing volume permissions")
+	mgr.FixExtraVolumePermissions(ctx)
+	mgr.FixIDEServerPermissions(ctx)
+
+	// Start port forwarders (disabled - use devkit forward instead)
+	if len(cfg.Ports) > 0 {
+		mgr.StartPortForwarders(ctx)
+	}
+
 	// Install dependencies
-	noDeps, _ := cmd.Flags().GetBool("no-deps")
 	if !noDeps && detection != nil && detection.InstallCommand != "" {
-		fmt.Printf("Installing dependencies (%s)...\n", detection.InstallCommand)
+		progress.Step(fmt.Sprintf("Installing dependencies (%s)", detection.InstallCommand))
 		if err := mgr.InstallDependencies(ctx, detection.InstallCommand); err != nil {
-			fmt.Printf("Warning: failed to install dependencies: %v\n", err)
+			progress.Warn(fmt.Sprintf("Failed to install dependencies: %v", err))
 		}
 	}
 
@@ -324,25 +398,28 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Println("\nContainer started successfully!")
-	fmt.Printf("\nSSH connection available at: localhost:%d\n", cfg.SSH.Port)
+	progress.Done("Container started successfully!")
+
+	fmt.Printf("SSH: localhost:%d\n", cfg.SSH.Port)
+	if len(cfg.Ports) > 0 {
+		fmt.Printf("Ports: %v\n", cfg.Ports)
+	}
 
 	if cfg.Security.NetworkMode == "none" {
-		fmt.Println("\nSECURITY: Network is DISABLED (air-gapped mode)")
+		fmt.Println("\n⚠ SECURITY: Network is DISABLED (air-gapped mode)")
 	}
 	if noDebugPort || cfg.Security.DisableDebugPort {
-		fmt.Println("SECURITY: Debug port is DISABLED")
+		fmt.Println("⚠ SECURITY: Debug port is DISABLED")
 	}
 	if useDebugProxy {
-		fmt.Println("SECURITY: Debug traffic routed through filtering proxy")
-		fmt.Printf("          Filter level: %s\n", proxyFilterLevel)
-		fmt.Println("          Audit log: podman logs " + cfg.ContainerName() + "-debugproxy")
+		fmt.Println("⚠ SECURITY: Debug traffic routed through filtering proxy")
+		fmt.Printf("            Filter level: %s\n", proxyFilterLevel)
 	}
 
-	fmt.Println("\nConnect with VS Code:")
-	fmt.Printf("  1. Install 'Remote - SSH' extension\n")
-	fmt.Printf("  2. Connect to: ssh -p %d developer@localhost\n", cfg.SSH.Port)
-	fmt.Println("\nOr run 'devkit connect' for detailed instructions")
+	fmt.Println("\nNext steps:")
+	fmt.Printf("  • Connect IDE: ssh -p %d developer@localhost\n", cfg.SSH.Port)
+	fmt.Println("  • Open shell:  devkit shell")
+	fmt.Println("  • More info:   devkit connect")
 
 	// Open shell if requested
 	shell, _ := cmd.Flags().GetBool("shell")
