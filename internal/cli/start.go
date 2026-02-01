@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -119,6 +120,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to setup dedicated machine: %w", err)
 		}
 		fmt.Printf("Dedicated machine '%s' is ready\n\n", machineName)
+	} else if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		// On macOS/Windows without total isolation, ensure a Podman machine is running
+		machineMgr := machine.New()
+		running, name, _ := machineMgr.GetRunningMachine(ctx)
+		if !running {
+			fmt.Println("No Podman machine is running. Starting default machine...")
+			if err := machineMgr.EnsureRunning(ctx); err != nil {
+				return fmt.Errorf("failed to start Podman machine: %w\n\nTry: podman machine start", err)
+			}
+			fmt.Println()
+		} else {
+			// Ensure we're using the running machine as default
+			machineMgr.SetDefaultNamed(ctx, name)
+		}
 	}
 
 	// Apply paranoid mode settings

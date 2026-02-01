@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"runtime"
 
 	"github.com/jurajpiar/devkit/internal/builder"
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
 	"github.com/jurajpiar/devkit/internal/detector"
+	"github.com/jurajpiar/devkit/internal/machine"
 	"github.com/spf13/cobra"
 )
 
@@ -45,6 +47,22 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	// Check podman is available
 	if err := container.CheckPodman(); err != nil {
 		return fmt.Errorf("podman is required but not found: %w", err)
+	}
+
+	// On macOS/Windows, ensure a Podman machine is running
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		machineMgr := machine.New()
+		running, name, _ := machineMgr.GetRunningMachine(ctx)
+		if !running {
+			fmt.Println("No Podman machine is running. Starting default machine...")
+			if err := machineMgr.EnsureRunning(ctx); err != nil {
+				return fmt.Errorf("failed to start Podman machine: %w\n\nTry: podman machine start", err)
+			}
+			fmt.Println()
+		} else {
+			// Ensure we're using the running machine as default
+			machineMgr.SetDefaultNamed(ctx, name)
+		}
 	}
 
 	// Load config
