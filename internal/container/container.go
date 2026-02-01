@@ -1,10 +1,12 @@
 package container
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -79,12 +81,22 @@ func (m *Manager) buildCreateArgs() []string {
 	args = append(args,
 		"--tmpfs", "/tmp:rw,nosuid,size=512m",
 		"--tmpfs", "/run:rw,noexec,nosuid,size=64m",
-		"--tmpfs", "/home/developer/.npm:rw,nosuid,size=512m",
-		"--tmpfs", "/home/developer/.cache:rw,nosuid,size=512m",
 	)
 
 	// Use named volume for .ssh (works better with user namespaces)
 	args = append(args, "--volume", fmt.Sprintf("%s-ssh:/home/developer/.ssh:rw", containerName))
+
+	// Extra volumes (configurable, e.g., .npm, .cache)
+	for _, extraVol := range m.config.ExtraVolumes {
+		volumeName := sanitizeVolumeName(extraVol)
+		args = append(args, "--volume", fmt.Sprintf("%s-%s:/home/developer/%s:rw", containerName, volumeName, extraVol))
+	}
+
+	// IDE remote servers need writable directories (configurable)
+	for _, ideServer := range m.config.IDEServers {
+		volumeName := sanitizeVolumeName(ideServer)
+		args = append(args, "--volume", fmt.Sprintf("%s-%s:/home/developer/%s:rw", containerName, volumeName, ideServer))
+	}
 
 	// Network mode
 	switch m.config.Security.NetworkMode {
@@ -113,6 +125,11 @@ func (m *Manager) buildCreateArgs() []string {
 	// Add debug port for Node.js - localhost only (unless disabled)
 	if m.config.Project.Type == "nodejs" && !m.config.Security.DisableDebugPort {
 		args = append(args, "--publish", "127.0.0.1:9229:9229")
+	}
+
+	// Application ports - bound to localhost only for security
+	for _, port := range m.config.Ports {
+		args = append(args, "--publish", fmt.Sprintf("127.0.0.1:%d:%d", port, port))
 	}
 
 	// Workspace volume - only for git/copy methods, not mount
@@ -278,20 +295,117 @@ func (m *Manager) FixNodeModulesPermissions(ctx context.Context) {
 	m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/workspace/node_modules")
 }
 
+// FixExtraVolumePermissions fixes ownership of extra volumes (e.g., .npm, .cache)
+// Named volumes are created with root ownership, but apps need developer ownership
+func (m *Manager) FixExtraVolumePermissions(ctx context.Context) {
+	for _, extraVol := range m.config.ExtraVolumes {
+		m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/"+extraVol)
+	}
+}
+
+// FixIDEServerPermissions fixes ownership of IDE server directories
+// Named volumes are created with root ownership, but IDEs need developer ownership
+func (m *Manager) FixIDEServerPermissions(ctx context.Context) {
+	for _, ideServer := range m.config.IDEServers {
+		m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/"+ideServer)
+	}
+}
+
+// FixChownPaths fixes ownership of specified paths in workspace
+// For paths that need explicit chown after copying
+func (m *Manager) FixChownPaths(ctx context.Context) {
+	for _, path := range m.config.ChownPaths {
+		m.Exec(ctx, "chown", "-R", "developer:developer", "/home/developer/workspace/"+path)
+	}
+}
+
+// StartPortForwarders is deprecated - socat forwarders conflict with app port binding
+// Use SSH port forwarding via 'devkit forward' instead, or configure apps to bind to 0.0.0.0
+func (m *Manager) StartPortForwarders(ctx context.Context) {
+	// Disabled: socat binds the port before the app can, causing conflicts
+	// The published ports work fine when apps bind to 0.0.0.0
+	// For apps binding to localhost, use 'devkit forward <port>' which creates SSH tunnels
+}
+
 // CopySourceToContainer copies the current directory into the container's workspace
 // This is the most secure method - container gets isolated copy, host is never touched again
 func (m *Manager) CopySourceToContainer(ctx context.Context) error {
+	return m.CopySourceToContainerWithProgress(ctx, nil)
+}
+
+// CopySourceToContainerWithProgress copies with optional progress callback
+func (m *Manager) CopySourceToContainerWithProgress(ctx context.Context, onFile func(filename string)) error {
 	containerName := m.config.ContainerName()
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Use podman cp to copy current directory contents to container
-	// The trailing /. copies contents, not the directory itself
-	_, err = m.runPodman(ctx, "cp", cwd+"/.", containerName+":/home/developer/workspace/")
+	// Build tar command with exclusions and verbose output
+	tarArgs := []string{"-cv", "-f", "-"}
+	for _, exclude := range m.config.CopyExclude {
+		tarArgs = append(tarArgs, "--exclude="+exclude)
+	}
+	tarArgs = append(tarArgs, ".")
+
+	// Create tar process
+	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	tarCmd.Dir = cwd
+
+	// Create podman exec process to receive tar
+	podmanArgs := []string{"exec", "-i", containerName, "tar", "-xf", "-", "-C", "/home/developer/workspace/"}
+	podmanCmd := exec.CommandContext(ctx, "podman", podmanArgs...)
+
+	// Pipe tar stdout to podman stdin
+	tarOut, err := tarCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to copy files to container: %w", err)
+		return fmt.Errorf("failed to create tar pipe: %w", err)
+	}
+	podmanCmd.Stdin = tarOut
+
+	// Capture tar's verbose output (stderr) for progress display
+	tarStderr, err := tarCmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create tar stderr pipe: %w", err)
+	}
+
+	var podmanStderr bytes.Buffer
+	podmanCmd.Stderr = &podmanStderr
+
+	// Start both processes
+	if err := tarCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start tar: %w", err)
+	}
+	if err := podmanCmd.Start(); err != nil {
+		tarCmd.Process.Kill()
+		return fmt.Errorf("failed to start podman: %w", err)
+	}
+
+	// Read tar's verbose output and call progress callback
+	if onFile != nil {
+		go func() {
+			scanner := bufio.NewScanner(tarStderr)
+			for scanner.Scan() {
+				filename := scanner.Text()
+				onFile(filename)
+			}
+		}()
+	} else {
+		// Drain stderr
+		go func() {
+			io.Copy(io.Discard, tarStderr)
+		}()
+	}
+
+	// Wait for both to complete
+	tarErr := tarCmd.Wait()
+	podmanErr := podmanCmd.Wait()
+
+	if tarErr != nil {
+		return fmt.Errorf("tar failed: %w", tarErr)
+	}
+	if podmanErr != nil {
+		return fmt.Errorf("podman extract failed: %w (stderr: %s)", podmanErr, podmanStderr.String())
 	}
 
 	// Fix ownership so developer user can access the files
@@ -504,12 +618,32 @@ func (m *Manager) Commit(ctx context.Context, imageName string) (string, error) 
 func (m *Manager) RemoveVolumes(ctx context.Context) error {
 	containerName := m.config.ContainerName()
 
-	// Remove volumes (if they exist)
+	// Remove core volumes
 	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-workspace")
 	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-ssh")
 	m.runPodman(ctx, "volume", "rm", "-f", containerName+"-node_modules")
 
+	// Remove extra volumes (from config)
+	for _, extraVol := range m.config.ExtraVolumes {
+		volumeName := sanitizeVolumeName(extraVol)
+		m.runPodman(ctx, "volume", "rm", "-f", containerName+"-"+volumeName)
+	}
+
+	// Remove IDE server volumes (from config)
+	for _, ideServer := range m.config.IDEServers {
+		volumeName := sanitizeVolumeName(ideServer)
+		m.runPodman(ctx, "volume", "rm", "-f", containerName+"-"+volumeName)
+	}
+
 	return nil
+}
+
+// sanitizeVolumeName removes leading dots from volume names
+func sanitizeVolumeName(name string) string {
+	if len(name) > 0 && name[0] == '.' {
+		return name[1:]
+	}
+	return name
 }
 
 // runPodman executes a podman command and returns output
