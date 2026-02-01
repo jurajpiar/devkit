@@ -3,13 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
-	"runtime"
 
 	"github.com/jurajpiar/devkit/internal/builder"
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
 	"github.com/jurajpiar/devkit/internal/detector"
-	"github.com/jurajpiar/devkit/internal/machine"
+	"github.com/jurajpiar/devkit/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -44,27 +43,6 @@ func init() {
 func runBuild(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// Check podman is available
-	if err := container.CheckPodman(); err != nil {
-		return fmt.Errorf("podman is required but not found: %w", err)
-	}
-
-	// On macOS/Windows, ensure a Podman machine is running
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		machineMgr := machine.New()
-		running, name, _ := machineMgr.GetRunningMachine(ctx)
-		if !running {
-			fmt.Println("No Podman machine is running. Starting default machine...")
-			if err := machineMgr.EnsureRunning(ctx); err != nil {
-				return fmt.Errorf("failed to start Podman machine: %w\n\nTry: podman machine start", err)
-			}
-			fmt.Println()
-		} else {
-			// Ensure we're using the running machine as default
-			machineMgr.SetDefaultNamed(ctx, name)
-		}
-	}
-
 	// Load config
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
@@ -75,6 +53,19 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w\n\nRun 'devkit init' to create a configuration file", err)
 	}
+
+	// Setup runtime based on configuration
+	rc, err := SetupRuntime(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to setup runtime: %w", err)
+	}
+
+	// For Lima, we use a different build path
+	if rc.Backend == runtime.BackendLima {
+		return runBuildLima(ctx, cmd, cfg, rc)
+	}
+
+	// For Podman, continue with existing logic (uses container.CheckPodman indirectly via builder)
 
 	fmt.Printf("Building image for project: %s\n", cfg.Project.Name)
 	fmt.Printf("Project type: %s\n", cfg.Project.Type)
@@ -141,6 +132,82 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if buildProxy {
 		fmt.Println("  devkit start --debug-proxy  - Start with debug proxy filtering")
 	}
+
+	return nil
+}
+
+// runBuildLima handles building with Lima runtime
+func runBuildLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, rc *RuntimeContext) error {
+	fmt.Printf("Building image for project: %s (using Lima)\n", cfg.Project.Name)
+	fmt.Printf("Project type: %s\n", cfg.Project.Type)
+	fmt.Printf("Runtime: %s\n", cfg.Dependencies.Runtime)
+	fmt.Printf("Lima VM: %s\n", rc.VMName)
+
+	// Detect project settings
+	var detection *detector.DetectionResult
+	det := detector.New(".")
+	detection, _ = det.Detect()
+
+	if detection != nil && detection.Type != detector.TypeUnknown {
+		fmt.Printf("Detected package manager: %s\n", detection.PackageManager)
+	}
+
+	// Create builder to generate Containerfile
+	b := builder.New(cfg, detection)
+	imageName := b.GetImageName()
+
+	// Check if image exists
+	force, _ := cmd.Flags().GetBool("force")
+	if !force {
+		exists, _ := rc.Runtime.ImageExists(ctx, imageName)
+		if exists {
+			fmt.Printf("Image %s already exists. Use --force to rebuild.\n", imageName)
+			return nil
+		}
+	}
+
+	// Save Containerfile if requested
+	saveContainerfile, _ := cmd.Flags().GetBool("save-containerfile")
+	if saveContainerfile {
+		if err := b.SaveContainerfile("Containerfile"); err != nil {
+			return fmt.Errorf("failed to save Containerfile: %w", err)
+		}
+		fmt.Println("Saved Containerfile to current directory")
+	}
+
+	// Generate Containerfile content
+	containerfileContent, err := b.GenerateContainerfile()
+	if err != nil {
+		return fmt.Errorf("failed to generate Containerfile: %w", err)
+	}
+
+	// Save to temp file for building
+	if err := b.SaveContainerfile(".devkit-Containerfile"); err != nil {
+		return fmt.Errorf("failed to save Containerfile: %w", err)
+	}
+	defer func() {
+		// Clean up temp file
+		_ = containerfileContent // Used to generate the file
+	}()
+
+	// Build using Lima runtime
+	fmt.Println("\nBuilding container image...")
+	noCache, _ := cmd.Flags().GetBool("no-cache")
+
+	buildOpts := runtime.BuildOpts{
+		ContextDir: ".",
+		Dockerfile: ".devkit-Containerfile",
+		ImageName:  imageName,
+		NoCache:    noCache,
+	}
+
+	if err := rc.Runtime.Build(ctx, buildOpts); err != nil {
+		return fmt.Errorf("build failed: %w", err)
+	}
+
+	fmt.Printf("\nSuccessfully built image: %s\n", imageName)
+	fmt.Println("\nNext steps:")
+	fmt.Println("  devkit start    - Start the development container")
 
 	return nil
 }

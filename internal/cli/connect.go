@@ -8,6 +8,7 @@ import (
 
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
+	"github.com/jurajpiar/devkit/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -37,11 +38,6 @@ func init() {
 func runConnect(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// Check podman is available
-	if err := container.CheckPodman(); err != nil {
-		return fmt.Errorf("podman is required but not found: %w", err)
-	}
-
 	// Load config
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
@@ -53,10 +49,34 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Create container manager and check status
-	mgr := container.New(cfg)
+	// Check if container is running using the appropriate runtime
+	containerName := cfg.ContainerName()
+	var running bool
 
-	running, _ := mgr.IsRunning(ctx)
+	if cfg.IsLimaBackend() {
+		// Use Lima runtime
+		rc, err := SetupRuntime(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("failed to setup runtime: %w", err)
+		}
+
+		info, err := rc.Runtime.GetInfo(ctx, containerName)
+		if err != nil {
+			if _, ok := err.(runtime.ErrContainerNotFound); ok {
+				return fmt.Errorf("container is not running\n\nRun 'devkit start' first")
+			}
+			return fmt.Errorf("failed to check container: %w", err)
+		}
+		running = info.Status == "running" || info.Status == "Up"
+	} else {
+		// Use Podman
+		if err := container.CheckPodman(); err != nil {
+			return fmt.Errorf("podman is required but not found: %w", err)
+		}
+		mgr := container.New(cfg)
+		running, _ = mgr.IsRunning(ctx)
+	}
+
 	if !running {
 		return fmt.Errorf("container is not running\n\nRun 'devkit start' first")
 	}

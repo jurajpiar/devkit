@@ -17,6 +17,7 @@ type Config struct {
 	Features     FeaturesConfig     `yaml:"features" mapstructure:"features"`
 	SSH          SSHConfig          `yaml:"ssh" mapstructure:"ssh"`
 	Security     SecurityConfig     `yaml:"security" mapstructure:"security"`
+	Runtime      RuntimeConfig      `yaml:"runtime,omitempty" mapstructure:"runtime"`
 	Monitoring   MonitoringConfig   `yaml:"monitoring,omitempty" mapstructure:"monitoring"`
 	Ports        []int    `yaml:"ports,omitempty" mapstructure:"ports"`                   // Application ports to expose (bound to localhost)
 	IDEServers   []string `yaml:"ide_servers,omitempty" mapstructure:"ide_servers"`         // IDE server directories (e.g., .vscode-server, .cursor-server)
@@ -129,6 +130,36 @@ type MonitoringSecurityConfig struct {
 	AlertThreshold string `yaml:"alert_threshold,omitempty" mapstructure:"alert_threshold"`
 }
 
+// RuntimeConfig configures the container runtime backend
+type RuntimeConfig struct {
+	// Backend specifies which runtime to use: podman, lima, docker
+	Backend string `yaml:"backend" mapstructure:"backend"`
+	// Lima holds Lima-specific configuration
+	Lima LimaRuntimeConfig `yaml:"lima,omitempty" mapstructure:"lima"`
+	// Podman holds Podman-specific configuration
+	Podman PodmanRuntimeConfig `yaml:"podman,omitempty" mapstructure:"podman"`
+}
+
+// LimaRuntimeConfig holds Lima-specific runtime settings
+type LimaRuntimeConfig struct {
+	// VMType specifies the VM type: vz (Apple Virtualization.framework, fast) or qemu
+	VMType string `yaml:"vm_type" mapstructure:"vm_type"`
+	// CPUs specifies the number of CPUs for the VM
+	CPUs int `yaml:"cpus" mapstructure:"cpus"`
+	// MemoryGB specifies the memory in GB for the VM
+	MemoryGB int `yaml:"memory_gb" mapstructure:"memory_gb"`
+	// DiskGB specifies the disk size in GB for the VM
+	DiskGB int `yaml:"disk_gb" mapstructure:"disk_gb"`
+	// PerProjectVM enables per-project VM isolation (double isolation)
+	PerProjectVM bool `yaml:"per_project_vm" mapstructure:"per_project_vm"`
+}
+
+// PodmanRuntimeConfig holds Podman-specific runtime settings
+type PodmanRuntimeConfig struct {
+	// MachineName specifies the Podman machine name
+	MachineName string `yaml:"machine_name" mapstructure:"machine_name"`
+}
+
 // DefaultConfig returns a config with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -165,6 +196,19 @@ func DefaultConfig() *Config {
 			DisableDebugPort:      false,     // Enable by default for dev convenience
 			UseDebugProxy:         false,     // Disabled by default
 			DebugProxyFilterLevel: "filtered", // Default filter level
+		},
+		Runtime: RuntimeConfig{
+			Backend: "podman", // Default to Podman (current behavior)
+			Lima: LimaRuntimeConfig{
+				VMType:       "vz",  // Fast on Apple Silicon
+				CPUs:         4,
+				MemoryGB:     8,
+				DiskGB:       50,
+				PerProjectVM: true,  // Double isolation by default
+			},
+			Podman: PodmanRuntimeConfig{
+				MachineName: "devkit",
+			},
 		},
 		Monitoring: MonitoringConfig{
 			Enabled: true,
@@ -353,6 +397,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.use_debug_proxy", false)
 	v.SetDefault("security.debug_proxy_filter_level", "filtered")
 	v.SetDefault("security.total_isolation", false)
+	// Runtime defaults
+	v.SetDefault("runtime.backend", "podman")
+	v.SetDefault("runtime.lima.vm_type", "vz")
+	v.SetDefault("runtime.lima.cpus", 4)
+	v.SetDefault("runtime.lima.memory_gb", 8)
+	v.SetDefault("runtime.lima.disk_gb", 50)
+	v.SetDefault("runtime.lima.per_project_vm", true)
+	v.SetDefault("runtime.podman.machine_name", "devkit")
 	// Monitoring defaults
 	v.SetDefault("monitoring.enabled", true)
 	v.SetDefault("monitoring.outputs.cli", true)
@@ -416,5 +468,52 @@ func (c *Config) AddPorts(ports ...int) {
 			c.Ports = append(c.Ports, p)
 			existing[p] = true
 		}
+	}
+}
+
+// VMName returns the VM name for this project based on runtime configuration
+func (c *Config) VMName() string {
+	switch c.Runtime.Backend {
+	case "lima":
+		if c.Runtime.Lima.PerProjectVM {
+			// Per-project VM for double isolation
+			if c.Project.Name != "" {
+				return fmt.Sprintf("devkit-%s", c.Project.Name)
+			}
+			return "devkit-dev"
+		}
+		return "devkit-shared"
+	case "podman":
+		if c.Security.TotalIsolation {
+			return c.DedicatedMachineName()
+		}
+		if c.Runtime.Podman.MachineName != "" {
+			return c.Runtime.Podman.MachineName
+		}
+		return "devkit"
+	default:
+		return "devkit"
+	}
+}
+
+// IsLimaBackend returns true if Lima is the configured runtime backend
+func (c *Config) IsLimaBackend() bool {
+	return c.Runtime.Backend == "lima"
+}
+
+// IsPodmanBackend returns true if Podman is the configured runtime backend
+func (c *Config) IsPodmanBackend() bool {
+	return c.Runtime.Backend == "podman" || c.Runtime.Backend == ""
+}
+
+// RequiresDoubleIsolation returns true if per-project VM isolation is enabled
+func (c *Config) RequiresDoubleIsolation() bool {
+	switch c.Runtime.Backend {
+	case "lima":
+		return c.Runtime.Lima.PerProjectVM
+	case "podman":
+		return c.Security.TotalIsolation
+	default:
+		return false
 	}
 }

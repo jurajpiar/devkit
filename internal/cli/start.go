@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
-	"runtime"
+	"os"
+	"os/exec"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/jurajpiar/devkit/internal/container"
 	"github.com/jurajpiar/devkit/internal/detector"
 	"github.com/jurajpiar/devkit/internal/machine"
+	"github.com/jurajpiar/devkit/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -77,11 +80,6 @@ func init() {
 func runStart(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// Check podman is available
-	if err := container.CheckPodman(); err != nil {
-		return fmt.Errorf("podman is required but not found: %w", err)
-	}
-
 	// Load config
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
@@ -106,22 +104,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 		cfg.Security.TotalIsolation = true
 	}
 
-	// Handle total isolation mode - dedicated Podman machine per project
-	if cfg.Security.TotalIsolation {
-		machineName := cfg.DedicatedMachineName()
-		fmt.Println("=== TOTAL ISOLATION MODE ===")
-		fmt.Printf("Running project in dedicated VM: %s\n", machineName)
-		fmt.Println("- Container escape confined to dedicated VM")
-		fmt.Println("- No shared kernel with other projects")
-		fmt.Println()
+	// Setup runtime based on configuration
+	rc, err := SetupRuntime(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to setup runtime: %w", err)
+	}
 
-		machineMgr := machine.New()
-		if err := machineMgr.EnsureRunningNamed(ctx, machineName, true); err != nil {
-			return fmt.Errorf("failed to setup dedicated machine: %w", err)
-		}
-		fmt.Printf("Dedicated machine '%s' is ready\n\n", machineName)
-	} else if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		// On macOS/Windows without total isolation, ensure a Podman machine is running
+	// For Lima backend, use Lima-specific start flow
+	if rc.Backend == runtime.BackendLima {
+		return runStartLima(ctx, cmd, cfg, rc, paranoid, offline, noDebugPort, useDebugProxy, proxyFilterLevel)
+	}
+
+	// For Podman backend with total isolation, the SetupRuntime already handled VM setup
+	// For Podman backend without total isolation on macOS/Windows, ensure a machine is running
+	if !cfg.Security.TotalIsolation && (goruntime.GOOS == "darwin" || goruntime.GOOS == "windows") {
 		machineMgr := machine.New()
 		running, name, _ := machineMgr.GetRunningMachine(ctx)
 		if !running {
@@ -462,4 +458,358 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// runStartLima handles starting with Lima runtime
+func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, rc *RuntimeContext,
+	paranoid, offline, noDebugPort, useDebugProxy bool, proxyFilterLevel string) error {
+
+	// Apply paranoid mode settings
+	if paranoid {
+		fmt.Println("=== PARANOID MODE ENABLED ===")
+		fmt.Println("- Network will be disabled after setup")
+		fmt.Println("- Debug proxy with STRICT filtering enabled")
+		fmt.Println("- Stricter resource limits applied")
+		fmt.Println()
+
+		useDebugProxy = true
+		proxyFilterLevel = "strict"
+		cfg.Security.MemoryLimit = "2g"
+		cfg.Security.PidsLimit = 256
+	}
+
+	// Apply offline mode
+	if offline {
+		cfg.Security.NetworkMode = "none"
+	}
+
+	// Apply debug port setting
+	if noDebugPort {
+		cfg.Security.DisableDebugPort = true
+		useDebugProxy = false
+	}
+
+	// Apply debug proxy settings
+	if useDebugProxy {
+		cfg.Security.UseDebugProxy = true
+		cfg.Security.DebugProxyFilterLevel = proxyFilterLevel
+		cfg.Security.DisableDebugPort = false
+	}
+
+	containerName := cfg.ContainerName()
+
+	// Check if container exists
+	exists, _ := rc.Runtime.Exists(ctx, containerName)
+	rebuild, _ := cmd.Flags().GetBool("rebuild")
+
+	if exists && rebuild {
+		fmt.Println("Removing existing container...")
+		if err := rc.Runtime.Remove(ctx, containerName); err != nil {
+			return fmt.Errorf("failed to remove container: %w", err)
+		}
+		exists = false
+	}
+
+	// Check if already running
+	if exists {
+		running, _ := rc.Runtime.IsRunning(ctx, containerName)
+		if running {
+			fmt.Printf("Container %s is already running\n", containerName)
+			fmt.Printf("SSH available at: localhost:%d\n", cfg.SSH.Port)
+
+			shell, _ := cmd.Flags().GetBool("shell")
+			if shell {
+				return rc.Runtime.ExecInteractive(ctx, containerName, "bash")
+			}
+			return nil
+		}
+	}
+
+	// Detect project settings
+	var detection *detector.DetectionResult
+	det := detector.New(".")
+	detection, _ = det.Detect()
+
+	// Get image name
+	b := builder.New(cfg, detection)
+	imageName := b.GetImageName()
+
+	// Check if image exists
+	imageExists, _ := rc.Runtime.ImageExists(ctx, imageName)
+	if !imageExists {
+		return fmt.Errorf("image %s not found\n\nRun 'devkit build' first to build the container image", imageName)
+	}
+
+	// Calculate total steps
+	totalSteps := 6
+	noDeps, _ := cmd.Flags().GetBool("no-deps")
+	noClone, _ := cmd.Flags().GetBool("no-clone")
+	if cfg.Source.Method == "git" && cfg.Source.Repo != "" && !noClone {
+		totalSteps++
+	} else if cfg.Source.Method == "copy" {
+		totalSteps++
+	}
+	if !noDeps && detection != nil && detection.InstallCommand != "" {
+		totalSteps++
+	}
+
+	progress := NewProgress(totalSteps)
+
+	// Build CreateOpts for Lima
+	createOpts := runtime.CreateOpts{
+		Name:     containerName,
+		Image:    imageName,
+		Hostname: "devkit",
+		Env: map[string]string{
+			"GIT_REPO":   cfg.Source.Repo,
+			"GIT_BRANCH": cfg.Source.Branch,
+		},
+	}
+
+	// Security settings
+	if cfg.Security.DropAllCapabilities {
+		createOpts.CapDrop = []string{"ALL"}
+		createOpts.CapAdd = []string{"SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "FOWNER"}
+	}
+	if cfg.Security.NoNewPrivileges {
+		createOpts.SecurityOpts = append(createOpts.SecurityOpts, "no-new-privileges:true")
+	}
+	if cfg.Security.ReadOnlyRootfs {
+		createOpts.ReadOnly = true
+	}
+	createOpts.Tmpfs = []runtime.TmpfsMount{
+		{Target: "/tmp", Options: "rw,nosuid,size=512m"},
+		{Target: "/run", Options: "rw,noexec,nosuid,size=64m"},
+	}
+
+	// SSH port
+	createOpts.Ports = []runtime.PortMapping{
+		{HostIP: "127.0.0.1", HostPort: cfg.SSH.Port, ContainerPort: 2222},
+	}
+
+	// Debug port
+	if cfg.Project.Type == "nodejs" && !cfg.Security.DisableDebugPort {
+		createOpts.Ports = append(createOpts.Ports, runtime.PortMapping{
+			HostIP: "127.0.0.1", HostPort: 9229, ContainerPort: 9229,
+		})
+	}
+
+	// Application ports
+	for _, port := range cfg.Ports {
+		createOpts.Ports = append(createOpts.Ports, runtime.PortMapping{
+			HostIP: "127.0.0.1", HostPort: port, ContainerPort: port,
+		})
+	}
+
+	// Network mode
+	switch cfg.Security.NetworkMode {
+	case "none":
+		createOpts.NetworkMode = "none"
+	case "restricted":
+		createOpts.NetworkMode = "bridge"
+	case "full":
+		createOpts.NetworkMode = "bridge"
+	}
+
+	// Resource limits
+	if cfg.Security.MemoryLimit != "" {
+		createOpts.Memory = cfg.Security.MemoryLimit
+	}
+	if cfg.Security.PidsLimit > 0 {
+		createOpts.PidsLimit = cfg.Security.PidsLimit
+	}
+
+	// Volumes
+	createOpts.Volumes = []runtime.VolumeMount{
+		{Source: containerName + "-ssh", Target: "/home/developer/.ssh", Type: "volume"},
+		{Source: containerName + "-workspace", Target: "/home/developer/workspace", Type: "volume"},
+	}
+
+	for _, extraVol := range cfg.ExtraVolumes {
+		volName := strings.TrimPrefix(extraVol, ".")
+		createOpts.Volumes = append(createOpts.Volumes, runtime.VolumeMount{
+			Source: containerName + "-" + volName,
+			Target: "/home/developer/" + extraVol,
+			Type:   "volume",
+		})
+	}
+
+	for _, ideServer := range cfg.IDEServers {
+		volName := strings.TrimPrefix(ideServer, ".")
+		createOpts.Volumes = append(createOpts.Volumes, runtime.VolumeMount{
+			Source: containerName + "-" + volName,
+			Target: "/home/developer/" + ideServer,
+			Type:   "volume",
+		})
+	}
+
+	// Create container if it doesn't exist
+	if !exists {
+		progress.Step(fmt.Sprintf("Creating container %s", containerName))
+		_, err := rc.Runtime.Create(ctx, createOpts)
+		if err != nil {
+			return fmt.Errorf("failed to create container: %w", err)
+		}
+	} else {
+		progress.Step("Using existing container")
+	}
+
+	// Start container
+	progress.Step("Starting container")
+	if err := rc.Runtime.Start(ctx, containerName); err != nil {
+		return fmt.Errorf("failed to start container: %w", err)
+	}
+
+	// Wait for container to be ready
+	progress.Step("Waiting for container to be ready")
+	time.Sleep(2 * time.Second)
+
+	// Setup SSH keys using runtime exec
+	progress.Step("Setting up SSH keys")
+	setupSSHInContainer(ctx, rc.Runtime, containerName, cfg)
+
+	// Clone repository or copy files
+	if cfg.Source.Method == "git" && cfg.Source.Repo != "" && !noClone {
+		progress.Step(fmt.Sprintf("Cloning repository %s", cfg.Source.Repo))
+		cloneCmd := fmt.Sprintf("git clone --branch %s %s /home/developer/workspace", cfg.Source.Branch, cfg.Source.Repo)
+		_, err := rc.Runtime.ExecAsUser(ctx, containerName, "developer", "bash", "-c", cloneCmd)
+		if err != nil {
+			progress.Warn(fmt.Sprintf("Failed to clone: %v", err))
+		}
+	} else if cfg.Source.Method == "copy" {
+		progress.Step("Copying source files to container")
+		// Copy source files to container using Lima runtime
+		if err := copySourceToContainerLima(ctx, rc, cfg, containerName); err != nil {
+			return fmt.Errorf("failed to copy source files: %w", err)
+		}
+		progress.Success("Copied files to container")
+	}
+
+	// Fix volume permissions
+	progress.Step("Fixing volume permissions")
+	for _, extraVol := range cfg.ExtraVolumes {
+		rc.Runtime.Exec(ctx, containerName, "chown", "-R", "developer:developer", "/home/developer/"+extraVol)
+	}
+	for _, ideServer := range cfg.IDEServers {
+		rc.Runtime.Exec(ctx, containerName, "chown", "-R", "developer:developer", "/home/developer/"+ideServer)
+	}
+
+	// Install dependencies
+	if !noDeps && detection != nil && detection.InstallCommand != "" {
+		progress.Step(fmt.Sprintf("Installing dependencies (%s)", detection.InstallCommand))
+		fmt.Println()
+		installCmd := fmt.Sprintf("cd /home/developer/workspace && %s", detection.InstallCommand)
+		_, err := rc.Runtime.ExecAsUser(ctx, containerName, "developer", "bash", "-c", installCmd)
+		if err != nil {
+			progress.Warn(fmt.Sprintf("Failed to install dependencies: %v", err))
+		}
+	}
+
+	progress.Done("Container started successfully!")
+
+	fmt.Printf("SSH: localhost:%d\n", cfg.SSH.Port)
+	if len(cfg.Ports) > 0 {
+		fmt.Printf("Ports: %v\n", cfg.Ports)
+	}
+
+	if cfg.Security.NetworkMode == "none" {
+		fmt.Println("\n⚠ SECURITY: Network is DISABLED (air-gapped mode)")
+	}
+
+	fmt.Println("\nNext steps:")
+	fmt.Printf("  • Connect IDE: ssh -p %d developer@localhost\n", cfg.SSH.Port)
+	fmt.Println("  • Open shell:  devkit shell")
+	fmt.Println("  • View stats:  devkit stats")
+
+	// Open shell if requested
+	shell, _ := cmd.Flags().GetBool("shell")
+	if shell {
+		fmt.Println("\nOpening shell...")
+		return rc.Runtime.ExecInteractive(ctx, containerName, "bash")
+	}
+
+	return nil
+}
+
+// copySourceToContainerLima copies source files to container using Lima runtime
+func copySourceToContainerLima(ctx context.Context, rc *RuntimeContext, cfg *config.Config, containerName string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Create a temporary tarball (excluding configured paths)
+	tmpFile, err := os.CreateTemp("", "devkit-source-*.tar")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Build tar command with exclusions
+	tarArgs := []string{"-cf", tmpPath}
+	for _, exclude := range cfg.CopyExclude {
+		tarArgs = append(tarArgs, "--exclude="+exclude)
+	}
+	tarArgs = append(tarArgs, ".")
+
+	// Create tarball
+	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	tarCmd.Dir = cwd
+	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1") // Disable macOS metadata
+
+	if err := tarCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create tarball: %w", err)
+	}
+
+	// Copy tarball to container
+	if err := rc.Runtime.CopyTo(ctx, containerName, tmpPath, "/tmp/source.tar"); err != nil {
+		return fmt.Errorf("failed to copy tarball to container: %w", err)
+	}
+
+	// Fix tarball ownership and extract as developer user
+	rc.Runtime.Exec(ctx, containerName, "chown", "developer:developer", "/tmp/source.tar")
+	_, err = rc.Runtime.ExecAsUser(ctx, containerName, "developer", "tar", "-xf", "/tmp/source.tar", "-C", "/home/developer/workspace/")
+	if err != nil {
+		return fmt.Errorf("failed to extract tarball: %w", err)
+	}
+
+	// Clean up and fix ownership
+	rc.Runtime.Exec(ctx, containerName, "rm", "-f", "/tmp/source.tar")
+	rc.Runtime.Exec(ctx, containerName, "chown", "-R", "developer:developer", "/home/developer/workspace")
+
+	return nil
+}
+
+// setupSSHInContainer sets up SSH keys inside the container
+func setupSSHInContainer(ctx context.Context, rt runtime.Runtime, containerName string, cfg *config.Config) error {
+	// Read user's public SSH key
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not find home directory: %w", err)
+	}
+
+	// Try common SSH key locations
+	keyPaths := []string{
+		homeDir + "/.ssh/id_ed25519.pub",
+		homeDir + "/.ssh/id_rsa.pub",
+	}
+
+	var pubKey string
+	for _, keyPath := range keyPaths {
+		if data, err := os.ReadFile(keyPath); err == nil {
+			pubKey = strings.TrimSpace(string(data))
+			break
+		}
+	}
+
+	if pubKey == "" {
+		return fmt.Errorf("no SSH public key found in ~/.ssh/")
+	}
+
+	// Setup authorized_keys in container
+	cmd := fmt.Sprintf(`mkdir -p /home/developer/.ssh && echo '%s' >> /home/developer/.ssh/authorized_keys && chmod 700 /home/developer/.ssh && chmod 600 /home/developer/.ssh/authorized_keys`, pubKey)
+	_, err = rt.ExecAsUser(ctx, containerName, "developer", "bash", "-c", cmd)
+	return err
 }

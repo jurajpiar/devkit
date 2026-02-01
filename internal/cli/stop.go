@@ -7,6 +7,7 @@ import (
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
 	"github.com/jurajpiar/devkit/internal/machine"
+	"github.com/jurajpiar/devkit/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -37,11 +38,6 @@ func init() {
 func runStop(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// Check podman is available
-	if err := container.CheckPodman(); err != nil {
-		return fmt.Errorf("podman is required but not found: %w", err)
-	}
-
 	// Load config
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
@@ -53,13 +49,86 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	containerName := cfg.ContainerName()
+	remove, _ := cmd.Flags().GetBool("remove")
+
+	// Handle Lima backend
+	if cfg.IsLimaBackend() {
+		return runStopLima(ctx, cfg, containerName, remove, cmd)
+	}
+
+	// Handle Podman backend
+	return runStopPodman(ctx, cfg, containerName, remove, cmd)
+}
+
+func runStopLima(ctx context.Context, cfg *config.Config, containerName string, remove bool, cmd *cobra.Command) error {
+	rc, err := SetupRuntime(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to setup runtime: %w", err)
+	}
+
+	// Check if container exists
+	info, err := rc.Runtime.GetInfo(ctx, containerName)
+	if err != nil {
+		if _, ok := err.(runtime.ErrContainerNotFound); ok {
+			fmt.Printf("Container %s does not exist\n", containerName)
+			return nil
+		}
+		return fmt.Errorf("failed to check container: %w", err)
+	}
+
+	// Check if running
+	running := info.Status == "running" || info.Status == "Up"
+	if running {
+		fmt.Printf("Stopping container %s...\n", containerName)
+		if err := rc.Runtime.Stop(ctx, containerName); err != nil {
+			return fmt.Errorf("failed to stop container: %w", err)
+		}
+		fmt.Println("Container stopped")
+	} else {
+		fmt.Printf("Container %s is not running\n", containerName)
+	}
+
+	// Remove if requested
+	if remove {
+		fmt.Println("Removing container...")
+		if err := rc.Runtime.Remove(ctx, containerName); err != nil {
+			return fmt.Errorf("failed to remove container: %w", err)
+		}
+		fmt.Println("Container removed")
+	}
+
+	// Stop VM if requested
+	stopMachine, _ := cmd.Flags().GetBool("stop-machine")
+	if stopMachine && rc.VMManager != nil {
+		vmName := cfg.VMName()
+		running, _ := rc.VMManager.IsRunning(ctx, vmName)
+		if running {
+			fmt.Printf("Stopping Lima VM '%s'...\n", vmName)
+			if err := rc.VMManager.Stop(ctx, vmName); err != nil {
+				fmt.Printf("Warning: failed to stop VM: %v\n", err)
+			} else {
+				fmt.Printf("Lima VM '%s' stopped\n", vmName)
+			}
+		}
+	}
+
+	return nil
+}
+
+func runStopPodman(ctx context.Context, cfg *config.Config, containerName string, remove bool, cmd *cobra.Command) error {
+	// Check podman is available
+	if err := container.CheckPodman(); err != nil {
+		return fmt.Errorf("podman is required but not found: %w", err)
+	}
+
 	// Create container manager
 	mgr := container.New(cfg)
 
 	// Check if container exists
 	exists, _ := mgr.Exists(ctx)
 	if !exists {
-		fmt.Printf("Container %s does not exist\n", cfg.ContainerName())
+		fmt.Printf("Container %s does not exist\n", containerName)
 		return nil
 	}
 
@@ -73,17 +142,16 @@ func runStop(cmd *cobra.Command, args []string) error {
 	// Check if running
 	running, _ := mgr.IsRunning(ctx)
 	if running {
-		fmt.Printf("Stopping container %s...\n", cfg.ContainerName())
+		fmt.Printf("Stopping container %s...\n", containerName)
 		if err := mgr.Stop(ctx); err != nil {
 			return fmt.Errorf("failed to stop container: %w", err)
 		}
 		fmt.Println("Container stopped")
 	} else {
-		fmt.Printf("Container %s is not running\n", cfg.ContainerName())
+		fmt.Printf("Container %s is not running\n", containerName)
 	}
 
 	// Remove if requested
-	remove, _ := cmd.Flags().GetBool("remove")
 	if remove {
 		// Remove proxy resources
 		if proxyMgr.ProxyExists(ctx) {
@@ -150,13 +218,61 @@ func init() {
 func runList(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// Check podman is available
+	// Try to load config to determine backend
+	configPath, _ := cmd.Flags().GetString("config")
+	if configPath == "" {
+		configPath = "devkit.yaml"
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		// Fall back to default config if no config file
+		cfg = config.DefaultConfig()
+	}
+
+	quiet, _ := cmd.Flags().GetBool("quiet")
+
+	// Handle Lima backend
+	if cfg.IsLimaBackend() {
+		rc, err := SetupRuntime(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("failed to setup runtime: %w", err)
+		}
+
+		containers, err := rc.Runtime.List(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list containers: %w", err)
+		}
+
+		if len(containers) == 0 {
+			fmt.Println("No devkit containers found")
+			fmt.Println("\nRun 'devkit init' and 'devkit start' to create a container")
+			return nil
+		}
+
+		if quiet {
+			for _, c := range containers {
+				fmt.Println(c.ID)
+			}
+			return nil
+		}
+
+		// Print header
+		fmt.Printf("%-12s  %-25s  %-30s  %-10s\n", "CONTAINER ID", "NAME", "IMAGE", "STATUS")
+
+		// Print containers
+		for _, c := range containers {
+			fmt.Printf("%-12s  %-25s  %-30s  %-10s\n", truncate(c.ID, 12), c.Name, truncate(c.Image, 30), c.Status)
+		}
+
+		return nil
+	}
+
+	// Handle Podman backend
 	if err := container.CheckPodman(); err != nil {
 		return fmt.Errorf("podman is required but not found: %w", err)
 	}
 
-	// Use a minimal config just for listing
-	cfg := config.DefaultConfig()
 	mgr := container.New(cfg)
 
 	containers, err := mgr.List(ctx)
@@ -170,7 +286,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	quiet, _ := cmd.Flags().GetBool("quiet")
 	if quiet {
 		for _, c := range containers {
 			fmt.Println(c.ID)
@@ -215,11 +330,6 @@ func init() {
 func runShell(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// Check podman is available
-	if err := container.CheckPodman(); err != nil {
-		return fmt.Errorf("podman is required but not found: %w", err)
-	}
-
 	// Load config
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
@@ -231,19 +341,49 @@ func runShell(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Create container manager
+	containerName := cfg.ContainerName()
+
+	// Determine shell command
+	shellCmd := []string{"bash"}
+	if len(args) > 0 {
+		shellCmd = args
+	}
+
+	// Handle Lima backend
+	if cfg.IsLimaBackend() {
+		rc, err := SetupRuntime(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("failed to setup runtime: %w", err)
+		}
+
+		// Check if running
+		info, err := rc.Runtime.GetInfo(ctx, containerName)
+		if err != nil {
+			if _, ok := err.(runtime.ErrContainerNotFound); ok {
+				return fmt.Errorf("container is not running\n\nRun 'devkit start' first")
+			}
+			return fmt.Errorf("failed to check container: %w", err)
+		}
+
+		running := info.Status == "running" || info.Status == "Up"
+		if !running {
+			return fmt.Errorf("container is not running\n\nRun 'devkit start' first")
+		}
+
+		return rc.Runtime.ExecInteractive(ctx, containerName, shellCmd...)
+	}
+
+	// Handle Podman backend
+	if err := container.CheckPodman(); err != nil {
+		return fmt.Errorf("podman is required but not found: %w", err)
+	}
+
 	mgr := container.New(cfg)
 
 	// Check if running
 	running, _ := mgr.IsRunning(ctx)
 	if !running {
 		return fmt.Errorf("container is not running\n\nRun 'devkit start' first")
-	}
-
-	// Determine shell command
-	shellCmd := []string{"bash"}
-	if len(args) > 0 {
-		shellCmd = args
 	}
 
 	return mgr.ExecInteractive(ctx, shellCmd...)
