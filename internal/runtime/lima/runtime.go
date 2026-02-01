@@ -188,6 +188,50 @@ func (r *Runtime) ExecInteractive(ctx context.Context, name string, cmd ...strin
 	return r.runNerdctlInteractive(ctx, args...)
 }
 
+// ExecWithOutput runs a command and streams output to stdout/stderr
+func (r *Runtime) ExecWithOutput(ctx context.Context, name string, cmd ...string) error {
+	// Ensure VM is running
+	running, err := r.vm.IsRunning(ctx, r.VMName)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return runtime.ErrVMNotRunning{Name: r.VMName}
+	}
+
+	// Build the full command to run in the VM
+	nerdctlCmd := append([]string{"sudo", "nerdctl", "exec", name}, cmd...)
+	shellArgs := append([]string{"shell", r.VMName, "--"}, nerdctlCmd...)
+
+	execCmd := exec.CommandContext(ctx, "limactl", shellArgs...)
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+
+	return execCmd.Run()
+}
+
+// ExecAsUserWithOutput runs a command as a specific user and streams output
+func (r *Runtime) ExecAsUserWithOutput(ctx context.Context, name, user string, cmd ...string) error {
+	// Ensure VM is running
+	running, err := r.vm.IsRunning(ctx, r.VMName)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return runtime.ErrVMNotRunning{Name: r.VMName}
+	}
+
+	// Build the full command to run in the VM
+	nerdctlCmd := append([]string{"sudo", "nerdctl", "exec", "-u", user, name}, cmd...)
+	shellArgs := append([]string{"shell", r.VMName, "--"}, nerdctlCmd...)
+
+	execCmd := exec.CommandContext(ctx, "limactl", shellArgs...)
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+
+	return execCmd.Run()
+}
+
 // Exists checks if the container exists
 func (r *Runtime) Exists(ctx context.Context, name string) (bool, error) {
 	_, err := r.runNerdctl(ctx, "inspect", name)

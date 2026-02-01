@@ -15,6 +15,7 @@ import (
 	"github.com/jurajpiar/devkit/internal/detector"
 	"github.com/jurajpiar/devkit/internal/machine"
 	"github.com/jurajpiar/devkit/internal/runtime"
+	limaRuntime "github.com/jurajpiar/devkit/internal/runtime/lima"
 	"github.com/spf13/cobra"
 )
 
@@ -694,14 +695,22 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 		rc.Runtime.Exec(ctx, containerName, "chown", "-R", "developer:developer", "/home/developer/"+ideServer)
 	}
 
-	// Install dependencies
+	// Install dependencies (with streaming output)
 	if !noDeps && detection != nil && detection.InstallCommand != "" {
 		progress.Step(fmt.Sprintf("Installing dependencies (%s)", detection.InstallCommand))
 		fmt.Println()
 		installCmd := fmt.Sprintf("cd /home/developer/workspace && %s", detection.InstallCommand)
-		_, err := rc.Runtime.ExecAsUser(ctx, containerName, "developer", "bash", "-c", installCmd)
-		if err != nil {
-			progress.Warn(fmt.Sprintf("Failed to install dependencies: %v", err))
+		// Use streaming exec if available
+		if limaRT, ok := rc.Runtime.(*limaRuntime.Runtime); ok {
+			err := limaRT.ExecAsUserWithOutput(ctx, containerName, "developer", "bash", "-c", installCmd)
+			if err != nil {
+				progress.Warn(fmt.Sprintf("Failed to install dependencies: %v", err))
+			}
+		} else {
+			_, err := rc.Runtime.ExecAsUser(ctx, containerName, "developer", "bash", "-c", installCmd)
+			if err != nil {
+				progress.Warn(fmt.Sprintf("Failed to install dependencies: %v", err))
+			}
 		}
 	}
 
