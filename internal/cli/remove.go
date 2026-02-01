@@ -6,6 +6,7 @@ import (
 
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
+	"github.com/jurajpiar/devkit/internal/machine"
 	"github.com/spf13/cobra"
 )
 
@@ -18,12 +19,16 @@ var removeCmd = &cobra.Command{
 This stops the container if running, removes it, and by default also
 removes all associated volumes (workspace, node_modules, .vscode-server, etc.).
 
+If total_isolation was enabled, this also removes the dedicated Podman machine.
+
 Use --keep-volumes to preserve volumes for later use.
+Use --keep-machine to preserve the dedicated Podman machine.
 
 Examples:
-  devkit remove               # Remove container and all volumes
-  devkit rm                   # Alias for remove
-  devkit remove --keep-volumes # Remove container but keep volumes`,
+  devkit remove                 # Remove container, volumes, and dedicated machine (if any)
+  devkit rm                     # Alias for remove
+  devkit remove --keep-volumes  # Remove container but keep volumes
+  devkit remove --keep-machine  # Keep the dedicated Podman machine`,
 	RunE: runRemove,
 }
 
@@ -31,6 +36,7 @@ func init() {
 	rootCmd.AddCommand(removeCmd)
 
 	removeCmd.Flags().Bool("keep-volumes", false, "Keep volumes (don't delete workspace, node_modules, etc.)")
+	removeCmd.Flags().Bool("keep-machine", false, "Keep the dedicated Podman machine (if total_isolation enabled)")
 	removeCmd.Flags().BoolP("force", "f", false, "Force removal without confirmation")
 }
 
@@ -102,6 +108,28 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		fmt.Println("Keeping volumes (use 'podman volume ls' to see them)")
+	}
+
+	// Remove dedicated machine if total_isolation was enabled
+	keepMachine, _ := cmd.Flags().GetBool("keep-machine")
+	if cfg.Security.TotalIsolation && !keepMachine {
+		machineName := cfg.DedicatedMachineName()
+		machineMgr := machine.New()
+
+		exists, _ := machineMgr.ExistsNamed(ctx, machineName)
+		if exists {
+			fmt.Printf("Removing dedicated Podman machine '%s'...\n", machineName)
+			if err := machineMgr.StopNamed(ctx, machineName); err != nil {
+				fmt.Printf("Warning: failed to stop machine: %v\n", err)
+			}
+			if err := machineMgr.RemoveNamed(ctx, machineName, true); err != nil {
+				fmt.Printf("Warning: failed to remove machine: %v\n", err)
+			} else {
+				fmt.Printf("Dedicated machine '%s' removed\n", machineName)
+			}
+		}
+	} else if cfg.Security.TotalIsolation && keepMachine {
+		fmt.Printf("Keeping dedicated machine '%s'\n", cfg.DedicatedMachineName())
 	}
 
 	fmt.Println("Container removed successfully")

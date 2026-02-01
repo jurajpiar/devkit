@@ -76,6 +76,8 @@ type SecurityConfig struct {
 	UseDebugProxy bool `yaml:"use_debug_proxy" mapstructure:"use_debug_proxy"`
 	// DebugProxyFilterLevel sets the proxy filter level: strict, filtered, audit, passthrough
 	DebugProxyFilterLevel string `yaml:"debug_proxy_filter_level" mapstructure:"debug_proxy_filter_level"`
+	// TotalIsolation runs each project in a dedicated Podman machine (VM) for hypervisor-level isolation
+	TotalIsolation bool `yaml:"total_isolation" mapstructure:"total_isolation"`
 }
 
 // DefaultConfig returns a config with sensible defaults
@@ -280,6 +282,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.disable_debug_port", false)
 	v.SetDefault("security.use_debug_proxy", false)
 	v.SetDefault("security.debug_proxy_filter_level", "filtered")
+	v.SetDefault("security.total_isolation", false)
 	// IDE server directories (mounted as writable volumes)
 	v.SetDefault("ide_servers", []string{".vscode-server", ".cursor-server"})
 	// Extra writable directories
@@ -307,6 +310,15 @@ func (c *Config) ImageName() string {
 		return fmt.Sprintf("devkit/%s:latest", c.Project.Name)
 	}
 	return "devkit/dev:latest"
+}
+
+// DedicatedMachineName returns the dedicated Podman machine name for this project
+// Used when TotalIsolation is enabled
+func (c *Config) DedicatedMachineName() string {
+	if c.Project.Name != "" {
+		return fmt.Sprintf("devkit-machine-%s", c.Project.Name)
+	}
+	return "devkit-machine-dev"
 }
 
 // AddPorts adds ports to the configuration, avoiding duplicates

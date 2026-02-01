@@ -55,15 +55,46 @@ devkit stop
 # Standard mode (localhost blocked, all hardening enabled)
 devkit start
 
+# Total isolation - dedicated VM per project (hypervisor-level isolation)
+# Container escape is still confined to dedicated VM
+# No shared kernel between projects
+devkit start --total-isolation
+devkit start -t  # short flag
+
 # Paranoid mode - for untrusted code
 # Automatically air-gaps after clone/install
 devkit start --paranoid
+
+# Total isolation + paranoid = maximum security
+devkit start -t --paranoid
 
 # Offline mode - no network at all
 devkit start --offline
 
 # Disable debug port only
 devkit start --no-debug-port
+```
+
+### Total Isolation Mode
+
+When `--total-isolation` (or `-t`) is enabled, devkit creates a dedicated Podman machine (VM) for the project:
+
+- **Hypervisor-level isolation**: Even if an attacker escapes the container, they're still confined to a dedicated VM
+- **No shared kernel**: Projects cannot affect each other through kernel exploits
+- **Complete network isolation**: Each VM has its own network namespace
+- **Resource isolation**: CPU/memory limits enforced at VM level
+
+Configure in `devkit.yaml`:
+```yaml
+security:
+  total_isolation: true
+```
+
+Cleanup:
+```bash
+devkit remove                 # Removes container, volumes, AND dedicated machine
+devkit remove --keep-machine  # Keeps the dedicated machine for reuse
+devkit stop --stop-machine    # Stops container AND dedicated machine
 ```
 
 ## Commands

@@ -6,6 +6,7 @@ import (
 
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
+	"github.com/jurajpiar/devkit/internal/machine"
 	"github.com/spf13/cobra"
 )
 
@@ -16,10 +17,12 @@ var stopCmd = &cobra.Command{
 
 By default, the container is only stopped and can be restarted with 'devkit start'.
 Use --remove to also remove the container.
+Use --stop-machine to also stop the dedicated Podman machine (if total_isolation enabled).
 
 Examples:
-  devkit stop           # Stop the container
-  devkit stop --remove  # Stop and remove the container`,
+  devkit stop                  # Stop the container
+  devkit stop --remove         # Stop and remove the container
+  devkit stop --stop-machine   # Also stop the dedicated machine`,
 	RunE: runStop,
 }
 
@@ -27,6 +30,7 @@ func init() {
 	rootCmd.AddCommand(stopCmd)
 
 	stopCmd.Flags().Bool("remove", false, "Also remove the container after stopping")
+	stopCmd.Flags().Bool("stop-machine", false, "Also stop the dedicated Podman machine (if total_isolation enabled)")
 	stopCmd.Flags().BoolP("force", "f", false, "Force stop (kill) the container")
 }
 
@@ -99,6 +103,23 @@ func runStop(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Println("Container and volumes removed")
+	}
+
+	// Stop dedicated machine if requested and total_isolation is enabled
+	stopMachine, _ := cmd.Flags().GetBool("stop-machine")
+	if stopMachine && cfg.Security.TotalIsolation {
+		machineName := cfg.DedicatedMachineName()
+		machineMgr := machine.New()
+
+		running, _ := machineMgr.IsRunningNamed(ctx, machineName)
+		if running {
+			fmt.Printf("Stopping dedicated Podman machine '%s'...\n", machineName)
+			if err := machineMgr.StopNamed(ctx, machineName); err != nil {
+				fmt.Printf("Warning: failed to stop machine: %v\n", err)
+			} else {
+				fmt.Printf("Dedicated machine '%s' stopped\n", machineName)
+			}
+		}
 	}
 
 	return nil

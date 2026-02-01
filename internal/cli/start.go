@@ -10,6 +10,7 @@ import (
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
 	"github.com/jurajpiar/devkit/internal/detector"
+	"github.com/jurajpiar/devkit/internal/machine"
 	"github.com/spf13/cobra"
 )
 
@@ -26,6 +27,13 @@ This command will:
   5. Install project dependencies
 
 Security Modes:
+  --total-isolation, -ti
+                  Hypervisor-level isolation:
+                  - Runs project in a dedicated Podman machine (VM)
+                  - Container escape is still confined to dedicated VM
+                  - No shared kernel between projects
+                  - Complete network isolation from other containers
+
   --paranoid      Maximum security for untrusted code:
                   - Network enabled only during clone/install
                   - Automatically air-gaps after setup
@@ -38,11 +46,13 @@ Security Modes:
                   - Audit logs all debug activity
 
 Examples:
-  devkit start                  # Start container from devkit.yaml
-  devkit start --shell          # Start and open a shell
-  devkit start --paranoid       # Maximum security for untrusted code
-  devkit start --debug-proxy    # Enable debug proxy filtering
-  devkit start --offline        # Start with no network access`,
+  devkit start                     # Start container from devkit.yaml
+  devkit start --shell             # Start and open a shell
+  devkit start --total-isolation   # Run in dedicated VM for max isolation
+  devkit start -ti --paranoid      # Dedicated VM + paranoid mode
+  devkit start --paranoid          # Maximum security for untrusted code
+  devkit start --debug-proxy       # Enable debug proxy filtering
+  devkit start --offline           # Start with no network access`,
 	RunE: runStart,
 }
 
@@ -55,6 +65,7 @@ func init() {
 	startCmd.Flags().Bool("rebuild", false, "Remove existing container and create new one")
 
 	// Security flags
+	startCmd.Flags().BoolP("total-isolation", "t", false, "Run in dedicated Podman machine (VM) for hypervisor-level isolation")
 	startCmd.Flags().Bool("paranoid", false, "Maximum security: air-gap after setup, strict debug proxy")
 	startCmd.Flags().Bool("offline", false, "Start with no network access (network_mode=none)")
 	startCmd.Flags().Bool("no-debug-port", false, "Disable debug port exposure entirely")
@@ -82,11 +93,33 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Parse security flags
+	totalIsolation, _ := cmd.Flags().GetBool("total-isolation")
 	paranoid, _ := cmd.Flags().GetBool("paranoid")
 	offline, _ := cmd.Flags().GetBool("offline")
 	noDebugPort, _ := cmd.Flags().GetBool("no-debug-port")
 	useDebugProxy, _ := cmd.Flags().GetBool("debug-proxy")
 	proxyFilterLevel, _ := cmd.Flags().GetString("proxy-filter")
+
+	// Apply total isolation from flag or config
+	if totalIsolation {
+		cfg.Security.TotalIsolation = true
+	}
+
+	// Handle total isolation mode - dedicated Podman machine per project
+	if cfg.Security.TotalIsolation {
+		machineName := cfg.DedicatedMachineName()
+		fmt.Println("=== TOTAL ISOLATION MODE ===")
+		fmt.Printf("Running project in dedicated VM: %s\n", machineName)
+		fmt.Println("- Container escape confined to dedicated VM")
+		fmt.Println("- No shared kernel with other projects")
+		fmt.Println()
+
+		machineMgr := machine.New()
+		if err := machineMgr.EnsureRunningNamed(ctx, machineName, true); err != nil {
+			return fmt.Errorf("failed to setup dedicated machine: %w", err)
+		}
+		fmt.Printf("Dedicated machine '%s' is ready\n\n", machineName)
+	}
 
 	// Apply paranoid mode settings
 	if paranoid {

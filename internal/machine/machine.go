@@ -49,13 +49,18 @@ func New() *Manager {
 
 // Exists checks if the devkit machine exists
 func (m *Manager) Exists(ctx context.Context) (bool, error) {
+	return m.ExistsNamed(ctx, MachineName)
+}
+
+// ExistsNamed checks if a machine with the given name exists
+func (m *Manager) ExistsNamed(ctx context.Context, name string) (bool, error) {
 	machines, err := m.List(ctx)
 	if err != nil {
 		return false, err
 	}
 
 	for _, machine := range machines {
-		if machine.Name == MachineName {
+		if machine.Name == name {
 			return true, nil
 		}
 	}
@@ -65,13 +70,18 @@ func (m *Manager) Exists(ctx context.Context) (bool, error) {
 
 // IsRunning checks if the devkit machine is running
 func (m *Manager) IsRunning(ctx context.Context) (bool, error) {
+	return m.IsRunningNamed(ctx, MachineName)
+}
+
+// IsRunningNamed checks if a machine with the given name is running
+func (m *Manager) IsRunningNamed(ctx context.Context, name string) (bool, error) {
 	machines, err := m.List(ctx)
 	if err != nil {
 		return false, err
 	}
 
 	for _, machine := range machines {
-		if machine.Name == MachineName {
+		if machine.Name == name {
 			return machine.Running, nil
 		}
 	}
@@ -134,13 +144,18 @@ func DefaultInitOptions() InitOptions {
 
 // Init initializes the devkit Podman machine
 func (m *Manager) Init(ctx context.Context, opts InitOptions) error {
-	exists, err := m.Exists(ctx)
+	return m.InitNamed(ctx, MachineName, opts)
+}
+
+// InitNamed initializes a Podman machine with the given name
+func (m *Manager) InitNamed(ctx context.Context, name string, opts InitOptions) error {
+	exists, err := m.ExistsNamed(ctx, name)
 	if err != nil {
 		return err
 	}
 
 	if exists {
-		return fmt.Errorf("devkit machine already exists")
+		return fmt.Errorf("machine '%s' already exists", name)
 	}
 
 	args := []string{
@@ -154,7 +169,7 @@ func (m *Manager) Init(ctx context.Context, opts InitOptions) error {
 		args = append(args, "--rootful")
 	}
 
-	args = append(args, MachineName)
+	args = append(args, name)
 
 	_, err = m.runPodman(ctx, args...)
 	if err != nil {
@@ -166,7 +181,13 @@ func (m *Manager) Init(ctx context.Context, opts InitOptions) error {
 
 // Start starts the devkit machine
 func (m *Manager) Start(ctx context.Context) error {
-	running, err := m.IsRunning(ctx)
+	return m.StartNamed(ctx, MachineName, false)
+}
+
+// StartNamed starts a Podman machine with the given name
+// If stopOthers is true, it will stop other running machines first (for total isolation)
+func (m *Manager) StartNamed(ctx context.Context, name string, stopOthers bool) error {
+	running, err := m.IsRunningNamed(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -181,23 +202,31 @@ func (m *Manager) Start(ctx context.Context) error {
 		return err
 	}
 
-	if otherRunning && otherName != MachineName {
-		return fmt.Errorf("another Podman machine '%s' is already running.\n"+
-			"Podman only allows one VM at a time.\n"+
-			"Options:\n"+
-			"  1. Stop the other machine: podman machine stop %s\n"+
-			"  2. Use the existing machine: devkit machine use-existing\n"+
-			"  3. Stop all machines: devkit machine stop-all",
-			otherName, otherName)
+	if otherRunning && otherName != name {
+		if stopOthers {
+			// For total isolation mode, stop other machines automatically
+			fmt.Printf("Stopping machine '%s' for total isolation...\n", otherName)
+			if err := m.StopNamed(ctx, otherName); err != nil {
+				return fmt.Errorf("failed to stop machine '%s': %w", otherName, err)
+			}
+		} else {
+			return fmt.Errorf("another Podman machine '%s' is already running.\n"+
+				"Podman only allows one VM at a time.\n"+
+				"Options:\n"+
+				"  1. Stop the other machine: podman machine stop %s\n"+
+				"  2. Use the existing machine: devkit machine use-existing\n"+
+				"  3. Stop all machines: devkit machine stop-all",
+				otherName, otherName)
+		}
 	}
 
-	_, err = m.runPodman(ctx, "machine", "start", MachineName)
+	_, err = m.runPodman(ctx, "machine", "start", name)
 	if err != nil {
 		return fmt.Errorf("failed to start machine: %w", err)
 	}
 
 	// Wait for machine to be ready
-	return m.waitForReady(ctx, 60*time.Second)
+	return m.waitForReadyNamed(ctx, name, 60*time.Second)
 }
 
 // GetRunningMachine returns the name of the currently running machine, if any
@@ -252,7 +281,12 @@ func (m *Manager) UseExisting(ctx context.Context) (string, error) {
 
 // Stop stops the devkit machine
 func (m *Manager) Stop(ctx context.Context) error {
-	running, err := m.IsRunning(ctx)
+	return m.StopNamed(ctx, MachineName)
+}
+
+// StopNamed stops a Podman machine with the given name
+func (m *Manager) StopNamed(ctx context.Context, name string) error {
+	running, err := m.IsRunningNamed(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -261,7 +295,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return nil // Already stopped
 	}
 
-	_, err = m.runPodman(ctx, "machine", "stop", MachineName)
+	_, err = m.runPodman(ctx, "machine", "stop", name)
 	if err != nil {
 		return fmt.Errorf("failed to stop machine: %w", err)
 	}
@@ -271,7 +305,12 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 // Remove removes the devkit machine
 func (m *Manager) Remove(ctx context.Context, force bool) error {
-	exists, err := m.Exists(ctx)
+	return m.RemoveNamed(ctx, MachineName, force)
+}
+
+// RemoveNamed removes a Podman machine with the given name
+func (m *Manager) RemoveNamed(ctx context.Context, name string, force bool) error {
+	exists, err := m.ExistsNamed(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -284,7 +323,7 @@ func (m *Manager) Remove(ctx context.Context, force bool) error {
 	if force {
 		args = append(args, "-f")
 	}
-	args = append(args, MachineName)
+	args = append(args, name)
 
 	_, err = m.runPodman(ctx, args...)
 	if err != nil {
@@ -296,12 +335,13 @@ func (m *Manager) Remove(ctx context.Context, force bool) error {
 
 // SetDefault sets the devkit machine as the default connection
 func (m *Manager) SetDefault(ctx context.Context) error {
-	// Get the connection name (usually machine-name-root or machine-name)
-	connectionName := MachineName
+	return m.SetDefaultNamed(ctx, MachineName)
+}
 
-	_, err := m.runPodman(ctx, "system", "connection", "default", connectionName)
+// SetDefaultNamed sets a Podman machine as the default connection
+func (m *Manager) SetDefaultNamed(ctx context.Context, name string) error {
+	_, err := m.runPodman(ctx, "system", "connection", "default", name)
 	if err != nil {
-		// Try with just the machine name
 		return fmt.Errorf("failed to set default connection: %w", err)
 	}
 
@@ -310,28 +350,39 @@ func (m *Manager) SetDefault(ctx context.Context) error {
 
 // EnsureRunning ensures the devkit machine exists and is running
 func (m *Manager) EnsureRunning(ctx context.Context) error {
-	exists, err := m.Exists(ctx)
+	return m.EnsureRunningNamed(ctx, MachineName, false)
+}
+
+// EnsureRunningNamed ensures a Podman machine exists and is running
+// If stopOthers is true, it will stop other running machines first (for total isolation)
+func (m *Manager) EnsureRunningNamed(ctx context.Context, name string, stopOthers bool) error {
+	exists, err := m.ExistsNamed(ctx, name)
 	if err != nil {
 		return err
 	}
 
 	if !exists {
-		fmt.Println("Initializing devkit Podman machine...")
-		if err := m.Init(ctx, DefaultInitOptions()); err != nil {
+		fmt.Printf("Initializing Podman machine '%s'...\n", name)
+		if err := m.InitNamed(ctx, name, DefaultInitOptions()); err != nil {
 			return err
 		}
 	}
 
-	running, err := m.IsRunning(ctx)
+	running, err := m.IsRunningNamed(ctx, name)
 	if err != nil {
 		return err
 	}
 
 	if !running {
-		fmt.Println("Starting devkit Podman machine...")
-		if err := m.Start(ctx); err != nil {
+		fmt.Printf("Starting Podman machine '%s'...\n", name)
+		if err := m.StartNamed(ctx, name, stopOthers); err != nil {
 			return err
 		}
+	}
+
+	// Set as default connection
+	if err := m.SetDefaultNamed(ctx, name); err != nil {
+		return err
 	}
 
 	return nil
@@ -347,10 +398,15 @@ func (m *Manager) SSH(ctx context.Context, command ...string) (string, error) {
 
 // waitForReady waits for the machine to be ready
 func (m *Manager) waitForReady(ctx context.Context, timeout time.Duration) error {
+	return m.waitForReadyNamed(ctx, MachineName, timeout)
+}
+
+// waitForReadyNamed waits for a specific machine to be ready
+func (m *Manager) waitForReadyNamed(ctx context.Context, name string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		running, err := m.IsRunning(ctx)
+		running, err := m.IsRunningNamed(ctx, name)
 		if err == nil && running {
 			// Try a simple command to verify it's truly ready
 			_, err := m.runPodman(ctx, "info", "--format", "{{.Host.Os}}")
@@ -367,7 +423,7 @@ func (m *Manager) waitForReady(ctx context.Context, timeout time.Duration) error
 		}
 	}
 
-	return fmt.Errorf("timeout waiting for machine to be ready")
+	return fmt.Errorf("timeout waiting for machine '%s' to be ready", name)
 }
 
 // runPodman executes a podman command
