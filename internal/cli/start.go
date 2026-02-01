@@ -741,13 +741,14 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 		}
 
 		// Commit the container state to preserve installed deps
-		fmt.Println("Saving container state...")
+		// Use a proper image name format that nerdctl can reference
+		airgappedImageName := cfg.ImageName() + "-airgapped"
+		fmt.Printf("Saving container state as %s...\n", airgappedImageName)
 		limaRT := rc.Runtime.(*limaRuntime.Runtime)
-		committedImage, err := limaRT.Commit(ctx, containerName, cfg.ImageName()+"-airgapped")
+		_, err := limaRT.Commit(ctx, containerName, airgappedImageName)
 		if err != nil {
 			return fmt.Errorf("failed to save container state: %w", err)
 		}
-		fmt.Printf("Saved as: %s\n", committedImage)
 
 		// Remove old container
 		fmt.Println("Removing network-enabled container...")
@@ -763,7 +764,7 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 
 		// Update createOpts for air-gapped container
 		createOpts.NetworkMode = "none"
-		createOpts.Image = committedImage
+		createOpts.Image = airgappedImageName
 
 		fmt.Println("Creating air-gapped container...")
 		_, err = rc.Runtime.Create(ctx, createOpts)
