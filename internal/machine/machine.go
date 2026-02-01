@@ -193,7 +193,9 @@ func (m *Manager) StartNamed(ctx context.Context, name string, stopOthers bool) 
 	}
 
 	if running {
-		return nil // Already running
+		// Already running, just ensure it's the default
+		m.SetDefaultNamed(ctx, name)
+		return nil
 	}
 
 	// Check if another machine is running (Podman only allows one VM at a time)
@@ -221,17 +223,20 @@ func (m *Manager) StartNamed(ctx context.Context, name string, stopOthers bool) 
 		}
 	}
 
+	// Set as default connection BEFORE starting
+	// This prevents podman commands from trying to connect to a stopped machine
+	if err := m.SetDefaultNamed(ctx, name); err != nil {
+		// Non-fatal, but log it
+		fmt.Printf("[%s] Note: could not pre-set default connection: %v\n", timestamp(), err)
+	}
+
 	_, err = m.runPodman(ctx, "machine", "start", name)
 	if err != nil {
 		return fmt.Errorf("failed to start machine: %w", err)
 	}
 
-	// Set as default connection before checking readiness
-	// This ensures podman commands use this machine
-	if err := m.SetDefaultNamed(ctx, name); err != nil {
-		// Non-fatal, continue anyway
-		fmt.Printf("Warning: could not set default connection: %v\n", err)
-	}
+	// Ensure default is set after start (in case pre-set failed)
+	m.SetDefaultNamed(ctx, name)
 
 	// Wait for machine to be ready
 	return m.waitForReadyNamed(ctx, name, 90*time.Second)
