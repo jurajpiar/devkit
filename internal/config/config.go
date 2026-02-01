@@ -39,8 +39,9 @@ type SourceConfig struct {
 
 // DependenciesConfig specifies runtime and packages
 type DependenciesConfig struct {
-	Runtime string   `yaml:"runtime" mapstructure:"runtime"`
-	Install []string `yaml:"install" mapstructure:"install"`
+	Runtime        string   `yaml:"runtime" mapstructure:"runtime"`
+	Install        []string `yaml:"install" mapstructure:"install"`
+	SystemPackages []string `yaml:"system_packages,omitempty" mapstructure:"system_packages"` // System packages to install (e.g., python3, make, g++)
 }
 
 // FeaturesConfig holds feature flags
@@ -89,6 +90,12 @@ func DefaultConfig() *Config {
 		},
 		Dependencies: DependenciesConfig{
 			Runtime: "node:22-alpine",
+			SystemPackages: []string{
+				// Build tools for native modules (node-gyp)
+				"python3", "make", "g++", "linux-headers",
+				// Common native module dependencies
+				"eudev-dev",
+			},
 		},
 		Features: FeaturesConfig{
 			AllowCopy:  true, // Enabled by default since copy is the default method
@@ -257,6 +264,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("source.method", "copy") // Most secure default
 	v.SetDefault("source.branch", "main")
 	v.SetDefault("dependencies.runtime", "node:22-alpine")
+	v.SetDefault("dependencies.system_packages", []string{
+		"python3", "make", "g++", "linux-headers", "eudev-dev",
+	})
 	v.SetDefault("features.allow_copy", false)
 	v.SetDefault("features.allow_mount", false)
 	v.SetDefault("ssh.port", 2222)

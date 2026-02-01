@@ -45,11 +45,7 @@ RUN apk add --no-cache \
     procps \
     sudo \
     socat \
-    python3 \
-    make \
-    g++ \
-    linux-headers \
-    eudev-dev \
+    {{.SystemPackages}} \
     {{.ExtraPackages}} \
     && mkdir -p /run/sshd \
     && ssh-keygen -A
@@ -160,6 +156,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 type TemplateData struct {
 	Runtime             string
 	IsAlpine            bool
+	SystemPackages      string
 	ExtraPackages       string
 	PackageManagerSetup string
 	GlobalPackages      string
@@ -177,8 +174,9 @@ func (b *Builder) GenerateContainerfile() (string, error) {
 	}
 
 	data := TemplateData{
-		Runtime:  runtime,
-		IsAlpine: strings.Contains(runtime, "alpine"),
+		Runtime:        runtime,
+		IsAlpine:       strings.Contains(runtime, "alpine"),
+		SystemPackages: strings.Join(b.config.Dependencies.SystemPackages, " \\\n    "),
 	}
 
 	// Set debug port

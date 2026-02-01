@@ -96,9 +96,13 @@ source:
 
 dependencies:
   runtime: node:22-alpine
-  install:
+  install:                    # Global npm packages
     - typescript
     - eslint
+  system_packages:            # System packages (has sensible defaults)
+    - python3                 # For node-gyp
+    - make
+    - g++
 
 features:
   allow_copy: false     # Enable 'copy' source method
