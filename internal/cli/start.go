@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jurajpiar/devkit/internal/builder"
@@ -231,49 +232,29 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 		// Progress display for file copying
 		var fileCount int
-		var recentFiles []string
-		const maxRecent = 3
 
 		onFile := func(filename string) {
 			fileCount++
-			// Keep only last N files
-			recentFiles = append(recentFiles, filename)
-			if len(recentFiles) > maxRecent {
-				recentFiles = recentFiles[1:]
+			// Strip tar's "a " prefix if present
+			name := strings.TrimPrefix(filename, "a ")
+			name = strings.TrimPrefix(name, "./")
+			
+			// Truncate long filenames
+			if len(name) > 50 {
+				name = "..." + name[len(name)-47:]
 			}
-
-			// Clear previous lines and show current files
-			// Move up maxRecent lines, clear each, then print
-			for i := 0; i < maxRecent; i++ {
-				fmt.Print("\033[A\033[K") // Move up and clear line
-			}
-			for i := 0; i < maxRecent; i++ {
-				if i < len(recentFiles) {
-					// Truncate long filenames
-					name := recentFiles[i]
-					if len(name) > 60 {
-						name = "..." + name[len(name)-57:]
-					}
-					fmt.Printf("       %s\n", name)
-				} else {
-					fmt.Println()
-				}
-			}
-		}
-
-		// Print initial empty lines for the progress window
-		for i := 0; i < maxRecent; i++ {
-			fmt.Println()
+			
+			// Use \r to overwrite the same line
+			fmt.Printf("\r         [%d] %s\033[K", fileCount, name)
 		}
 
 		if err := mgr.CopySourceToContainerWithProgress(ctx, onFile); err != nil {
+			fmt.Println() // Ensure we're on a new line after error
 			return fmt.Errorf("failed to copy source files: %w", err)
 		}
 
-		// Clear the progress window
-		for i := 0; i < maxRecent; i++ {
-			fmt.Print("\033[A\033[K")
-		}
+		// Clear the progress line and show completion
+		fmt.Print("\r\033[K")
 		progress.Success(fmt.Sprintf("Copied %d files to container", fileCount))
 
 		// Fix ownership of specific paths
