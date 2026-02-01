@@ -590,7 +590,8 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 		createOpts.CapAdd = []string{"SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "FOWNER"}
 	}
 	if cfg.Security.NoNewPrivileges {
-		createOpts.SecurityOpts = append(createOpts.SecurityOpts, "no-new-privileges:true")
+		// nerdctl uses "no-new-privileges" without ":true"
+		createOpts.SecurityOpts = append(createOpts.SecurityOpts, "no-new-privileges")
 	}
 	if cfg.Security.ReadOnlyRootfs {
 		createOpts.ReadOnly = true
