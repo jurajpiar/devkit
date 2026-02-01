@@ -226,8 +226,15 @@ func (m *Manager) StartNamed(ctx context.Context, name string, stopOthers bool) 
 		return fmt.Errorf("failed to start machine: %w", err)
 	}
 
+	// Set as default connection before checking readiness
+	// This ensures podman commands use this machine
+	if err := m.SetDefaultNamed(ctx, name); err != nil {
+		// Non-fatal, continue anyway
+		fmt.Printf("Warning: could not set default connection: %v\n", err)
+	}
+
 	// Wait for machine to be ready
-	return m.waitForReadyNamed(ctx, name, 60*time.Second)
+	return m.waitForReadyNamed(ctx, name, 90*time.Second)
 }
 
 // GetRunningMachine returns the name of the currently running machine, if any
