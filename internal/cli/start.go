@@ -285,7 +285,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Install dependencies
 	if !noDeps && detection != nil && detection.InstallCommand != "" {
 		progress.Step(fmt.Sprintf("Installing dependencies (%s)", detection.InstallCommand))
-		if err := mgr.InstallDependencies(ctx, detection.InstallCommand); err != nil {
+		fmt.Println() // Empty line before output
+		if err := mgr.InstallDependenciesWithOutput(ctx, detection.InstallCommand); err != nil {
 			progress.Warn(fmt.Sprintf("Failed to install dependencies: %v", err))
 		}
 	}

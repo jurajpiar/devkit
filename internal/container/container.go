@@ -427,6 +427,27 @@ func (m *Manager) InstallDependencies(ctx context.Context, installCmd string) er
 	return nil
 }
 
+// InstallDependenciesWithOutput installs dependencies and streams output to terminal
+func (m *Manager) InstallDependenciesWithOutput(ctx context.Context, installCmd string) error {
+	if installCmd == "" {
+		return nil
+	}
+
+	containerName := m.config.ContainerName()
+	args := []string{"exec", "-u", "developer", containerName, "bash", "-c",
+		fmt.Sprintf("cd /home/developer/workspace && %s", installCmd)}
+
+	cmd := exec.CommandContext(ctx, "podman", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to install dependencies: %w", err)
+	}
+
+	return nil
+}
+
 // SetupSSHKey sets up SSH for the container:
 // - Copies user's public key to authorized_keys (for SSH login)
 // - Adds known_hosts for common git providers (safe - just public host keys)
