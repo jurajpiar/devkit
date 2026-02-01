@@ -58,7 +58,7 @@ func DefaultLimaConfig() LimaConfig {
 		DiskGB:   50,
 		Image:    DefaultImage,
 		Arch:     "aarch64",
-		Plain:    true, // Security: no GUI, minimal sharing
+		Plain:    false, // Must be false for port forwarding to work
 		Provision: []Provision{
 			{
 				Mode: "system",
@@ -117,13 +117,9 @@ systemctl enable --now buildkitd || true
 		},
 		// Security: No mounts by default
 		Mounts: []Mount{},
-		// Port forwards for VM SSH and container SSH + common dev ports
+		// Port forwards for container SSH + common dev ports
+		// Note: Don't include port 22 - Lima handles VM SSH automatically
 		PortForwards: []PortForward{
-			{
-				GuestPort: 22,
-				HostPort:  0, // Auto-assign for VM SSH
-				HostIP:    "127.0.0.1",
-			},
 			{
 				GuestPort: 2222, // Container SSH
 				HostPort:  2222,
