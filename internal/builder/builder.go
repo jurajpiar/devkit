@@ -197,11 +197,11 @@ func (b *Builder) GenerateContainerfile() (string, error) {
 		case "yarn":
 			data.PackageManagerSetup = "RUN npm install -g yarn"
 		case "bun":
-			// Install bun and symlink to /usr/local/bin for all users
+			// Install bun and copy to /usr/local/bin for all users (symlink won't work due to /root permissions)
 			if data.IsAlpine {
-				data.PackageManagerSetup = "RUN apk add --no-cache unzip && curl -fsSL https://bun.sh/install | bash && ln -sf /root/.bun/bin/bun /usr/local/bin/bun"
+				data.PackageManagerSetup = "RUN apk add --no-cache unzip && curl -fsSL https://bun.sh/install | bash && cp /root/.bun/bin/bun /usr/local/bin/bun && chmod 755 /usr/local/bin/bun"
 			} else {
-				data.PackageManagerSetup = "RUN curl -fsSL https://bun.sh/install | bash && ln -sf /root/.bun/bin/bun /usr/local/bin/bun"
+				data.PackageManagerSetup = "RUN curl -fsSL https://bun.sh/install | bash && cp /root/.bun/bin/bun /usr/local/bin/bun && chmod 755 /usr/local/bin/bun"
 			}
 		}
 	}
