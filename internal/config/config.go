@@ -17,6 +17,11 @@ type Config struct {
 	Features     FeaturesConfig     `yaml:"features" mapstructure:"features"`
 	SSH          SSHConfig          `yaml:"ssh" mapstructure:"ssh"`
 	Security     SecurityConfig     `yaml:"security" mapstructure:"security"`
+	Ports        []int    `yaml:"ports,omitempty" mapstructure:"ports"`                   // Application ports to expose (bound to localhost)
+	IDEServers   []string `yaml:"ide_servers,omitempty" mapstructure:"ide_servers"`         // IDE server directories (e.g., .vscode-server, .cursor-server)
+	ExtraVolumes []string `yaml:"extra_volumes,omitempty" mapstructure:"extra_volumes"`     // Additional directories to mount as volumes (relative to /home/developer)
+	CopyExclude  []string `yaml:"copy_exclude,omitempty" mapstructure:"copy_exclude"`       // Paths to exclude when copying source (e.g., .next, dist, node_modules)
+	ChownPaths   []string `yaml:"chown_paths,omitempty" mapstructure:"chown_paths"`         // Paths that need explicit ownership fix (relative to workspace)
 }
 
 // ProjectConfig holds project metadata
@@ -103,6 +108,8 @@ func DefaultConfig() *Config {
 			UseDebugProxy:         false,     // Disabled by default
 			DebugProxyFilterLevel: "filtered", // Default filter level
 		},
+		IDEServers:   []string{".vscode-server", ".cursor-server"}, // Common IDE server directories
+		ExtraVolumes: []string{".npm", ".cache"},                   // Additional writable directories
 	}
 }
 
@@ -195,6 +202,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid SSH port: %d", c.SSH.Port)
 	}
 
+	// Validate application ports
+	for _, port := range c.Ports {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid port: %d (must be 1-65535)", port)
+		}
+		if port == c.SSH.Port {
+			return fmt.Errorf("port %d conflicts with SSH port", port)
+		}
+	}
+
 	// Validate security settings
 	validNetworkModes := map[string]bool{"none": true, "restricted": true, "full": true}
 	if !validNetworkModes[c.Security.NetworkMode] {
@@ -237,6 +254,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.disable_debug_port", false)
 	v.SetDefault("security.use_debug_proxy", false)
 	v.SetDefault("security.debug_proxy_filter_level", "filtered")
+	// IDE server directories (mounted as writable volumes)
+	v.SetDefault("ide_servers", []string{".vscode-server", ".cursor-server"})
+	// Extra writable directories
+	v.SetDefault("extra_volumes", []string{".npm", ".cache"})
 }
 
 // ContainerName returns the container name for this project
@@ -253,4 +274,18 @@ func (c *Config) ImageName() string {
 		return fmt.Sprintf("devkit/%s:latest", c.Project.Name)
 	}
 	return "devkit/dev:latest"
+}
+
+// AddPorts adds ports to the configuration, avoiding duplicates
+func (c *Config) AddPorts(ports ...int) {
+	existing := make(map[int]bool)
+	for _, p := range c.Ports {
+		existing[p] = true
+	}
+	for _, p := range ports {
+		if !existing[p] {
+			c.Ports = append(c.Ports, p)
+			existing[p] = true
+		}
+	}
 }
