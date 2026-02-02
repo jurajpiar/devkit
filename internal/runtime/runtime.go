@@ -64,6 +64,7 @@ type CreateOpts struct {
 	ReadOnly        bool
 	Tmpfs           []TmpfsMount
 	NetworkMode     string
+	Networks        []string // Additional networks to connect to
 	Memory          string
 	PidsLimit       int
 	Labels          map[string]string

@@ -211,7 +211,7 @@ func runMonitorStart(cmd *cobra.Command, args []string) error {
 
 	// Start monitor
 	fmt.Printf("\nStarting monitor for container %s (interval: %ds)\n", cfg.ContainerName(), interval)
-	fmt.Println("Press Ctrl+C to stop\n")
+	fmt.Println("Press Ctrl+C to stop")
 
 	if err := mon.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start monitor: %w", err)

@@ -97,6 +97,38 @@ devkit start --offline
 devkit start --no-debug-port
 ```
 
+### Egress Proxy (Domain Filtering)
+
+Control which external services your container can reach:
+
+```yaml
+# devkit.yaml
+security:
+  egress_proxy:
+    enabled: true
+    allowed_hosts:
+      - "registry.npmjs.org"
+      - "*.github.com"
+      - "*.githubusercontent.com"
+      - "api.thegraph.com"
+    audit_log: true
+```
+
+Build and start with egress proxy:
+
+```bash
+devkit build --egress-proxy
+devkit start
+```
+
+**Pattern syntax:**
+- `example.com` - exact match
+- `*.example.com` - immediate subdomains only
+- `**.example.com` - any depth of subdomains
+- `*` - allow all (disables filtering)
+
+All HTTP/HTTPS traffic is routed through the proxy. Blocked requests return HTTP 403.
+
 ### Runtime Backends
 
 Devkit supports multiple container runtime backends:

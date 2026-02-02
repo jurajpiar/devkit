@@ -615,6 +615,24 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 		},
 	}
 
+	// Egress proxy configuration
+	if cfg.Security.EgressProxy.Enabled && len(cfg.Security.EgressProxy.AllowedHosts) > 0 {
+		proxyPort := cfg.Security.EgressProxy.Port
+		if proxyPort == 0 {
+			proxyPort = 3128
+		}
+		// The egress proxy runs on the VM's localhost, accessible from the container
+		proxyAddr := fmt.Sprintf("http://host.lima.internal:%d", proxyPort)
+		createOpts.Env["HTTP_PROXY"] = proxyAddr
+		createOpts.Env["HTTPS_PROXY"] = proxyAddr
+		createOpts.Env["http_proxy"] = proxyAddr
+		createOpts.Env["https_proxy"] = proxyAddr
+		createOpts.Env["NO_PROXY"] = "localhost,127.0.0.1"
+		createOpts.Env["no_proxy"] = "localhost,127.0.0.1"
+		fmt.Printf("Egress proxy enabled: %s\n", proxyAddr)
+		fmt.Printf("Allowed hosts: %v\n", cfg.Security.EgressProxy.AllowedHosts)
+	}
+
 	// Security settings
 	if cfg.Security.DropAllCapabilities {
 		createOpts.CapDrop = []string{"ALL"}
@@ -691,6 +709,15 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 			Target: "/home/developer/" + ideServer,
 			Type:   "volume",
 		})
+	}
+
+	// Start egress proxy if enabled (must be before container creation for env vars to work)
+	if cfg.Security.EgressProxy.Enabled && len(cfg.Security.EgressProxy.AllowedHosts) > 0 {
+		fmt.Println("Starting egress proxy...")
+		if err := startEgressProxyLima(ctx, rc.VMName, cfg); err != nil {
+			fmt.Printf("Warning: failed to start egress proxy: %v\n", err)
+			fmt.Println("Container will start without proxy filtering.")
+		}
 	}
 
 	// Create container if it doesn't exist
@@ -900,4 +927,67 @@ func setupSSHInContainer(ctx context.Context, rt runtime.Runtime, containerName 
 	cmd := fmt.Sprintf(`mkdir -p /home/developer/.ssh && echo '%s' >> /home/developer/.ssh/authorized_keys && chmod 700 /home/developer/.ssh && chmod 600 /home/developer/.ssh/authorized_keys`, pubKey)
 	_, err = rt.ExecAsUser(ctx, containerName, "developer", "bash", "-c", cmd)
 	return err
+}
+
+// startEgressProxyLima starts the egress proxy in the Lima VM
+func startEgressProxyLima(ctx context.Context, vmName string, cfg *config.Config) error {
+	proxyPort := cfg.Security.EgressProxy.Port
+	if proxyPort == 0 {
+		proxyPort = 3128
+	}
+
+	// Build allowed hosts argument
+	allowedHosts := strings.Join(cfg.Security.EgressProxy.AllowedHosts, ",")
+
+	// Check if proxy is already running
+	checkCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"pgrep", "-f", fmt.Sprintf("devkit-egressproxy.*:%d", proxyPort))
+	if checkCmd.Run() == nil {
+		// Proxy already running
+		return nil
+	}
+
+	// Build the proxy command
+	proxyArgs := []string{
+		"-listen", fmt.Sprintf(":%d", proxyPort),
+		"-allowed", allowedHosts,
+	}
+	if cfg.Security.EgressProxy.AuditLog {
+		proxyArgs = append(proxyArgs, "-audit")
+	}
+
+	// Start proxy in background in the VM
+	// The proxy binary should be copied to the VM during build
+	proxyCmd := fmt.Sprintf("nohup /usr/local/bin/devkit-egressproxy %s > /tmp/egressproxy.log 2>&1 &",
+		strings.Join(proxyArgs, " "))
+
+	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--", "bash", "-c", proxyCmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to start egress proxy: %w", err)
+	}
+
+	// Wait a moment for the proxy to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify proxy is running
+	verifyCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"pgrep", "-f", fmt.Sprintf("devkit-egressproxy.*:%d", proxyPort))
+	if err := verifyCmd.Run(); err != nil {
+		return fmt.Errorf("egress proxy failed to start, check /tmp/egressproxy.log in VM")
+	}
+
+	return nil
+}
+
+// stopEgressProxyLima stops the egress proxy in the Lima VM
+func stopEgressProxyLima(ctx context.Context, vmName string, port int) error {
+	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"pkill", "-f", fmt.Sprintf("devkit-egressproxy.*:%d", port))
+	_ = cmd.Run() // Ignore error if not running
+	return nil
+}
+
+// egressProxyContainerName returns the egress proxy container name for a project
+func egressProxyContainerName(cfg *config.Config) string {
+	return cfg.ContainerName() + "-egressproxy"
 }

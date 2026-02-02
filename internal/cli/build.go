@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 
 	"github.com/jurajpiar/devkit/internal/builder"
 	"github.com/jurajpiar/devkit/internal/config"
@@ -38,6 +40,7 @@ func init() {
 	buildCmd.Flags().Bool("save-containerfile", false, "Save the generated Containerfile to current directory")
 	buildCmd.Flags().Bool("force", false, "Force rebuild even if image exists")
 	buildCmd.Flags().Bool("proxy", false, "Also build the debug proxy image")
+	buildCmd.Flags().Bool("egress-proxy", false, "Also build the egress proxy image for domain filtering")
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
@@ -127,10 +130,25 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Build egress proxy image if requested
+	buildEgressProxy, _ := cmd.Flags().GetBool("egress-proxy")
+	if buildEgressProxy {
+		fmt.Println("\nBuilding egress proxy image...")
+		if err := buildEgressProxyImage(ctx); err != nil {
+			fmt.Printf("Warning: failed to build egress proxy image: %v\n", err)
+			fmt.Println("Egress proxy will not be available.")
+		} else {
+			fmt.Println("Successfully built egress proxy image: devkit/egressproxy:latest")
+		}
+	}
+
 	fmt.Println("\nNext steps:")
 	fmt.Println("  devkit start    - Start the development container")
 	if buildProxy {
 		fmt.Println("  devkit start --debug-proxy  - Start with debug proxy filtering")
+	}
+	if buildEgressProxy {
+		fmt.Println("  Configure egress_proxy in devkit.yaml to use domain filtering")
 	}
 
 	return nil
@@ -210,4 +228,41 @@ func runBuildLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 	fmt.Println("  devkit start    - Start the development container")
 
 	return nil
+}
+
+// buildEgressProxyImage builds the egress proxy image
+func buildEgressProxyImage(ctx context.Context) error {
+	// Create a minimal Containerfile for the egress proxy
+	containerfile := `FROM golang:1.22-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /devkit-egressproxy ./cmd/egressproxy
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /devkit-egressproxy /usr/local/bin/devkit-egressproxy
+ENTRYPOINT ["/usr/local/bin/devkit-egressproxy"]
+`
+
+	// Write to temp file
+	if err := os.WriteFile(".devkit-egressproxy-Containerfile", []byte(containerfile), 0644); err != nil {
+		return fmt.Errorf("failed to write Containerfile: %w", err)
+	}
+	defer os.Remove(".devkit-egressproxy-Containerfile")
+
+	// Build the image using podman
+	args := []string{
+		"build",
+		"-t", "devkit/egressproxy:latest",
+		"-f", ".devkit-egressproxy-Containerfile",
+		".",
+	}
+
+	cmd := exec.CommandContext(ctx, "podman", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }

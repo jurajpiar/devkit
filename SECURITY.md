@@ -4,23 +4,24 @@ This document describes the security architecture of devkit, including threats t
 
 ## TL;DR - Security Summary
 
-| Risk Category | Default Mode | Paranoid Mode | Notes |
-|---------------|--------------|---------------|-------|
-| Host filesystem access | **Eliminated** | **Eliminated** | No host mounts |
-| Host localhost access | **Eliminated** | **Eliminated** | Loopback blocked |
-| Privilege escalation | **Eliminated** | **Eliminated** | Caps dropped, no-new-privs |
-| Malware persistence | **Eliminated** | **Eliminated** | Read-only rootfs |
-| Remote network attacks | **Eliminated** | **Eliminated** | Localhost-only ports |
-| Container escape (kernel) | Mitigated | Mitigated | Rootless reduces impact |
-| Debug port RCE | Mitigated | **Eliminated** | Disabled in paranoid |
-| Data exfiltration | **RISK** | **Eliminated** | Air-gapped after setup |
-| Supply chain (pre-container) | **RISK** | **RISK** | User responsibility |
+| Risk Category | Default Mode | Egress Proxy | Paranoid Mode | Notes |
+|---------------|--------------|--------------|---------------|-------|
+| Host filesystem access | **Eliminated** | **Eliminated** | **Eliminated** | No host mounts |
+| Host localhost access | **Eliminated** | **Eliminated** | **Eliminated** | Loopback blocked |
+| Privilege escalation | **Eliminated** | **Eliminated** | **Eliminated** | Caps dropped, no-new-privs |
+| Malware persistence | **Eliminated** | **Eliminated** | **Eliminated** | Read-only rootfs |
+| Remote network attacks | **Eliminated** | **Eliminated** | **Eliminated** | Localhost-only ports |
+| Container escape (kernel) | Mitigated | Mitigated | Mitigated | Rootless reduces impact |
+| Debug port RCE | Mitigated | Mitigated | **Eliminated** | Disabled in paranoid |
+| Data exfiltration | **RISK** | Mitigated | **Eliminated** | Allowlist or air-gap |
+| Supply chain (pre-container) | **RISK** | **RISK** | **RISK** | User responsibility |
 
 **Quick reference:**
 ```bash
 devkit start              # Default: secure against most attacks
 devkit start --paranoid   # Maximum: air-gapped, no exfiltration possible
 devkit start --offline    # Immediate air-gap (no setup network)
+# Egress proxy: configure egress_proxy in devkit.yaml
 ```
 
 ---
@@ -277,6 +278,53 @@ iptables -A OUTPUT -j DROP
 ```
 
 In paranoid mode, after initial setup, the container has **zero outbound network access**. No TCP, UDP, ICMP, or DNS traffic can leave the container. Lima uses iptables instead of `--network=none` to preserve SSH port forwarding for IDE connections.
+
+### 7. Egress Proxy (Domain Filtering)
+
+For cases where you need some network access but want to limit which services the container can reach:
+
+| Threat | Without Proxy | With Egress Proxy |
+|--------|---------------|-------------------|
+| Exfiltrate to arbitrary servers | **RISK** | Blocked (allowlist only) |
+| Connect to C2 servers | **RISK** | Blocked |
+| Download additional payloads | **RISK** | Blocked (unless in allowlist) |
+| Access legitimate APIs | Allowed | Allowed (if in allowlist) |
+
+**Configuration:**
+```yaml
+# devkit.yaml
+security:
+  egress_proxy:
+    enabled: true
+    allowed_hosts:
+      - "registry.npmjs.org"
+      - "*.github.com"
+      - "*.githubusercontent.com"
+      - "api.thegraph.com"
+    audit_log: true
+```
+
+**How it works:**
+1. HTTP/HTTPS traffic is routed through a filtering proxy via `HTTP_PROXY`/`HTTPS_PROXY` environment variables
+2. Only requests to domains in the allowlist are forwarded
+3. All other requests are blocked with HTTP 403
+4. Audit logging records all allowed and blocked requests
+
+**Pattern syntax:**
+- `example.com` - exact match only
+- `*.example.com` - immediate subdomains (api.example.com, but not a.b.example.com)
+- `**.example.com` - any depth of subdomains
+- `*` - allow everything (disables filtering)
+
+**Security notes:**
+- The proxy runs separately from the container, so malicious code cannot bypass it
+- Non-HTTP traffic (raw TCP, SSH to external servers) is still subject to standard network mode restrictions
+- DNS queries are not filtered (consider using paranoid mode if DNS exfiltration is a concern)
+
+**When to use:**
+- Code review that needs API access but shouldn't reach arbitrary servers
+- Development that requires specific external services
+- Auditing which external services your application contacts
 
 ---
 

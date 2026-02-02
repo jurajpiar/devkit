@@ -80,6 +80,20 @@ type SecurityConfig struct {
 	DebugProxyFilterLevel string `yaml:"debug_proxy_filter_level" mapstructure:"debug_proxy_filter_level"`
 	// TotalIsolation runs each project in a dedicated Podman machine (VM) for hypervisor-level isolation
 	TotalIsolation bool `yaml:"total_isolation" mapstructure:"total_isolation"`
+	// EgressProxy configures outbound traffic filtering through a domain-allowlist proxy
+	EgressProxy EgressProxyConfig `yaml:"egress_proxy,omitempty" mapstructure:"egress_proxy"`
+}
+
+// EgressProxyConfig configures the egress proxy for outbound traffic filtering
+type EgressProxyConfig struct {
+	// Enabled enables the egress proxy (routes all HTTP/HTTPS traffic through it)
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// AllowedHosts is a list of allowed domains (supports wildcards like *.example.com)
+	AllowedHosts []string `yaml:"allowed_hosts,omitempty" mapstructure:"allowed_hosts"`
+	// AuditLog enables logging of all proxy requests (allowed and blocked)
+	AuditLog bool `yaml:"audit_log" mapstructure:"audit_log"`
+	// Port is the proxy port inside the container (default 3128)
+	Port int `yaml:"port,omitempty" mapstructure:"port"`
 }
 
 // MonitoringConfig holds monitoring settings
@@ -397,6 +411,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.use_debug_proxy", false)
 	v.SetDefault("security.debug_proxy_filter_level", "filtered")
 	v.SetDefault("security.total_isolation", false)
+	v.SetDefault("security.egress_proxy.enabled", false)
+	v.SetDefault("security.egress_proxy.allowed_hosts", []string{})
+	v.SetDefault("security.egress_proxy.audit_log", true)
+	v.SetDefault("security.egress_proxy.port", 3128)
 	// Runtime defaults
 	v.SetDefault("runtime.backend", "podman")
 	v.SetDefault("runtime.lima.vm_type", "vz")
