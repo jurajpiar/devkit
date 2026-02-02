@@ -245,14 +245,14 @@ func runBuildLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 // buildEgressProxyImage builds the egress proxy image using Podman
 func buildEgressProxyImage(ctx context.Context) error {
 	// Create a minimal Containerfile for the egress proxy
-	containerfile := `FROM golang:1.22-alpine AS builder
+	containerfile := `FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /devkit-egressproxy ./cmd/egressproxy
 
-FROM alpine:3.19
+FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /devkit-egressproxy /usr/local/bin/devkit-egressproxy
 ENTRYPOINT ["/usr/local/bin/devkit-egressproxy"]
@@ -297,14 +297,14 @@ func buildEgressProxyImageLima(ctx context.Context, vmName string) error {
 	defer os.RemoveAll(tmpDir)
 
 	// Write Containerfile
-	containerfile := `FROM golang:1.22-alpine AS builder
+	containerfile := `FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /egressproxy ./cmd/egressproxy
 
-FROM alpine:3.19
+FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /egressproxy /usr/local/bin/egressproxy
 EXPOSE 3128
