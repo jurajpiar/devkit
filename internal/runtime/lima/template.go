@@ -89,7 +89,8 @@ if ! command -v nerdctl &> /dev/null; then
 fi
 
 # Set up subuid/subgid for the default Lima user
-LIMA_USER="${LIMA_CIDATA_USER:-$(id -un 1000 2>/dev/null || echo ubuntu)}"
+# Get the default Lima user (UID 1000, typically the user created by Lima)
+LIMA_USER="$(id -un 1000 2>/dev/null || getent passwd 1000 | cut -d: -f1 || echo ubuntu)"
 if ! grep -q "^${LIMA_USER}:" /etc/subuid 2>/dev/null; then
     echo "${LIMA_USER}:100000:65536" >> /etc/subuid
     echo "${LIMA_USER}:100000:65536" >> /etc/subgid
