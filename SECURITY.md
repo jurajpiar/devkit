@@ -205,11 +205,13 @@ The container's network namespace cannot route to the host's `127.0.0.1`. Attemp
 
 **Implementation:**
 ```
---security-opt=no-new-privileges:true
+--security-opt=no-new-privileges    # Podman/nerdctl
 --cap-drop=ALL
 ```
 
 Even if a setuid binary exists in the container, the kernel will ignore the setuid bit. The container starts with zero Linux capabilities and cannot acquire any.
+
+**Note:** Podman uses `no-new-privileges:true` while nerdctl (Lima) uses `no-new-privileges` without the `:true` suffix.
 
 ### 4. Persistent Malware in Container
 
@@ -255,11 +257,20 @@ Ports are bound exclusively to the loopback interface. Remote hosts cannot conne
 | C2 (command & control) communication | `--network=none` | **Eliminated** (paranoid) |
 
 **Implementation (paranoid mode):**
+
+**Podman backend:**
 ```
 --network=none
 ```
 
-In paranoid mode, after initial setup, the container has **zero network access**. No TCP, UDP, ICMP, or DNS traffic can leave the container.
+**Lima backend:**
+```bash
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -j DROP
+```
+
+In paranoid mode, after initial setup, the container has **zero outbound network access**. No TCP, UDP, ICMP, or DNS traffic can leave the container. Lima uses iptables instead of `--network=none` to preserve SSH port forwarding for IDE connections.
 
 ---
 

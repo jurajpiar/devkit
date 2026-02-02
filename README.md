@@ -10,10 +10,12 @@ Secure local development infrastructure kit that orchestrates rootless container
 
 ## Features
 
-- **Rootless Containers**: Uses Podman rootless mode - no root privileges required
+- **Multi-Runtime Support**: Choose between Podman (shared VM) or Lima (per-project VMs)
+- **Rootless Containers**: No root privileges required on host
 - **Host Isolation**: Containers have no access to host filesystem by default
 - **Pre-installed Dependencies**: Automatically detects and installs project dependencies
 - **IDE Integration**: Built-in SSH server for VS Code and Cursor Remote development
+- **Auto Port Forwarding**: Lima automatically forwards ports when services start listening
 - **Project Detection**: Auto-detects Node.js projects (more languages coming soon)
 
 ## Requirements
@@ -164,10 +166,18 @@ devkit stop --stop-machine    # Stops container AND dedicated machine
 | `devkit forward <port>` | Forward ports via SSH tunnel |
 | `devkit shell` | Open a shell in the container |
 | `devkit list` | List all devkit containers |
+| `devkit stats` | Show container performance statistics |
+| `devkit logs` | View monitoring logs |
+| `devkit monitor` | Manage monitoring daemon |
 | `devkit runtime status` | Show current runtime backend status |
 | `devkit runtime switch` | Switch between podman/lima backends |
+| `devkit runtime doctor` | Diagnose runtime issues |
+| `devkit runtime install` | Install a runtime backend |
 | `devkit vm list` | List all devkit VMs |
+| `devkit vm create` | Create a new VM |
 | `devkit vm start/stop` | Start or stop a VM |
+| `devkit vm remove` | Remove a VM |
+| `devkit machine` | Manage the devkit Podman machine |
 
 ## Configuration
 
@@ -251,17 +261,17 @@ Devkit supports both VS Code and Cursor via their Remote-SSH extensions.
 1. Install the "Remote - SSH" extension in your IDE
 2. Run `devkit connect` to see connection details
 3. Press `Cmd+Shift+P` and select "Remote-SSH: Connect to Host..."
-4. Enter: `ssh://developer@localhost:2222`
+4. Enter: `ssh://developer@localhost:<port>` (port from `ssh.port` in devkit.yaml, default 2222)
 5. Open folder: `/home/developer/workspace`
 
 ### Method 2: SSH Config
 
-Add to `~/.ssh/config`:
+Add to `~/.ssh/config` (adjust port to match your `devkit.yaml`):
 
 ```
 Host devkit-myproject
     HostName localhost
-    Port 2222
+    Port 2222          # Must match ssh.port in devkit.yaml
     User developer
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
@@ -277,7 +287,11 @@ When running applications in the container (e.g., React dev server on port 3000)
 
 VS Code and Cursor automatically detect and forward ports when connected via Remote-SSH. Just run your app and the IDE will prompt you.
 
-### Option 2: Dynamic SSH Tunnel
+### Option 2: Lima Auto-Forward (Lima backend only)
+
+With Lima backend, ports are **automatically forwarded** when services start listening on them. No configuration needed - Lima's guest agent detects listening ports and forwards them to your host.
+
+### Option 3: Dynamic SSH Tunnel
 
 ```bash
 # Forward a single port
@@ -292,7 +306,7 @@ devkit forward 3000 --save
 
 The tunnel runs in the foreground - press Ctrl+C to stop.
 
-### Option 3: Pre-configured Ports
+### Option 4: Pre-configured Ports
 
 Add ports to `devkit.yaml` to automatically publish them when the container starts:
 
@@ -305,9 +319,10 @@ ports:
 Then recreate the container:
 
 ```bash
-devkit remove
-devkit start
+devkit start --rebuild
 ```
+
+**Important:** Ports must be configured in `devkit.yaml` BEFORE the container is created. If you add ports later, use `--rebuild` to recreate the container.
 
 All ports are bound to `127.0.0.1` only for security.
 
@@ -337,23 +352,26 @@ Devkit is designed for maximum isolation to protect against supply-chain attacks
 
 | Protection | Description |
 |------------|-------------|
-| **Rootless Podman** | Containers run without root privileges on host |
+| **Rootless Containers** | Containers run without root privileges on host |
 | **No Host FS Access** | Code is git-cloned inside container, no host mounts |
 | **Drop All Capabilities** | `--cap-drop=ALL` removes all Linux capabilities |
-| **No New Privileges** | `--security-opt=no-new-privileges` prevents privilege escalation |
+| **No New Privileges** | Prevents privilege escalation via setuid binaries |
 | **Read-Only Root FS** | `--read-only` prevents persistent malware |
-| **Localhost Blocked** | `slirp4netns:allow_host_loopback=false` blocks access to host services |
+| **Localhost Blocked** | Container cannot access host services (Podman: slirp4netns, Lima: bridge isolation) |
 | **Localhost-Only Ports** | SSH/debug ports bind to `127.0.0.1` only |
 | **Resource Limits** | Memory (4GB) and process limits (512) prevent DoS |
 | **Named Volumes** | Workspace uses container-local volumes, not host paths |
+| **Per-Project VMs** | Lima backend provides hypervisor-level isolation between projects |
 
 ### Network Modes
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
 | `restricted` (default) | Outbound internet allowed, localhost blocked | Normal development |
-| `none` | No network access at all | Maximum security after deps installed |
+| `none` | No outbound network (Podman: `--network=none`, Lima: iptables blocking) | Maximum security after deps installed |
 | `full` | Full network including localhost (dangerous) | Only if explicitly needed |
+
+**Note:** With Lima backend, `network_mode: none` uses iptables to block outgoing traffic while preserving SSH port forwarding for IDE connections. With Podman, it uses `--network=none` which completely isolates the container.
 
 ### Configuration
 
