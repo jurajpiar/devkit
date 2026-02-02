@@ -208,7 +208,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Check if image exists
 	imageExists, _ := b.ImageExists(ctx)
 	if !imageExists {
-		return fmt.Errorf("image %s not found\n\nRun 'devkit build' first to build the container image", imageName)
+		if rebuild {
+			// Auto-build if --rebuild was specified and image doesn't exist
+			fmt.Println("Image not found, building...")
+			if err := b.Build(ctx); err != nil {
+				return fmt.Errorf("failed to build image: %w", err)
+			}
+			fmt.Printf("Built image: %s\n", imageName)
+		} else {
+			return fmt.Errorf("image %s not found\n\nRun 'devkit build' first to build the container image", imageName)
+		}
 	}
 
 	// For paranoid mode, we need a two-phase startup:
@@ -550,7 +559,29 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 	// Check if image exists
 	imageExists, _ := rc.Runtime.ImageExists(ctx, imageName)
 	if !imageExists {
-		return fmt.Errorf("image %s not found\n\nRun 'devkit build' first to build the container image", imageName)
+		if rebuild {
+			// Auto-build if --rebuild was specified and image doesn't exist
+			fmt.Println("Image not found in VM, building...")
+
+			// Generate and save Containerfile
+			if err := b.SaveContainerfile(".devkit-Containerfile"); err != nil {
+				return fmt.Errorf("failed to save Containerfile: %w", err)
+			}
+
+			// Build using runtime
+			buildOpts := runtime.BuildOpts{
+				ContextDir: ".",
+				Dockerfile: ".devkit-Containerfile",
+				ImageName:  imageName,
+				NoCache:    false,
+			}
+			if err := rc.Runtime.Build(ctx, buildOpts); err != nil {
+				return fmt.Errorf("failed to build image: %w", err)
+			}
+			fmt.Printf("Built image: %s\n", imageName)
+		} else {
+			return fmt.Errorf("image %s not found\n\nRun 'devkit build' first to build the container image", imageName)
+		}
 	}
 
 	// Calculate total steps
