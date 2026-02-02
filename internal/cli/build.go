@@ -224,13 +224,25 @@ func runBuildLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 	}
 
 	fmt.Printf("\nSuccessfully built image: %s\n", imageName)
+
+	// Build egress proxy if enabled in config or explicitly requested
+	buildEgressProxy, _ := cmd.Flags().GetBool("egress-proxy")
+	if buildEgressProxy || cfg.Security.EgressProxy.Enabled {
+		fmt.Println("\nBuilding egress proxy image...")
+		if err := buildEgressProxyImageLima(ctx, rc.VMName); err != nil {
+			fmt.Printf("Warning: failed to build egress proxy image: %v\n", err)
+		} else {
+			fmt.Println("Successfully built egress proxy image: devkit/egressproxy:latest")
+		}
+	}
+
 	fmt.Println("\nNext steps:")
 	fmt.Println("  devkit start    - Start the development container")
 
 	return nil
 }
 
-// buildEgressProxyImage builds the egress proxy image
+// buildEgressProxyImage builds the egress proxy image using Podman
 func buildEgressProxyImage(ctx context.Context) error {
 	// Create a minimal Containerfile for the egress proxy
 	containerfile := `FROM golang:1.22-alpine AS builder
@@ -265,4 +277,148 @@ ENTRYPOINT ["/usr/local/bin/devkit-egressproxy"]
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+// buildEgressProxyImageLima builds the egress proxy image inside the Lima VM
+func buildEgressProxyImageLima(ctx context.Context, vmName string) error {
+	// Check if image already exists
+	checkCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"nerdctl", "image", "inspect", "devkit/egressproxy:latest")
+	if checkCmd.Run() == nil {
+		fmt.Println("  Egress proxy image already exists")
+		return nil
+	}
+
+	// Create a temp directory for the build context
+	tmpDir, err := os.MkdirTemp("", "devkit-egressproxy-build-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Write Containerfile
+	containerfile := `FROM golang:1.22-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /egressproxy ./cmd/egressproxy
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /egressproxy /usr/local/bin/egressproxy
+EXPOSE 3128
+ENTRYPOINT ["/usr/local/bin/egressproxy"]
+CMD ["-listen", ":3128"]
+`
+	containerfilePath := tmpDir + "/Containerfile"
+	if err := os.WriteFile(containerfilePath, []byte(containerfile), 0644); err != nil {
+		return fmt.Errorf("failed to write Containerfile: %w", err)
+	}
+
+	// Copy devkit source to temp dir (we need go.mod, go.sum, and the egressproxy code)
+	// Find devkit source dir
+	sourceDir, err := findDevkitSource()
+	if err != nil {
+		return err
+	}
+
+	// Copy required files
+	filesToCopy := []string{"go.mod", "go.sum"}
+	for _, f := range filesToCopy {
+		src := sourceDir + "/" + f
+		dst := tmpDir + "/" + f
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("failed to read %s: %w", f, err)
+		}
+		if err := os.WriteFile(dst, data, 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", f, err)
+		}
+	}
+
+	// Copy source directories
+	dirsToCreate := []string{"cmd/egressproxy", "internal/egressproxy"}
+	for _, d := range dirsToCreate {
+		if err := os.MkdirAll(tmpDir+"/"+d, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", d, err)
+		}
+	}
+
+	// Copy egressproxy source files
+	srcFiles := []struct{ src, dst string }{
+		{sourceDir + "/cmd/egressproxy/main.go", tmpDir + "/cmd/egressproxy/main.go"},
+		{sourceDir + "/internal/egressproxy/proxy.go", tmpDir + "/internal/egressproxy/proxy.go"},
+		{sourceDir + "/internal/egressproxy/filter.go", tmpDir + "/internal/egressproxy/filter.go"},
+		{sourceDir + "/internal/egressproxy/audit.go", tmpDir + "/internal/egressproxy/audit.go"},
+	}
+	for _, f := range srcFiles {
+		data, err := os.ReadFile(f.src)
+		if err != nil {
+			return fmt.Errorf("failed to read %s: %w", f.src, err)
+		}
+		if err := os.WriteFile(f.dst, data, 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", f.dst, err)
+		}
+	}
+
+	// Copy to VM
+	vmTmpDir := "/tmp/egressproxy-build"
+	fmt.Println("  Copying build context to VM...")
+	
+	// Remove old build dir if exists
+	exec.CommandContext(ctx, "limactl", "shell", vmName, "--", "rm", "-rf", vmTmpDir).Run()
+	
+	// Copy using limactl
+	copyCmd := exec.CommandContext(ctx, "limactl", "copy", "-r", tmpDir, vmName+":"+vmTmpDir)
+	if out, err := copyCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to copy to VM: %w\n%s", err, string(out))
+	}
+
+	// Build in VM
+	fmt.Println("  Building image in VM...")
+	buildCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"nerdctl", "build",
+		"-t", "devkit/egressproxy:latest",
+		"-f", vmTmpDir+"/Containerfile",
+		vmTmpDir)
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("failed to build image: %w", err)
+	}
+
+	// Cleanup
+	exec.CommandContext(ctx, "limactl", "shell", vmName, "--", "rm", "-rf", vmTmpDir).Run()
+
+	return nil
+}
+
+// findDevkitSource finds the devkit source directory
+func findDevkitSource() (string, error) {
+	// Check common locations
+	candidates := []string{}
+
+	// Current directory
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, cwd)
+	}
+
+	// Home directory locations
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			home+"/src/jurajpiar/dev_setup",
+			home+"/src/devkit",
+			home+"/go/src/github.com/jurajpiar/devkit",
+		)
+	}
+
+	for _, dir := range candidates {
+		// Check if it has the egressproxy source
+		if _, err := os.Stat(dir + "/cmd/egressproxy/main.go"); err == nil {
+			return dir, nil
+		}
+	}
+
+	return "", fmt.Errorf("cannot find devkit source directory with egressproxy code")
 }

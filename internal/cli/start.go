@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/jurajpiar/devkit/internal/builder"
-	"github.com/jurajpiar/devkit/internal/embedded"
 	"github.com/jurajpiar/devkit/internal/config"
 	"github.com/jurajpiar/devkit/internal/container"
 	"github.com/jurajpiar/devkit/internal/detector"
@@ -616,14 +615,15 @@ func runStartLima(ctx context.Context, cmd *cobra.Command, cfg *config.Config, r
 		},
 	}
 
-	// Egress proxy configuration
+	// Egress proxy configuration - proxy runs as a container, accessed by container name
+	egressProxyContainerName := containerName + "-egressproxy"
 	if cfg.Security.EgressProxy.Enabled && len(cfg.Security.EgressProxy.AllowedHosts) > 0 {
 		proxyPort := cfg.Security.EgressProxy.Port
 		if proxyPort == 0 {
 			proxyPort = 3128
 		}
-		// The egress proxy runs on the VM's localhost, accessible from the container
-		proxyAddr := fmt.Sprintf("http://host.lima.internal:%d", proxyPort)
+		// The egress proxy runs as a container on the same network, accessed by container name
+		proxyAddr := fmt.Sprintf("http://%s:%d", egressProxyContainerName, proxyPort)
 		createOpts.Env["HTTP_PROXY"] = proxyAddr
 		createOpts.Env["HTTPS_PROXY"] = proxyAddr
 		createOpts.Env["http_proxy"] = proxyAddr
@@ -930,109 +930,88 @@ func setupSSHInContainer(ctx context.Context, rt runtime.Runtime, containerName 
 	return err
 }
 
-// startEgressProxyLima starts the egress proxy in the Lima VM
+// startEgressProxyLima starts the egress proxy as a container in the Lima VM
 func startEgressProxyLima(ctx context.Context, vmName string, cfg *config.Config) error {
+	proxyContainerName := cfg.ContainerName() + "-egressproxy"
 	proxyPort := cfg.Security.EgressProxy.Port
 	if proxyPort == 0 {
 		proxyPort = 3128
 	}
 
-	// Build allowed hosts argument
-	allowedHosts := strings.Join(cfg.Security.EgressProxy.AllowedHosts, ",")
-
-	// Check if proxy is already running
+	// Check if proxy container is already running
 	checkCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
-		"pgrep", "-f", fmt.Sprintf("devkit-egressproxy.*:%d", proxyPort))
-	if checkCmd.Run() == nil {
-		// Proxy already running
+		"nerdctl", "container", "inspect", proxyContainerName, "--format", "{{.State.Running}}")
+	if out, err := checkCmd.Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
+		fmt.Println("  Egress proxy container already running")
 		return nil
 	}
 
-	// Check if proxy binary exists in VM
-	checkBinaryCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
-		"test", "-f", "/usr/local/bin/devkit-egressproxy")
-	if checkBinaryCmd.Run() != nil {
-		// Binary doesn't exist, copy the embedded one
-		if err := copyEgressProxyToVM(ctx, vmName); err != nil {
-			return fmt.Errorf("failed to setup egress proxy: %w", err)
+	// Check if proxy image exists, build if not
+	checkImageCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"nerdctl", "image", "inspect", "devkit/egressproxy:latest")
+	if checkImageCmd.Run() != nil {
+		fmt.Println("  Building egress proxy image...")
+		if err := buildEgressProxyImageLima(ctx, vmName); err != nil {
+			return fmt.Errorf("failed to build egress proxy image: %w", err)
 		}
 	}
 
-	// Build the proxy command
-	proxyArgs := []string{
+	// Remove existing container if exists (might be stopped)
+	exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"nerdctl", "rm", "-f", proxyContainerName).Run()
+
+	// Build allowed hosts argument
+	allowedHosts := strings.Join(cfg.Security.EgressProxy.AllowedHosts, ",")
+
+	// Build container run arguments
+	args := []string{
+		"nerdctl", "run", "-d",
+		"--name", proxyContainerName,
+		"--restart", "unless-stopped",
+		// Security hardening
+		"--cap-drop=ALL",
+		"--read-only",
+		// Network - use bridge so dev container can reach it by name
+		"--network", "bridge",
+	}
+
+	// The image and command
+	args = append(args, "devkit/egressproxy:latest",
 		"-listen", fmt.Sprintf(":%d", proxyPort),
 		"-allowed", allowedHosts,
-	}
+	)
+
 	if cfg.Security.EgressProxy.AuditLog {
-		proxyArgs = append(proxyArgs, "-audit")
+		args = append(args, "-audit")
 	}
 
-	// Start proxy in background in the VM
-	proxyCmd := fmt.Sprintf("nohup /usr/local/bin/devkit-egressproxy %s > /tmp/egressproxy.log 2>&1 &",
-		strings.Join(proxyArgs, " "))
-
-	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--", "bash", "-c", proxyCmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to start egress proxy: %w", err)
+	// Start the container
+	fmt.Println("  Starting egress proxy container...")
+	startCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--")
+	startCmd.Args = append(startCmd.Args, args...)
+	if out, err := startCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to start egress proxy container: %w\n%s", err, string(out))
 	}
 
-	// Wait a moment for the proxy to start
+	// Verify it's running
 	time.Sleep(500 * time.Millisecond)
-
-	// Verify proxy is running
 	verifyCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
-		"pgrep", "-f", fmt.Sprintf("devkit-egressproxy.*:%d", proxyPort))
-	if err := verifyCmd.Run(); err != nil {
-		return fmt.Errorf("egress proxy failed to start, check /tmp/egressproxy.log in VM")
+		"nerdctl", "container", "inspect", proxyContainerName, "--format", "{{.State.Running}}")
+	if out, err := verifyCmd.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		// Get logs for debugging
+		logsCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+			"nerdctl", "logs", proxyContainerName)
+		logs, _ := logsCmd.CombinedOutput()
+		return fmt.Errorf("egress proxy container failed to start:\n%s", string(logs))
 	}
 
 	return nil
 }
 
-// copyEgressProxyToVM copies the embedded egress proxy binary to the Lima VM
-func copyEgressProxyToVM(ctx context.Context, vmName string) error {
-	// Create temp file for the binary
-	tmpFile, err := os.CreateTemp("", "devkit-egressproxy-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	// Write the embedded binary to temp file
-	if err := embedded.WriteEgressProxyTo(tmpPath); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("failed to extract egress proxy: %w", err)
-	}
-	tmpFile.Close()
-
-	// Copy binary to VM using limactl copy
-	fmt.Println("  Copying egress proxy to VM...")
-	copyCmd := exec.CommandContext(ctx, "limactl", "copy", tmpPath, vmName+":/tmp/devkit-egressproxy")
-	if err := copyCmd.Run(); err != nil {
-		return fmt.Errorf("failed to copy proxy to VM: %w", err)
-	}
-
-	// Move to /usr/local/bin and make executable (requires sudo in VM)
-	installCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
-		"sudo", "mv", "/tmp/devkit-egressproxy", "/usr/local/bin/devkit-egressproxy")
-	if err := installCmd.Run(); err != nil {
-		return fmt.Errorf("failed to install proxy in VM: %w", err)
-	}
-
-	chmodCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
-		"sudo", "chmod", "+x", "/usr/local/bin/devkit-egressproxy")
-	if err := chmodCmd.Run(); err != nil {
-		return fmt.Errorf("failed to make proxy executable: %w", err)
-	}
-
-	return nil
-}
-
-// stopEgressProxyLima stops the egress proxy in the Lima VM
-func stopEgressProxyLima(ctx context.Context, vmName string, port int) error {
+// stopEgressProxyLima stops the egress proxy container in the Lima VM
+func stopEgressProxyLima(ctx context.Context, vmName string, containerName string) error {
 	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
-		"pkill", "-f", fmt.Sprintf("devkit-egressproxy.*:%d", port))
+		"nerdctl", "rm", "-f", containerName)
 	_ = cmd.Run() // Ignore error if not running
 	return nil
 }
@@ -1041,3 +1020,6 @@ func stopEgressProxyLima(ctx context.Context, vmName string, port int) error {
 func egressProxyContainerName(cfg *config.Config) string {
 	return cfg.ContainerName() + "-egressproxy"
 }
+
+// buildEgressProxyImageLima is imported from build.go
+// (already defined there)
