@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"time"
@@ -947,6 +949,17 @@ func startEgressProxyLima(ctx context.Context, vmName string, cfg *config.Config
 		return nil
 	}
 
+	// Check if proxy binary exists in VM
+	checkBinaryCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"test", "-f", "/usr/local/bin/devkit-egressproxy")
+	if checkBinaryCmd.Run() != nil {
+		// Binary doesn't exist, need to build and copy it
+		fmt.Println("  Building egress proxy binary for Linux...")
+		if err := buildAndCopyEgressProxy(ctx, vmName); err != nil {
+			return fmt.Errorf("failed to setup egress proxy: %w", err)
+		}
+	}
+
 	// Build the proxy command
 	proxyArgs := []string{
 		"-listen", fmt.Sprintf(":%d", proxyPort),
@@ -957,7 +970,6 @@ func startEgressProxyLima(ctx context.Context, vmName string, cfg *config.Config
 	}
 
 	// Start proxy in background in the VM
-	// The proxy binary should be copied to the VM during build
 	proxyCmd := fmt.Sprintf("nohup /usr/local/bin/devkit-egressproxy %s > /tmp/egressproxy.log 2>&1 &",
 		strings.Join(proxyArgs, " "))
 
@@ -974,6 +986,77 @@ func startEgressProxyLima(ctx context.Context, vmName string, cfg *config.Config
 		"pgrep", "-f", fmt.Sprintf("devkit-egressproxy.*:%d", proxyPort))
 	if err := verifyCmd.Run(); err != nil {
 		return fmt.Errorf("egress proxy failed to start, check /tmp/egressproxy.log in VM")
+	}
+
+	return nil
+}
+
+// buildAndCopyEgressProxy builds the egress proxy binary for Linux and copies it to the VM
+func buildAndCopyEgressProxy(ctx context.Context, vmName string) error {
+	// Get the devkit source directory (where go.mod is)
+	// Try to find it relative to the executable
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+	
+	// Check if we're running from the source directory
+	sourceDir := filepath.Dir(exePath)
+	goModPath := filepath.Join(sourceDir, "go.mod")
+	if _, err := os.Stat(goModPath); os.IsNotExist(err) {
+		// Try current directory
+		cwd, _ := os.Getwd()
+		goModPath = filepath.Join(cwd, "go.mod")
+		if _, err := os.Stat(goModPath); os.IsNotExist(err) {
+			return fmt.Errorf("cannot find devkit source directory (go.mod not found)")
+		}
+		sourceDir = cwd
+	}
+
+	// Create temp file for the binary
+	tmpFile, err := os.CreateTemp("", "devkit-egressproxy-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Determine target architecture (Lima VMs match host arch on Apple Silicon)
+	goarch := goruntime.GOARCH
+
+	// Build the proxy binary for Linux
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", tmpPath, "./cmd/egressproxy")
+	buildCmd.Dir = sourceDir
+	buildCmd.Env = append(os.Environ(),
+		"GOOS=linux",
+		"GOARCH="+goarch,
+		"CGO_ENABLED=0",
+	)
+	var buildStderr bytes.Buffer
+	buildCmd.Stderr = &buildStderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("failed to build egress proxy: %w\n%s", err, buildStderr.String())
+	}
+
+	// Copy binary to VM using limactl copy
+	fmt.Println("  Copying egress proxy to VM...")
+	copyCmd := exec.CommandContext(ctx, "limactl", "copy", tmpPath, vmName+":/tmp/devkit-egressproxy")
+	if err := copyCmd.Run(); err != nil {
+		return fmt.Errorf("failed to copy proxy to VM: %w", err)
+	}
+
+	// Move to /usr/local/bin and make executable (requires sudo in VM)
+	installCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"sudo", "mv", "/tmp/devkit-egressproxy", "/usr/local/bin/devkit-egressproxy")
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("failed to install proxy in VM: %w", err)
+	}
+
+	chmodCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+		"sudo", "chmod", "+x", "/usr/local/bin/devkit-egressproxy")
+	if err := chmodCmd.Run(); err != nil {
+		return fmt.Errorf("failed to make proxy executable: %w", err)
 	}
 
 	return nil
