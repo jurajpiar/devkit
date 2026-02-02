@@ -48,12 +48,10 @@ func NewProxy(config ProxyConfig) *Proxy {
 
 // Start starts the proxy server
 func (p *Proxy) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", p.handleRequest)
-
+	// Use the proxy directly as the handler - ServeMux doesn't properly route CONNECT requests
 	p.server = &http.Server{
 		Addr:    p.config.ListenAddr,
-		Handler: mux,
+		Handler: http.HandlerFunc(p.handleRequest),
 		// Timeouts for security
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
