@@ -993,24 +993,10 @@ func startEgressProxyLima(ctx context.Context, vmName string, cfg *config.Config
 
 // buildAndCopyEgressProxy builds the egress proxy binary for Linux and copies it to the VM
 func buildAndCopyEgressProxy(ctx context.Context, vmName string) error {
-	// Get the devkit source directory (where go.mod is)
-	// Try to find it relative to the executable
-	exePath, err := os.Executable()
+	// Find devkit source directory
+	sourceDir, err := findDevkitSourceDir()
 	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
-	}
-	
-	// Check if we're running from the source directory
-	sourceDir := filepath.Dir(exePath)
-	goModPath := filepath.Join(sourceDir, "go.mod")
-	if _, err := os.Stat(goModPath); os.IsNotExist(err) {
-		// Try current directory
-		cwd, _ := os.Getwd()
-		goModPath = filepath.Join(cwd, "go.mod")
-		if _, err := os.Stat(goModPath); os.IsNotExist(err) {
-			return fmt.Errorf("cannot find devkit source directory (go.mod not found)")
-		}
-		sourceDir = cwd
+		return err
 	}
 
 	// Create temp file for the binary
@@ -1060,6 +1046,75 @@ func buildAndCopyEgressProxy(ctx context.Context, vmName string) error {
 	}
 
 	return nil
+}
+
+// findDevkitSourceDir finds the devkit source directory for building the egress proxy
+func findDevkitSourceDir() (string, error) {
+	// 0. Check DEVKIT_SOURCE_DIR environment variable first
+	if envDir := os.Getenv("DEVKIT_SOURCE_DIR"); envDir != "" {
+		goModPath := filepath.Join(envDir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			return envDir, nil
+		}
+	}
+
+	// List of potential source locations to check
+	var candidates []string
+
+	// 1. Current working directory
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, cwd)
+	}
+
+	// 2. Directory containing the devkit executable
+	if exePath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Dir(exePath))
+	}
+
+	// 3. Home directory locations
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(home, "src", "devkit"),
+			filepath.Join(home, "src", "jurajpiar", "devkit"),
+			filepath.Join(home, "src", "jurajpiar", "dev_setup"),
+			filepath.Join(home, "go", "src", "github.com", "jurajpiar", "devkit"),
+			filepath.Join(home, ".devkit", "src"),
+		)
+	}
+
+	// 4. GOPATH locations
+	if gopath := os.Getenv("GOPATH"); gopath != "" {
+		for _, p := range filepath.SplitList(gopath) {
+			candidates = append(candidates,
+				filepath.Join(p, "src", "github.com", "jurajpiar", "devkit"),
+			)
+		}
+	}
+
+	// 5. Common system locations
+	candidates = append(candidates,
+		"/usr/local/share/devkit",
+		"/opt/devkit",
+	)
+
+	// Check each candidate for go.mod
+	for _, dir := range candidates {
+		goModPath := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			// Verify it's the right project by checking for cmd/egressproxy
+			egressProxyPath := filepath.Join(dir, "cmd", "egressproxy", "main.go")
+			if _, err := os.Stat(egressProxyPath); err == nil {
+				return dir, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("cannot find devkit source directory\n\n" +
+		"The egress proxy needs to be built from source. Please either:\n" +
+		"  1. Run devkit from the source directory, OR\n" +
+		"  2. Clone devkit to ~/src/jurajpiar/dev_setup, OR\n" +
+		"  3. Set DEVKIT_SOURCE_DIR environment variable\n\n" +
+		"Alternatively, disable egress_proxy in devkit.yaml")
 }
 
 // stopEgressProxyLima stops the egress proxy in the Lima VM
