@@ -352,7 +352,7 @@ Devkit is designed for maximum isolation to protect against supply-chain attacks
 
 | Protection | Description |
 |------------|-------------|
-| **Rootless Containers** | Containers run without root privileges on host |
+| **Rootless Containers** | Both Podman and Lima run containers without root privileges |
 | **No Host FS Access** | Code is git-cloned inside container, no host mounts |
 | **Drop All Capabilities** | `--cap-drop=ALL` removes all Linux capabilities |
 | **No New Privileges** | Prevents privilege escalation via setuid binaries |

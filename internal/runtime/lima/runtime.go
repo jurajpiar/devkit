@@ -199,8 +199,8 @@ func (r *Runtime) ExecWithOutput(ctx context.Context, name string, cmd ...string
 		return runtime.ErrVMNotRunning{Name: r.VMName}
 	}
 
-	// Build the full command to run in the VM
-	nerdctlCmd := append([]string{"sudo", "nerdctl", "exec", name}, cmd...)
+	// Build the full command to run in the VM (rootless nerdctl, no sudo needed)
+	nerdctlCmd := append([]string{"nerdctl", "exec", name}, cmd...)
 	shellArgs := append([]string{"shell", r.VMName, "--"}, nerdctlCmd...)
 
 	execCmd := exec.CommandContext(ctx, "limactl", shellArgs...)
@@ -221,8 +221,8 @@ func (r *Runtime) ExecAsUserWithOutput(ctx context.Context, name, user string, c
 		return runtime.ErrVMNotRunning{Name: r.VMName}
 	}
 
-	// Build the full command to run in the VM
-	nerdctlCmd := append([]string{"sudo", "nerdctl", "exec", "-u", user, name}, cmd...)
+	// Build the full command to run in the VM (rootless nerdctl, no sudo needed)
+	nerdctlCmd := append([]string{"nerdctl", "exec", "-u", user, name}, cmd...)
 	shellArgs := append([]string{"shell", r.VMName, "--"}, nerdctlCmd...)
 
 	execCmd := exec.CommandContext(ctx, "limactl", shellArgs...)
@@ -329,7 +329,7 @@ func (r *Runtime) CopyTo(ctx context.Context, name, src, dst string) error {
 
 	// Copy from VM to container using cat pipe through exec
 	// This works with read-only containers since we're writing to tmpfs
-	shellCmd := fmt.Sprintf("cat %s | sudo nerdctl exec -i %s sh -c 'cat > %s'", vmTempPath, name, dst)
+	shellCmd := fmt.Sprintf("cat %s | nerdctl exec -i %s sh -c 'cat > %s'", vmTempPath, name, dst)
 	_, err := r.vm.Shell(ctx, r.VMName, "bash", "-c", shellCmd)
 	if err != nil {
 		r.vm.Shell(ctx, r.VMName, "rm", "-rf", vmTempPath)
@@ -480,9 +480,8 @@ func (r *Runtime) runNerdctl(ctx context.Context, args ...string) (string, error
 		return "", runtime.ErrVMNotRunning{Name: r.VMName}
 	}
 
-	// Build the full command to run in the VM
-	// Use sudo for system containerd
-	nerdctlCmd := append([]string{"sudo", "nerdctl"}, args...)
+	// Build the full command to run in the VM (rootless nerdctl, no sudo needed)
+	nerdctlCmd := append([]string{"nerdctl"}, args...)
 	shellArgs := append([]string{"shell", r.VMName, "--"}, nerdctlCmd...)
 
 	cmd := exec.CommandContext(ctx, "limactl", shellArgs...)
@@ -509,8 +508,8 @@ func (r *Runtime) runNerdctlInteractive(ctx context.Context, args ...string) err
 		return runtime.ErrVMNotRunning{Name: r.VMName}
 	}
 
-	// Use sudo for system containerd
-	nerdctlCmd := append([]string{"sudo", "nerdctl"}, args...)
+	// Rootless nerdctl, no sudo needed
+	nerdctlCmd := append([]string{"nerdctl"}, args...)
 	shellArgs := append([]string{"shell", r.VMName, "--"}, nerdctlCmd...)
 
 	cmd := exec.CommandContext(ctx, "limactl", shellArgs...)

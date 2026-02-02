@@ -68,12 +68,15 @@ set -euo pipefail
 # Update system
 apt-get update
 
-# Install basic tools
-apt-get install -y curl ca-certificates
+# Install dependencies for rootless containers
+apt-get install -y curl ca-certificates uidmap dbus-user-session fuse-overlayfs slirp4netns
 
-# nerdctl-full includes containerd, buildkit, CNI plugins, etc.
-# This is installed by Lima's containerd integration, but we ensure buildkitd is running
-if ! command -v buildkitd &> /dev/null; then
+# Enable unprivileged user namespaces (required for rootless)
+echo "kernel.unprivileged_userns_clone=1" > /etc/sysctl.d/90-rootless.conf
+sysctl --system || true
+
+# nerdctl-full includes containerd, buildkit, CNI plugins, rootlesskit, etc.
+if ! command -v nerdctl &> /dev/null; then
     echo "Installing nerdctl-full..."
     NERDCTL_VERSION="2.1.3"
     ARCH=$(uname -m)
@@ -85,33 +88,42 @@ if ! command -v buildkitd &> /dev/null; then
     curl -fsSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-${ARCH}.tar.gz" | tar -xzf - -C /usr/local
 fi
 
-# Ensure containerd is running
-systemctl enable --now containerd || true
+# Set up subuid/subgid for the default Lima user
+LIMA_USER="${LIMA_CIDATA_USER:-$(id -un 1000 2>/dev/null || echo ubuntu)}"
+if ! grep -q "^${LIMA_USER}:" /etc/subuid 2>/dev/null; then
+    echo "${LIMA_USER}:100000:65536" >> /etc/subuid
+    echo "${LIMA_USER}:100000:65536" >> /etc/subgid
+fi
+`,
+			},
+			{
+				Mode: "user",
+				Script: `#!/bin/bash
+set -euo pipefail
 
-# Start buildkitd if not running
-if ! pgrep buildkitd > /dev/null; then
-    echo "Starting buildkitd..."
-    nohup buildkitd &>/tmp/buildkitd.log &
-    sleep 2
+# Set up XDG runtime directory for rootless containerd
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+# Initialize rootless containerd if not already done
+if [ ! -f ~/.config/containerd/config.toml ]; then
+    echo "Setting up rootless containerd..."
+    containerd-rootless-setuptool.sh install || true
 fi
 
-# Create systemd service for buildkitd
-cat > /etc/systemd/system/buildkitd.service << 'EOSVC'
-[Unit]
-Description=BuildKit daemon
-After=containerd.service
+# Start rootless containerd if not running
+if ! pgrep -u $(id -u) containerd > /dev/null 2>&1; then
+    echo "Starting rootless containerd..."
+    containerd-rootless-setuptool.sh install || true
+fi
 
-[Service]
-ExecStart=/usr/local/bin/buildkitd
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOSVC
-
-systemctl daemon-reload
-systemctl enable --now buildkitd || true
+# Set up rootless buildkit
+if [ ! -f ~/.config/buildkit/buildkitd.toml ]; then
+    mkdir -p ~/.config/buildkit
+    echo "Starting rootless buildkitd..."
+    BUILDKITD_ADDR="unix://$XDG_RUNTIME_DIR/buildkit/buildkitd.sock" \
+        containerd-rootless-setuptool.sh install-buildkit || true
+fi
 `,
 			},
 		},
@@ -149,10 +161,10 @@ images:
 # Security: Plain mode disables GUI integration and default mounts
 plain: {{.Config.Plain}}
 
-# Containerd for running containers
+# Containerd for running containers (rootless mode for security)
 containerd:
-  system: true
-  user: false
+  system: false
+  user: true
 
 # SSH port forwarding
 ssh:

@@ -635,9 +635,11 @@ features:
 | Setup complexity | ✅ Simple | ✅ Simple | ✅ Simple | ⚠️ Manual hardening | ⚠️ Complex |
 | Container escape impact | ⚠️ User access | ✅ VM confined | ✅ VM confined | ⚠️ User access | ✅ Separate |
 
-**Note on localhost isolation:**
-- **Podman**: Uses `slirp4netns:allow_host_loopback=false` to block container access to host's localhost
-- **Lima**: Container can access VM's localhost, but the VM itself is isolated from the host. Services on the host are not accessible.
+**Notes:**
+- **Localhost isolation**:
+  - **Podman**: Uses `slirp4netns:allow_host_loopback=false` to block container access to host's localhost
+  - **Lima**: Container can access VM's localhost, but the VM itself is isolated from the host. Services on the host are not accessible.
+- **Rootless containers**: Both Podman and Lima run containers without root privileges. Lima uses rootless containerd/nerdctl inside the VM, providing defense-in-depth (rootless + hypervisor isolation).
 
 ---
 
