@@ -194,14 +194,14 @@ portForwards:
 {{- end}}
 {{end}}
 
-{{if .Config.Mounts}}
-# Mounts
-mounts:
+# Security: Explicitly disable all host filesystem mounts
+# Without this section, Lima mounts ~ and /tmp/lima by default
+mounts: {{if .Config.Mounts}}
 {{- range .Config.Mounts}}
   - location: "{{.Location}}"
     writable: {{.Writable}}
 {{- end}}
-{{end}}
+{{- else}}[]{{end}}
 
 # Provisioning Scripts
 provision:

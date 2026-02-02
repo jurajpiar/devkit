@@ -640,6 +640,7 @@ features:
   - **Podman**: Uses `slirp4netns:allow_host_loopback=false` to block container access to host's localhost
   - **Lima**: Container can access VM's localhost, but the VM itself is isolated from the host. Services on the host are not accessible.
 - **Rootless containers**: Both Podman and Lima run containers without root privileges. Lima uses rootless containerd/nerdctl inside the VM, providing defense-in-depth (rootless + hypervisor isolation).
+- **No host filesystem access (Lima)**: Lima's default mounts (`~`, `/tmp/lima`) are explicitly disabled via `mounts: []`. The VM cannot read or write to host files.
 
 ---
 

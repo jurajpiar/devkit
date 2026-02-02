@@ -409,6 +409,7 @@ security:
 - Kernel escape CVEs are contained within the per-project VM (hypervisor isolation)
 - Slight performance overhead due to VM layer
 - `network_mode: none` uses iptables (outgoing blocked, SSH preserved) instead of complete network isolation
+- VM has no access to host filesystem (Lima's default mounts are explicitly disabled)
 
 ## Project Structure
 
