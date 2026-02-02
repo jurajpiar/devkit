@@ -395,9 +395,20 @@ security:
 
 ### Limitations
 
+**Both backends:**
 - Outbound internet access is allowed by default (for git clone, npm install)
-- Kernel-level container escape CVEs may still apply (mitigated by rootless)
+- Default memory limit (4GB) may be insufficient for memory-intensive frameworks like Next.js with Turbopack - increase `memory_limit` in devkit.yaml if you experience OOM kills
 - Use `network_mode: none` after initial setup for maximum isolation
+
+**Podman-specific:**
+- Kernel-level container escape CVEs may still apply (mitigated by rootless mode)
+- All containers share the host kernel
+
+**Lima-specific:**
+- Container can access VM's localhost (but VM is isolated from host) - different from Podman's `slirp4netns:allow_host_loopback=false`
+- Kernel escape CVEs are contained within the per-project VM (hypervisor isolation)
+- Slight performance overhead due to VM layer
+- `network_mode: none` uses iptables (outgoing blocked, SSH preserved) instead of complete network isolation
 
 ## Project Structure
 

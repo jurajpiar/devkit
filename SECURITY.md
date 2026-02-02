@@ -183,17 +183,23 @@ Code is cloned via `git clone` inside the container. The container has no knowle
 
 | Threat | Protection | Status |
 |--------|------------|--------|
-| Connect to host databases (PostgreSQL, MySQL, Redis) | Loopback blocked | **Eliminated** |
-| Access host web services (localhost:3000, etc.) | Loopback blocked | **Eliminated** |
+| Connect to host databases (PostgreSQL, MySQL, Redis) | Loopback blocked / VM isolated | **Eliminated** |
+| Access host web services (localhost:3000, etc.) | Loopback blocked / VM isolated | **Eliminated** |
 | Attack host Docker/Podman socket | Not mounted, loopback blocked | **Eliminated** |
 | Connect to host SSH agent | Not forwarded, loopback blocked | **Eliminated** |
 
-**Implementation:**
+**Implementation (Podman):**
 ```
 --network=slirp4netns:allow_host_loopback=false
 ```
 
 The container's network namespace cannot route to the host's `127.0.0.1`. Attempts to connect to `localhost` or `127.0.0.1` from inside the container will fail.
+
+**Implementation (Lima):**
+The container uses bridge networking inside the VM. While the container CAN access the VM's localhost, the VM itself is isolated from the host system. Host services are not accessible because:
+- The VM has no mounts to the host filesystem
+- The VM's network is NATed through Lima, not bridged to the host
+- Host localhost services are not exposed to the VM
 
 ### 3. Privilege Escalation via Setuid/Setgid
 
@@ -620,7 +626,7 @@ features:
 | Feature | Devkit (Podman) | Devkit (Lima) | Devkit (paranoid) | Docker (default) | VM |
 |---------|-----------------|---------------|-------------------|------------------|-----|
 | Host filesystem isolation | ✅ Full | ✅ Full | ✅ Full | ❌ Often mounted | ✅ Full |
-| Localhost network isolation | ✅ Blocked | ✅ Blocked | ✅ Blocked | ❌ Accessible | ✅ Separate |
+| Host localhost isolation | ✅ Blocked | ✅ VM isolated | ✅ Blocked/VM | ❌ Accessible | ✅ Separate |
 | Outbound network isolation | ❌ Allowed | ❌ Allowed | ✅ Blocked | ❌ Allowed | Configurable |
 | Privilege escalation prevention | ✅ Hardened | ✅ Hardened | ✅ Hardened | ❌ Default caps | ✅ Separate |
 | Debug port security | ⚠️ Localhost | ⚠️ Localhost | ✅ Disabled | ⚠️ Varies | N/A |
@@ -628,6 +634,10 @@ features:
 | Performance | ✅ Native | ⚠️ VM overhead | ⚠️ VM overhead | ✅ Native | ⚠️ Overhead |
 | Setup complexity | ✅ Simple | ✅ Simple | ✅ Simple | ⚠️ Manual hardening | ⚠️ Complex |
 | Container escape impact | ⚠️ User access | ✅ VM confined | ✅ VM confined | ⚠️ User access | ✅ Separate |
+
+**Note on localhost isolation:**
+- **Podman**: Uses `slirp4netns:allow_host_loopback=false` to block container access to host's localhost
+- **Lima**: Container can access VM's localhost, but the VM itself is isolated from the host. Services on the host are not accessible.
 
 ---
 
