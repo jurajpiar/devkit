@@ -1,5 +1,8 @@
 # Devkit
 
+> **⚠️ PoC VIBE-CODE WARNING**
+> The current code-base is heavily vibe-coded, so use with extreme caution until it get's properly reviewed and lifted from PoC state (if ever).
+
 > **⚠️ WORK IN PROGRESS**
 >
 > This project is under active development and may contain bugs, incomplete features, or breaking changes. Use at your own risk in production environments.
