@@ -3,11 +3,11 @@ package main
 import (
 	"os"
 
-	"github.com/jurajpiar/devkit/internal/cli"
+	"github.com/jurajpiar/devkit/internal/app"
 )
 
 func main() {
-	if err := cli.Execute(); err != nil {
+	if err := app.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
