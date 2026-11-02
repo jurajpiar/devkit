@@ -7,8 +7,10 @@ see your files, cannot reach services on your Mac, and can only talk to the
 hosts you allow. Every outbound connection goes through an audited proxy. When
 you are done, delete the machine.
 
-> Work in progress. Expect rough edges; see [SECURITY.md](SECURITY.md) for what
-> is and is not guaranteed.
+> **Proof of concept.** Much of this code base was written with heavy AI
+> assistance and has not had an independent review. Use with care until it is
+> lifted out of PoC state, if ever. Expect rough edges; see
+> [SECURITY.md](SECURITY.md) for what is and is not guaranteed.
 
 ## Why
 
