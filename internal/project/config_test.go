@@ -46,6 +46,11 @@ func TestParseRejects(t *testing.T) {
 		"bad node":        "name: a\ntools:\n  node: latest\n",
 		"bad package":     "name: a\ntools:\n  packages: [\"rm -rf /\"]\n",
 		"bad allow":       "name: a\nnetwork:\n  allow: [\"a b\"]\n",
+		"allow injection": "name: a\nnetwork:\n  allow: [\"$(touch${IFS}/tmp/pwn)\"]\n",
+		"allow backtick":  "name: a\nnetwork:\n  allow: [\"`id`.com\"]\n",
+		"allow star":      "name: a\nnetwork:\n  allow: [\"*\"]\n",
+		"bad repo":        "name: a\nsource: git\nrepo: \"https://x.com/a.git;id\"\n",
+		"bad branch":      "name: a\nsource: git\nrepo: https://x.com/a.git\nbranch: \"main$(id)\"\n",
 		"writable no mnt": "name: a\nmount_writable: true\n",
 		"tiny disk":       "name: a\nvm:\n  disk_gb: 1\n",
 	}
@@ -88,5 +93,18 @@ func TestLoadMissing(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "devkit init") {
 		t.Fatalf("expected helpful error, got %v", err)
+	}
+}
+
+func TestAllowGrammar(t *testing.T) {
+	c, err := Parse([]byte("name: a\nnetwork:\n  allow: [Example.COM, \"*.a.io\", \"**.b.dev\", 10.0.0.1, localhost]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Network.Allow[0] != "example.com" {
+		t.Errorf("entries should be lower-cased, got %q", c.Network.Allow[0])
+	}
+	if _, err := Parse([]byte("name: a\nsource: git\nrepo: git@github.com:org/repo.git\nbranch: feat/x.1\n")); err != nil {
+		t.Errorf("ordinary git url and branch rejected: %v", err)
 	}
 }

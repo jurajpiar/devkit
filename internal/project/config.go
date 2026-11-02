@@ -175,7 +175,19 @@ func (c *Config) Save(path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
+var (
+	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
+	// hostRe is the allowlist grammar: an optional "*." or "**." prefix and
+	// then DNS labels. Nothing else, because entries end up in a root-owned
+	// file written by the provisioning script.
+	hostRe = regexp.MustCompile(`^(\*\*?\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	// repoRe and branchRe cover git URLs and ref names without shell
+	// metacharacters; both are interpolated into a command run in the VM.
+	repoRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~:/@%+-]*$`)
+	branchRe = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._/-]*$`)
+	nodeRe   = regexp.MustCompile(`^[0-9]{1,3}$`)
+	pkgRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
+)
 
 // Validate checks the config for mistakes a user could make.
 func (c *Config) Validate() error {
@@ -187,6 +199,12 @@ func (c *Config) Validate() error {
 	case SourceGit:
 		if c.Repo == "" {
 			return fmt.Errorf("source: git requires repo to be set")
+		}
+		if !repoRe.MatchString(c.Repo) {
+			return fmt.Errorf("repo %q contains characters that are not allowed in a git URL", c.Repo)
+		}
+		if !branchRe.MatchString(c.Branch) {
+			return fmt.Errorf("branch %q is not a valid git ref name", c.Branch)
 		}
 	default:
 		return fmt.Errorf("source must be copy, git or mount (got %q)", c.Source)
@@ -205,18 +223,20 @@ func (c *Config) Validate() error {
 	if c.VM.CPUs < 1 || c.VM.MemoryGB < 1 || c.VM.DiskGB < 10 {
 		return fmt.Errorf("vm needs at least 1 cpu, 1 GB memory and 10 GB disk")
 	}
-	if c.Tools.Node != "" && !regexp.MustCompile(`^[0-9]{1,3}$`).MatchString(c.Tools.Node) {
+	if c.Tools.Node != "" && !nodeRe.MatchString(c.Tools.Node) {
 		return fmt.Errorf("tools.node must be a major version such as \"22\" (got %q)", c.Tools.Node)
 	}
 	for _, p := range c.Tools.Packages {
-		if !regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`).MatchString(p) {
+		if !pkgRe.MatchString(p) {
 			return fmt.Errorf("tools.packages entry %q is not a valid apt package name", p)
 		}
 	}
-	for _, h := range c.Network.Allow {
-		if strings.ContainsAny(h, " ,\"'\n") {
-			return fmt.Errorf("network.allow entry %q contains invalid characters", h)
+	for i, h := range c.Network.Allow {
+		h = strings.ToLower(h)
+		if !hostRe.MatchString(h) {
+			return fmt.Errorf("network.allow entry %q must be a hostname, *.host or **.host (use mode: open to allow everything)", c.Network.Allow[i])
 		}
+		c.Network.Allow[i] = h
 	}
 	return nil
 }

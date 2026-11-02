@@ -141,6 +141,40 @@ func TestSandboxGuarantees(t *testing.T) {
 		}
 	})
 
+	t.Run("open mode is still audited", func(t *testing.T) {
+		s.mustRun("up", "--network", "open", "--no-sync", "--no-install")
+		out, _ := s.shell("curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com/ ; echo exit=$?")
+		if !strings.Contains(out, "200") {
+			t.Fatalf("open mode should allow example.com via the proxy: %s", out)
+		}
+		out, _ = s.shell("curl -s -m 10 --noproxy '*' -o /dev/null -w '%{http_code}' https://example.com/ ; echo exit=$?")
+		if strings.Contains(out, "200") {
+			t.Fatalf("open mode must reject connections that bypass the proxy: %s", out)
+		}
+		// Port 53 is not a loophole: only the resolvers accept it.
+		out, _ = s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' 2>&1; echo exit=$?")
+		if strings.Contains(out, "exit=0") {
+			t.Fatalf("direct TCP to port 53 on an arbitrary host should be rejected: %s", out)
+		}
+		if logs := s.mustRun("logs"); !strings.Contains(logs, "ALLOWED") || !strings.Contains(logs, "example.com") {
+			t.Fatalf("audit log should record the allowed request:\n%s", logs)
+		}
+	})
+
+	t.Run("allow_host opens the host", func(t *testing.T) {
+		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: false", "allow_host: true")
+		s.mustRun("up", "--no-sync", "--no-install")
+		out, _ := s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/2222' 2>&1; echo exit=$?")
+		if !strings.Contains(out, "exit=0") {
+			t.Fatalf("host should be reachable with allow_host: %s", out)
+		}
+		out, _ = s.shell("echo $NO_PROXY")
+		if !strings.Contains(out, "host.lima.internal") {
+			t.Fatalf("host should bypass the proxy with allow_host: %s", out)
+		}
+		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: true", "allow_host: false")
+	})
+
 	t.Run("air gap", func(t *testing.T) {
 		s.mustRun("up", "--network", "none", "--no-sync", "--no-install")
 		out, _ := s.shell("curl -s -m 10 -o /dev/null -w '%{http_code}' https://registry.npmjs.org/ ; echo exit=$?")
@@ -152,6 +186,19 @@ func TestSandboxGuarantees(t *testing.T) {
 			t.Fatalf("DNS should fail when air-gapped: %s", out)
 		}
 	})
+}
+
+// setYAML replaces one line fragment in devkit.yaml in place.
+func setYAML(t *testing.T, path, from, to string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), from) {
+		t.Fatalf("%s does not contain %q", path, from)
+	}
+	writeFile(t, path, strings.Replace(string(data), from, to, 1))
 }
 
 func writeFile(t *testing.T, path, content string) {

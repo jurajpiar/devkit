@@ -239,10 +239,12 @@ func syncSource(ctx context.Context, cfg *project.Config, cwd string) error {
 
 const installScript = `cd "$HOME/workspace" 2>/dev/null || exit 0
 if [ -f package.json ]; then
-  if   [ -f pnpm-lock.yaml ]; then pnpm install
-  elif [ -f yarn.lock ];      then yarn install
+  # Lockfile-only installs: nothing newer than the lockfile is ever fetched.
+  if   [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile
+  elif [ -f yarn.lock ];      then yarn install --frozen-lockfile
   elif [ -f bun.lockb ] || [ -f bun.lock ]; then echo "bun lockfile found but bun is not installed; skipping"
-  else npm install; fi
+  elif [ -f package-lock.json ]; then npm ci
+  else echo "no lockfile; running npm install (commit the lockfile it writes)"; npm install; fi
 else
   echo "no package.json; nothing to install"
 fi`

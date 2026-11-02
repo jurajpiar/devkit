@@ -27,7 +27,10 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"ALLOW_HOST=0",
 		"EXTRA_ARGS=-allowed=registry.npmjs.org,",
 		`echo "abc123" > /etc/devkit/egress.sha256`,
-		"deb.nodesource.com/setup_22.x",
+		`NODE_MAJOR="22"`,
+		"signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_${NODE_MAJOR}.x",
+		"-----BEGIN PGP PUBLIC KEY BLOCK-----",
+		"/var/lib/devkit/.node",
 		"--uid-owner devkit-proxy -j ACCEPT",
 		"rm -f /etc/sudoers.d/90-cloud-init-users",
 		"NOPASSWD: DEVKIT_LIMA",
@@ -35,7 +38,11 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"/usr/bin/diff -q /run/lima-ssh-ready /mnt/lima-cidata/meta-data",
 		"/usr/bin/cat /mnt/lima-cidata/param.env",
 		`gpasswd -d "$DEVKIT_USER" sudo`,
-		`-d "$HOST_IP" -p udp --dport 53 -j ACCEPT`,
+		`-d "$ip" -p udp --dport 53 -j ACCEPT`,
+		`iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT`,
+		`NO_PROXY_HOSTS="localhost,127.0.0.1"`,
+		`tmp="$(mktemp /var/lib/devkit/egressproxy.XXXXXX)"`,
+		`sha256sum "$tmp"`,
 		`-d "$HOST_IP" -j REJECT`,
 		"PathExists=/var/lib/devkit/drop/egressproxy",
 		"User=devkit-proxy",
@@ -47,6 +54,18 @@ func TestSystemScriptAllowlist(t *testing.T) {
 	}
 	if strings.Contains(s, "NOPASSWD:ALL") {
 		t.Error("full sudo must not be granted by default")
+	}
+	for _, bad := range []string{"curl -fsSL \"https://deb.nodesource.com", "| bash", "sha256sum \"$f\""} {
+		if strings.Contains(s, bad) {
+			t.Errorf("system script must not contain %q", bad)
+		}
+	}
+	// Port 53 is only ever opened towards a specific resolver address.
+	if strings.Contains(s, "-p udp --dport 53 -j ACCEPT\n") && !strings.Contains(s, `-d "$ip" -p udp --dport 53`) {
+		t.Error("DNS rule must be scoped to resolver addresses")
+	}
+	if strings.Count(s, "--dport 53 -j ACCEPT") != 2 {
+		t.Errorf("expected exactly two scoped DNS rules, got %d", strings.Count(s, "--dport 53 -j ACCEPT"))
 	}
 }
 
@@ -67,6 +86,10 @@ func TestSystemScriptOpenAndSudo(t *testing.T) {
 		"EXTRA_ARGS=-allowed=*",
 		"NOPASSWD:ALL",
 		`WANT_PKGS="postgresql-client jq"`,
+		`NO_PROXY_HOSTS="localhost,127.0.0.1,host.lima.internal"`,
+		// open mode still forces everything through the audited proxy
+		"allowlist|open)",
+		"--uid-owner devkit-proxy -j ACCEPT",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("system script missing %q", want)
@@ -74,6 +97,26 @@ func TestSystemScriptOpenAndSudo(t *testing.T) {
 	}
 	if strings.Contains(s, "nodesource") {
 		t.Error("node must not be installed when tools.node is empty")
+	}
+	if strings.Contains(s, "open) ;;") {
+		t.Error("open mode must not leave the OUTPUT chain unrestricted")
+	}
+}
+
+func TestPolicyFilesAreNotShellExpanded(t *testing.T) {
+	s, err := System(params(func(c *project.Config) {
+		c.Network.Allow = []string{"registry.npmjs.org"}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"cat > /etc/devkit/network.conf <<'EOF'\nMODE=allowlist\n",
+		"cat > /etc/devkit/egress.conf <<'EOF'\nEXTRA_ARGS=-allowed=registry.npmjs.org\n",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("policy files must be written through quoted heredocs; missing %q", want)
+		}
 	}
 }
 

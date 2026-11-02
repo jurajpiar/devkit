@@ -51,6 +51,7 @@ func render(src string, p Params) (string, error) {
 	}
 	data := templateData{
 		Params:        p,
+		NodeSourceKey: nodeSourceKey,
 		EgressBinary:  EgressBinary,
 		EgressLog:     EgressLog,
 		DropDir:       DropDir,
@@ -86,11 +87,12 @@ mkdir -p /etc/devkit /var/log/devkit /var/lib/devkit {{.DropDir}}
 chmod 755 /var/log/devkit
 
 # ---- policy files, regenerated from devkit.yaml on every boot ----
-cat > /etc/devkit/network.conf <<EOF
-MODE=$MODE
+# Quoted heredocs: values come from the template, never from shell expansion.
+cat > /etc/devkit/network.conf <<'EOF'
+MODE={{.Config.Network.Mode}}
 ALLOW_HOST={{bool .Config.Network.AllowHost}}
 EOF
-cat > /etc/devkit/egress.conf <<EOF
+cat > /etc/devkit/egress.conf <<'EOF'
 EXTRA_ARGS=-allowed={{if eq .Config.Network.Mode "open"}}*{{else}}{{join .Config.Network.Allow ","}}{{end}}
 EOF
 echo "{{.EgressSHA256}}" > /etc/devkit/egress.sha256
@@ -98,34 +100,58 @@ chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256
 chown "$DEVKIT_USER" {{.DropDir}}
 chmod 700 {{.DropDir}}
 
+# Provisioning runs before the firewall is applied for this boot and before
+# the egress proxy is up, so apt talks to the mirrors directly here. Package
+# signatures are still verified by apt.
+APT="apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false"
+
 # ---- base packages (first boot) ----
 if [ ! -f /var/lib/devkit/.base ]; then
-  apt-get update
-  apt-get install -y --no-install-recommends \
+  $APT update
+  $APT install -y --no-install-recommends \
     git curl ca-certificates build-essential iptables openssh-client unzip rsync python3
-{{- if .Config.Tools.Node}}
-  curl -fsSL "https://deb.nodesource.com/setup_{{.Config.Tools.Node}}.x" | bash -
-  apt-get install -y nodejs
-  corepack enable || true
-{{- end}}
   touch /var/lib/devkit/.base
 fi
+{{- if .Config.Tools.Node}}
+
+# ---- Node.js from NodeSource's apt repository (re-run when the major changes) ----
+# The repository signing key is embedded, not downloaded, so no remote script
+# is ever executed. Key: NodeSource, fingerprint
+# 6F71 F525 2828 41EE DAF8 51B4 2F59 B5F9 9B1B E0B4. apt verifies every package.
+NODE_MAJOR="{{.Config.Tools.Node}}"
+if [ "$(cat /var/lib/devkit/.node 2>/dev/null || true)" != "$NODE_MAJOR" ]; then
+  install -d -m 755 /etc/apt/keyrings
+  cat > /etc/apt/keyrings/nodesource.asc <<'EOF'
+{{.NodeSourceKey}}
+EOF
+  chmod 644 /etc/apt/keyrings/nodesource.asc
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list
+  $APT update
+  $APT install -y --allow-downgrades nodejs
+  corepack enable || true
+  echo "$NODE_MAJOR" > /var/lib/devkit/.node
+fi
+{{- end}}
 
 # ---- extra packages (re-run only when the list changes) ----
 WANT_PKGS="{{join .Config.Tools.Packages " "}}"
 if [ -n "$WANT_PKGS" ] && [ "$(cat /var/lib/devkit/.packages 2>/dev/null || true)" != "$WANT_PKGS" ]; then
-  apt-get update
-  apt-get install -y --no-install-recommends $WANT_PKGS
+  $APT update
+  $APT install -y --no-install-recommends $WANT_PKGS
   echo "$WANT_PKGS" > /var/lib/devkit/.packages
 fi
 
 # ---- proxy account and proxy environment ----
 id devkit-proxy >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin devkit-proxy
 PROXY_URL="http://{{.ProxyListen}}"
+# With allow_host the host is reached directly (the firewall permits it), so
+# it must bypass the proxy, whose allowlist would otherwise block it.
+NO_PROXY_HOSTS="localhost,127.0.0.1{{if .Config.Network.AllowHost}},host.lima.internal{{end}}"
 if [ "$MODE" != "none" ]; then
   cat > /etc/profile.d/devkit-proxy.sh <<EOF
 export HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL http_proxy=$PROXY_URL https_proxy=$PROXY_URL
-export NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1
+export NO_PROXY=$NO_PROXY_HOSTS no_proxy=$NO_PROXY_HOSTS
 EOF
   sed -i '/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d' /etc/environment
   cat >> /etc/environment <<EOF
@@ -133,8 +159,8 @@ HTTP_PROXY=$PROXY_URL
 HTTPS_PROXY=$PROXY_URL
 http_proxy=$PROXY_URL
 https_proxy=$PROXY_URL
-NO_PROXY=localhost,127.0.0.1
-no_proxy=localhost,127.0.0.1
+NO_PROXY=$NO_PROXY_HOSTS
+no_proxy=$NO_PROXY_HOSTS
 EOF
   cat > /etc/apt/apt.conf.d/99devkit-proxy <<EOF
 Acquire::http::Proxy "$PROXY_URL";
@@ -146,8 +172,8 @@ else
 fi
 
 # ---- sudo ----
-# Lima's host agent confirms boot by running two commands with sudo over SSH.
-# Those two are always allowed. Anything else requires sudo: true in devkit.yaml.
+# Lima's host agent confirms boot by running three read-only commands with
+# sudo over SSH. Those are always allowed. Anything else requires sudo: true.
 rm -f /etc/sudoers.d/90-cloud-init-users
 for f in /etc/sudoers.d/*; do
   [ -f "$f" ] || continue
@@ -178,6 +204,9 @@ set -u
 . /etc/devkit/network.conf
 HOST_IP="$(getent hosts host.lima.internal | awk '{print $1}' | head -n1)"
 : "${HOST_IP:=192.168.5.2}"
+# The resolvers systemd-resolved forwards to. The file is root-owned, so the
+# sandbox cannot add an address of its own to this list.
+DNS_IPS="$HOST_IP $(awk '/^nameserver/{print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null | grep -v '^127\.' || true)"
 modprobe nf_conntrack 2>/dev/null || true
 for t in iptables ip6tables; do
   $t -P OUTPUT ACCEPT 2>/dev/null || true
@@ -191,27 +220,30 @@ iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -d "$HOST_IP" -p tcp --sport 22 -j ACCEPT
 ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
 ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-# The host is also the gateway and the DNS resolver. Keep DNS to the host
-# unless air-gapped; reject everything else aimed at the host.
-if [ "${ALLOW_HOST:-0}" != "1" ]; then
-  if [ "${MODE:-allowlist}" != "none" ]; then
-    iptables -A OUTPUT -d "$HOST_IP" -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -d "$HOST_IP" -p tcp --dport 53 -j ACCEPT
-  fi
+# DNS only to the configured resolvers, never to arbitrary port-53 endpoints,
+# and not at all when air-gapped.
+if [ "${MODE:-allowlist}" != "none" ]; then
+  for ip in $DNS_IPS; do
+    iptables -A OUTPUT -d "$ip" -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -d "$ip" -p tcp --dport 53 -j ACCEPT
+  done
+fi
+# The host is also the gateway. Decide about it before any other rule so
+# nothing later (including the proxy) can reach it unless allow_host is set.
+if [ "${ALLOW_HOST:-0}" = "1" ]; then
+  iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT
+else
   iptables -A OUTPUT -d "$HOST_IP" -j REJECT
 fi
+# allowlist and open: only the proxy's account may open outbound connections,
+# so every request is audited. The two modes differ only in the proxy's
+# allowlist. none: nothing leaves.
 case "${MODE:-allowlist}" in
-  open) ;;
-  allowlist)
-    iptables -A OUTPUT -m owner --uid-owner devkit-proxy -j ACCEPT
-    iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -j REJECT
-    ip6tables -A OUTPUT -j REJECT 2>/dev/null || true ;;
-  none)
-    iptables -A OUTPUT -j REJECT
-    ip6tables -A OUTPUT -j REJECT 2>/dev/null || true ;;
+  allowlist|open)
+    iptables -A OUTPUT -m owner --uid-owner devkit-proxy -j ACCEPT ;;
 esac
+iptables -A OUTPUT -j REJECT
+ip6tables -A OUTPUT -j REJECT 2>/dev/null || true
 EOF
 chmod 755 /usr/local/sbin/devkit-firewall
 
@@ -245,16 +277,22 @@ cat > /usr/local/sbin/devkit-install-proxy <<'EOF'
 set -u
 f={{.DropDir}}/egressproxy
 [ -f "$f" ] || exit 0
+# The drop directory belongs to the sandbox user, who could swap the file
+# between the hash check and the install. Take a private root-only copy
+# first and never look at the staged file again.
+tmp="$(mktemp /var/lib/devkit/egressproxy.XXXXXX)"
+cp "$f" "$tmp"
+rm -f "$f"
 want="$(cat /etc/devkit/egress.sha256)"
-got="$(sha256sum "$f" | awk '{print $1}')"
+got="$(sha256sum "$tmp" | awk '{print $1}')"
 if [ -n "$want" ] && [ "$got" = "$want" ]; then
-  install -m 755 -o root -g root "$f" {{.EgressBinary}}
+  install -m 755 -o root -g root "$tmp" {{.EgressBinary}}
   systemctl restart {{.EgressService}} || true
   echo "devkit: installed egress proxy $got"
 else
   echo "devkit: refused egress proxy with hash $got (expected $want)" >&2
 fi
-rm -f "$f"
+rm -f "$tmp"
 EOF
 chmod 755 /usr/local/sbin/devkit-install-proxy
 
@@ -307,5 +345,43 @@ mkdir -p "$HOME/{{.WorkspaceDir}}"
 // templateData wraps Params with the constants so templates can reference them.
 type templateData struct {
 	Params
+	NodeSourceKey                                                              string
 	EgressBinary, EgressLog, DropDir, ProxyListen, WorkspaceDir, EgressService string
 }
+
+// nodeSourceKey is NodeSource's apt repository signing key, embedded so the
+// guest never fetches or runs anything unsigned to install Node.js.
+//
+// Fetched from https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key;
+// fingerprint 6F71 F525 2828 41EE DAF8 51B4 2F59 B5F9 9B1B E0B4 (key ID
+// 2F59B5F99B1BE0B4). Verify with: gpg --show-keys --with-fingerprint <file>
+const nodeSourceKey = `-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mQENBFdDN1ABCADaNd/I3j3tn40deQNgz7hB2NvT+syXe6k4ZmdiEcOfBvFrkS8B
+hNS67t93etHsxEy7E0qwsZH32bKazMqe9zDwoa3aVImryjh6SHC9lMtW27JPHFeM
+Srkt9YmH1WMwWcRO6eSY9B3PpazquhnvbammLuUojXRIxkDroy6Fw4UKmUNSRr32
+9Ej87jRoR1B2/57Kfp2Y4+vFGGzSvh3AFQpBHq51qsNHALU6+8PjLfIt+5TPvaWR
+TB+kAZnQZkaIQM2nr1n3oj6ak2RATY/+kjLizgFWzgEfbCrbsyq68UoY5FPBnu4Z
+E3iDZpaIqwKr0seUC7iA1xM5eHi5kty1oB7HABEBAAG0Ik5Tb2xpZCA8bnNvbGlk
+LWdwZ0Bub2Rlc291cmNlLmNvbT6JAU4EEwEKADgCGwMCHgECF4AWIQRvcfUlKChB
+7tr4UbQvWbX5mxvgtAUCaWfGnwULCQgHAgYVCgkICwIEFgIDAQAKCRAvWbX5mxvg
+tL0CB/0TTur63uXTPbq+JBQET6jnEVaDrNmpHI/z2RMuj163gmy9CtCwG060c+TI
+qzmzlPacbTkGc5C50teX2mhs+5JIthfhMibR6Dgy0zeSVuvt9WJ3TNWBpoW5Ezka
+17SA3Xv9UEJS2eyRd7ALf7TGGAj8DG+xRABXl6bJIXh1s7Hki7kwgVrpNxm/EqyX
+OrzExm0g2UjgdkbnZrnTyZMB6X8f8fZPo0QcByPvLee2DtkKeE+SZlFXyvnCzcw0
+94K45vlWkEdRzmiiWAG7guzZyZYGcCO5EoJ3LUP90qhrmQUfsbtczeoEW17EW1jM
+RohLo8BqVyYc1CAFlULIDNeS3aipuQENBFdDN1ABCACq02gutmss6jiD2u50vdAR
+x3JOGd92trWRf7qH9/MTToslhoU/LiXhaE0x5+UkKuRbcruCtytn226brvwD0BdO
+QGpY81ZAxjTFuKUpIDmrHcrI/N9XLrLKx19kWEttsIPNJOgvx8JoeReOX2hLjcbF
+fmz8e6D1K7eZ+hjMfOLxD94tfhQwYtKbfwf0JwxQV5ItQRryd+X+TcA3nyvFWiJ8
+Vz92Tf1iG7Z+XasaaZFf2JDuxoiZaSZY7va395ClCEMykFsRbGwgDyB6Fr+6x/UU
+sYA4rYV7RumIOUdWngWyWjzVy/cKSWASW4jI5ABWs+AfeRTqmZt6+6B7oIghrB19
+ABEBAAGJAR8EGAECAAkFAldDN1ACGwwACgkQL1m1+Zsb4LRPzgf9FTfPA0d2N37q
+su5av3bYZJ+w6pvWF3aK2Zdy9ednhCBfPNmhvBRN6mXWixo0DuKEoQMjVpkX0hrq
+B9FxEVwCPZ9K/JuJgzMROq7T+7R3rcv+TPMdwk8rjIMeRiw2hFLwbrJ0w/v7/3wT
+MESv3GfXbuT0huEedK7bLfqGMgtmqMeCNkoI7Rf3GO2xArGQ6Zc2rTd4L9+D5HHS
+IPEixwFZS+Debc7pg3os0bKXEsqMtitvocClOAuPnXpCy04PK450UTr6ZVdirWhJ
+Oq8SrSERQwqEJ4PMHybiDKwzSr6mcBURre3G71uTAp7h/DISLTpfVMadcB6eoLWr
+/4fBqejAWg==
+=wh5k
+-----END PGP PUBLIC KEY BLOCK-----`

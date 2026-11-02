@@ -95,14 +95,14 @@ func matchPattern(pattern, host string) bool {
 
 	// Single wildcard prefix: *.example.com matches immediate subdomains
 	if strings.HasPrefix(pattern, "*.") {
-		suffix := pattern[1:] // ".example.com"
+		suffix := pattern[1:]     // ".example.com"
 		baseDomain := pattern[2:] // "example.com"
-		
+
 		// Match the base domain itself
 		if host == baseDomain {
 			return true
 		}
-		
+
 		// Match immediate subdomain (exactly one level)
 		if strings.HasSuffix(host, suffix) {
 			// Count dots to ensure it's only one level deeper
@@ -159,12 +159,12 @@ func DefaultAllowedHosts() []string {
 		"registry.npmjs.org",
 		"registry.yarnpkg.com",
 		"*.npmjs.org",
-		
+
 		// GitHub (for git operations and raw content)
 		"github.com",
 		"*.github.com",
 		"*.githubusercontent.com",
-		
+
 		// Common CDNs
 		"cdn.jsdelivr.net",
 		"unpkg.com",
