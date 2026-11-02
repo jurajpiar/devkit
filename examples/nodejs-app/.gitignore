@@ -1,6 +1,5 @@
 node_modules/
 .npm/
-package-lock.json
 devkit.yaml
 .devkit/
 *.log
