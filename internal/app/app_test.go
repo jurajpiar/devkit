@@ -2,6 +2,7 @@ package app
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,7 +116,7 @@ func TestWriteSSHConfigPutsBlockFirst(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("Host *\n  Port 22\n  User someone\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("ServerAliveInterval 37\nForwardAgent yes\nHost *\n  Port 22\n  User someone\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c := project.Default()
@@ -128,8 +129,27 @@ func TestWriteSSHConfigPutsBlockFirst(t *testing.T) {
 	if !strings.HasPrefix(s, "# BEGIN devkit demo ") {
 		t.Fatalf("managed block must come first so OpenSSH's first-match rules pick it:\n%s", s)
 	}
-	if !strings.Contains(s, "Host *\n  Port 22\n  User someone\n") {
+	if !strings.Contains(s, "ServerAliveInterval 37\nForwardAgent yes\nHost *\n  Port 22\n  User someone\n") {
 		t.Fatalf("existing config lost:\n%s", s)
+	}
+	// Ask ssh itself how the file resolves: our host gets our settings, other
+	// hosts keep the user's global options, and the sandbox never gets the agent.
+	if ssh, err := exec.LookPath("ssh"); err == nil {
+		effective := func(host string) string {
+			out, err := exec.Command(ssh, "-G", "-F", path, host).Output()
+			if err != nil {
+				t.Fatalf("ssh -G %s: %v", host, err)
+			}
+			return string(out)
+		}
+		other := effective("elsewhere")
+		if !strings.Contains(other, "serveraliveinterval 37\n") || !strings.Contains(other, "port 22\n") {
+			t.Fatalf("global options must still apply to other hosts:\n%s", other)
+		}
+		ours := effective("devkit-demo")
+		if !strings.Contains(ours, "port 2222\n") || !strings.Contains(ours, "forwardagent no\n") || !strings.Contains(ours, "serveraliveinterval 37\n") {
+			t.Fatalf("devkit host should get its port, no agent forwarding, and still inherit globals:\n%s", ours)
+		}
 	}
 	// Second write is idempotent.
 	if err := writeSSHConfig(c); err != nil {

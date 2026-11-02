@@ -26,13 +26,20 @@ Host %[2]s
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   LogLevel ERROR
+  ForwardAgent no
+# Reset the scope so settings that follow in this file stay global.
+Host *
 # END devkit %[1]s
 `, cfg.Name, cfg.SSHHost(), cfg.SSHPort, hostUser(), filepath.Join(home, ".lima", "_config", "user"))
 }
 
 // writeSSHConfig adds or replaces the project's Host block in ~/.ssh/config.
 // The block goes at the top: OpenSSH keeps the first value it sees for an
-// option, so a later "Host *" with Port or User must not win over ours.
+// option, so a later "Host *" with Port or User must not win over ours. The
+// block ends with a bare "Host *" because comments do not close a Host
+// section; without it, global options that used to sit at the top of the
+// file would apply only to the devkit host. Agent forwarding is disabled
+// explicitly so a global "ForwardAgent yes" never reaches the sandbox.
 func writeSSHConfig(cfg *project.Config) error {
 	path := sshConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
