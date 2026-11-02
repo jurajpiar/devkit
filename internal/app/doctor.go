@@ -41,8 +41,14 @@ var doctorCmd = &cobra.Command{
 		check(err == nil, "egress proxy binary available", "run 'make build' in the devkit checkout, or install Go")
 
 		home, _ := os.UserHomeDir()
-		_, keyErr := os.Stat(filepath.Join(home, ".lima", "_config", "user"))
-		check(keyErr == nil || !limaOK, "Lima SSH key present (created on first VM start)", "")
+		switch _, keyErr := os.Stat(filepath.Join(home, ".lima", "_config", "user")); {
+		case keyErr == nil:
+			check(true, "Lima SSH key present", "")
+		case os.IsNotExist(keyErr):
+			fmt.Println("[--  ] Lima SSH key not created yet (Lima generates it on the first VM start)")
+		default:
+			check(false, "Lima SSH key readable", keyErr.Error())
+		}
 
 		if !ok {
 			return fmt.Errorf("some checks failed")

@@ -107,3 +107,59 @@ func TestSetNetworkMode(t *testing.T) {
 		t.Fatal("invalid mode accepted")
 	}
 }
+
+func TestWriteSSHConfigPutsBlockFirst(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".ssh", "config")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("Host *\n  Port 22\n  User someone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := project.Default()
+	c.Name = "demo"
+	if err := writeSSHConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	s := string(data)
+	if !strings.HasPrefix(s, "# BEGIN devkit demo ") {
+		t.Fatalf("managed block must come first so OpenSSH's first-match rules pick it:\n%s", s)
+	}
+	if !strings.Contains(s, "Host *\n  Port 22\n  User someone\n") {
+		t.Fatalf("existing config lost:\n%s", s)
+	}
+	// Second write is idempotent.
+	if err := writeSSHConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := os.ReadFile(path)
+	if string(again) != s {
+		t.Fatalf("rewrite changed the file:\n%s\n---\n%s", s, again)
+	}
+}
+
+func TestFindSourceIgnoresWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "cmd", "egressproxy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmd", "egressproxy", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEVKIT_SRC", "")
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	if src, err := findSource(); err == nil && strings.HasPrefix(src, dir) {
+		t.Fatalf("proxy source must not be taken from the sandboxed project: %s", src)
+	}
+	t.Setenv("DEVKIT_SRC", dir)
+	if src, err := findSource(); err != nil || src != dir {
+		t.Fatalf("DEVKIT_SRC should be honoured: %v %q", err, src)
+	}
+}

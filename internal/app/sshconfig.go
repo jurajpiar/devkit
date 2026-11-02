@@ -31,20 +31,22 @@ Host %[2]s
 }
 
 // writeSSHConfig adds or replaces the project's Host block in ~/.ssh/config.
+// The block goes at the top: OpenSSH keeps the first value it sees for an
+// option, so a later "Host *" with Port or User must not win over ours.
 func writeSSHConfig(cfg *project.Config) error {
 	path := sshConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	existing, _ := os.ReadFile(path)
-	content := removeSSHBlock(string(existing), cfg.Name)
-	if content != "" && !strings.HasSuffix(content, "\n") {
-		content += "\n"
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
 	}
-	if content != "" {
-		content += "\n"
+	rest := strings.TrimLeft(removeSSHBlock(string(existing), cfg.Name), "\n")
+	content := sshBlock(cfg)
+	if rest != "" {
+		content += "\n" + rest
 	}
-	content += sshBlock(cfg)
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 

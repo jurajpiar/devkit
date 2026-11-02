@@ -13,7 +13,11 @@ import (
 
 // egressProxyBinary returns the Linux egress proxy binary for the guest
 // architecture. Order: embedded in devkit, then a cached build, then a fresh
-// cross-compile with the host Go toolchain from the devkit source tree.
+// cross-compile with the host Go toolchain from a trusted devkit checkout
+// (DEVKIT_SRC or the tree the devkit executable was built in). The project
+// directory is never consulted: the proxy's hash is approved for installation
+// as the only account with outbound network access, so its source must not
+// come from the code being sandboxed.
 func egressProxyBinary(ctx context.Context) ([]byte, error) {
 	arch := goruntime.GOARCH // the VM has the same architecture as the host
 	if data, ok := embedded.EgressProxy(arch); ok {
@@ -48,13 +52,15 @@ func egressProxyBinary(ctx context.Context) ([]byte, error) {
 	return os.ReadFile(cache)
 }
 
-// findSource locates a devkit checkout containing cmd/egressproxy.
+// findSource locates a trusted devkit checkout containing cmd/egressproxy:
+// $DEVKIT_SRC, or an ancestor of the devkit executable itself (the checkout
+// `go build` ran in). The working directory is deliberately not searched.
 func findSource() (string, error) {
 	candidates := []string{os.Getenv("DEVKIT_SRC")}
-	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, ancestors(cwd)...)
-	}
 	if exe, err := os.Executable(); err == nil {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
 		candidates = append(candidates, ancestors(filepath.Dir(exe))...)
 	}
 	for _, c := range candidates {
