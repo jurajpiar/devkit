@@ -85,6 +85,11 @@ func (e *exitError) Error() string { return e.msg }
 func (e *exitError) ExitCode() int { return e.code }
 
 func init() {
+	// A bad flag is not a finding either: keep the 1 = stale, 2 = no verdict
+	// contract for failures that happen before RunE.
+	auditCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return &exitError{code: 2, msg: err.Error()}
+	})
 	rootCmd.AddCommand(auditCmd)
 	auditCmd.Flags().Bool("deep", false, "scan every file in the workspace, including node_modules and vendored trees")
 }

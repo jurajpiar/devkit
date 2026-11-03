@@ -322,17 +322,9 @@ export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt PIP_CERT=/etc/ssl/c
 export NODE_OPTIONS="--use-openssl-ca${NODE_OPTIONS:+ $NODE_OPTIONS}"
 EOF
 # profile.d only reaches login shells. Non-login SSH commands (an IDE's
-# remote server, ssh vm 'node ...') read /etc/environment through PAM, so the
-# same settings go there, outside Lima's block, replaced on every boot.
-sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(SSL_CERT_FILE\|SSL_CERT_DIR\|CURL_CA_BUNDLE\|REQUESTS_CA_BUNDLE\|PIP_CERT\|NODE_OPTIONS\)=/d}' /etc/environment
-cat >> /etc/environment <<'EOF'
-SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-SSL_CERT_DIR=/etc/ssl/certs
-CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-PIP_CERT=/etc/ssl/certs/ca-certificates.crt
-NODE_OPTIONS=--use-openssl-ca
-EOF
+# remote server, ssh vm 'node ...') read /etc/environment through PAM; the
+# same settings reach them from Lima's block there, which the instance
+# config pins (see env in the Lima template), so nothing is written here.
 cat > /usr/local/bin/devkit-audit <<'PYEOF'
 {{.AuditScript}}
 PYEOF

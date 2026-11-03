@@ -28,3 +28,13 @@ func TestAuditExit(t *testing.T) {
 		}
 	}
 }
+
+func TestAuditBadFlagExitsTwo(t *testing.T) {
+	rootCmd.SetArgs([]string{"audit", "--deep=invalid"})
+	defer rootCmd.SetArgs(nil)
+	err := rootCmd.Execute()
+	var coded interface{ ExitCode() int }
+	if err == nil || !errors.As(err, &coded) || coded.ExitCode() != 2 {
+		t.Fatalf("a flag error should exit 2 (incomplete), got %v", err)
+	}
+}

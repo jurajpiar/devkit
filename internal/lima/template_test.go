@@ -60,6 +60,18 @@ func TestRenderIsValidYAML(t *testing.T) {
 			t.Errorf("env.%s should be set to an empty string, got %v (present=%v)", k, v, ok)
 		}
 	}
+	// Trust settings are pinned to devkit's values here, so a default.yaml
+	// entry of the same name cannot land in Lima's block instead.
+	for k, want := range map[string]string{"SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt", "NODE_OPTIONS": "--use-openssl-ca", "PIP_CERT": "/etc/ssl/certs/ca-certificates.crt"} {
+		if env[k] != want {
+			t.Errorf("env.%s = %v, want %q", k, env[k], want)
+		}
+	}
+	for _, k := range trustVars {
+		if _, ok := env[k]; !ok {
+			t.Errorf("env.%s should be reserved in the instance config", k)
+		}
+	}
 }
 
 func TestRenderMount(t *testing.T) {
