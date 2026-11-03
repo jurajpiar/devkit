@@ -19,6 +19,11 @@ var proxyVars = []string{"http_proxy", "https_proxy", "ftp_proxy", "no_proxy", "
 // drop them, it would write an empty assignment, so they are only refused.
 var overrideProxyVars = append([]string{"all_proxy", "ALL_PROXY"}, proxyVars...)
 
+// trustVars are set by devkit in /etc/environment so non-login sessions use
+// the system trust store. Lima's block comes after devkit's lines, so an
+// override env entry with one of these names, even empty, would win.
+var trustVars = []string{"SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "NODE_OPTIONS"}
+
 // CheckOverride refuses to continue when ~/.lima/_config/override.yaml would
 // put a host proxy into the guest. That file takes precedence over the
 // instance config devkit renders, so the template's own suppression cannot
@@ -53,8 +58,13 @@ func CheckOverrideFile(path string) error {
 			bad = append(bad, "env."+k)
 		}
 	}
+	for _, k := range trustVars {
+		if _, ok := doc.Env[k]; ok {
+			bad = append(bad, "env."+k)
+		}
+	}
 	if len(bad) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%s sets %s, which would put a host proxy into the sandbox; devkit's own proxy is the only egress, so remove it from the override", path, strings.Join(bad, ", "))
+	return fmt.Errorf("%s sets %s, which would override the sandbox's proxy or trust settings; devkit's proxy is the only egress and the system store is the only trust, so remove it from the override", path, strings.Join(bad, ", "))
 }
