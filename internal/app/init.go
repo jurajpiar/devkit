@@ -41,6 +41,15 @@ func init() {
 	initCmd.Flags().String("toolchain", envOr("DEVKIT_TOOLCHAIN", project.ManagerMise), "toolchain manager: mise, nix or none")
 	initCmd.Flags().String("network", project.NetworkAllowlist, "network mode: allowlist, open or none")
 	initCmd.Flags().Bool("force", false, "overwrite an existing devkit.yaml")
+	_ = initCmd.RegisterFlagCompletionFunc("network", completeValues(project.NetworkAllowlist, project.NetworkOpen, project.NetworkNone))
+	_ = initCmd.RegisterFlagCompletionFunc("toolchain", completeValues(project.ManagerMise, project.ManagerNix, project.ManagerNone))
+}
+
+// completeValues completes a flag from a fixed set of values.
+func completeValues(values ...string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+		return values, cobra.ShellCompDirectiveNoFileComp
+	}
 }
 
 func runInit(cmd *cobra.Command, args []string) error {

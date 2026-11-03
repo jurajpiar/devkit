@@ -39,8 +39,8 @@ const (
 // DefaultFile is the config file name looked up in the current directory.
 const DefaultFile = "devkit.yaml"
 
-// LockDir is the per-project directory beside devkit.yaml where devkit keeps
-// state that is not part of the repository, such as the toolchain lockfile.
+// LockDir is reserved beside devkit.yaml for host-side state and is never
+// copied into the VM. devkit writes nothing there today.
 const LockDir = ".devkit"
 
 // Config is the parsed devkit.yaml.

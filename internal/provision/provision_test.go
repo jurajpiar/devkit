@@ -158,7 +158,7 @@ func TestSystemScriptNix(t *testing.T) {
 		`want="` + NixAmd64SHA + `"`,
 		"https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${sys}.tar.xz",
 		`echo "devkit: refused Nix ${NIX_VERSION} with hash $got (expected $want)"`,
-		"--daemon --yes --no-channel-add --no-modify-profile",
+		`HOME=/root USER=root "$tmp/nix-${NIX_VERSION}-${sys}/install" --daemon --yes --no-channel-add --no-modify-profile`,
 		"experimental-features = nix-command flakes",
 		"/etc/systemd/system/nix-daemon.service.d/devkit-proxy.conf",
 		"Environment=HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL",
@@ -172,7 +172,8 @@ func TestSystemScriptNix(t *testing.T) {
 		t.Error("nix mode must not install mise")
 	}
 	// The download must run before the proxy is up and never through it.
-	if !strings.Contains(s, `curl -fsSL --noproxy '*' -o "$tmp/nix.tar.xz"`) {
+	// An array, not a string: a bare * in a string variable would glob.
+	if !strings.Contains(s, `"${CURL[@]}" -o "$tmp/nix.tar.xz"`) || !strings.Contains(s, `CURL=(curl -fsSL --noproxy '*' --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900)`) {
 		t.Error("nix archive must be fetched directly, like apt during provisioning")
 	}
 	u, _ := User(params(func(c *project.Config) { c.Tools.Manager = project.ManagerNix; c.Tools.Versions = nil }))

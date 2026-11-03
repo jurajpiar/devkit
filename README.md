@@ -13,8 +13,9 @@ internet. macOS on Apple silicon, built on [Lima](https://lima-vm.io/).
 
 **Your Mac is out of reach.** A pull request's `npm install`, a Cargo build
 script or an agent with shell access runs in its own Ubuntu VM with no shared
-folders, no route to your Mac and no sudo. The worst case is a trashed VM,
-which `devkit rm` deletes.
+folders, no route to your Mac and no sudo. Files go in, never out: devkit has
+no code path that copies anything from the VM to your Mac. The worst case is
+a trashed VM, which `devkit rm` deletes.
 
 **The internet is allowlisted and logged.** Only the hosts you name are
 reachable. Every connection leaves through one proxy, which writes the host
@@ -55,6 +56,13 @@ against a pinned digest), provisions the machine and installs the toolchains,
 which takes a few minutes. After that, `up` takes seconds. Edit `devkit.yaml`
 and run `devkit up` again to apply changes; the VM restarts if it has to.
 
+Shell completion comes from `devkit completion`:
+
+```bash
+devkit completion fish > ~/.config/fish/completions/devkit.fish
+devkit completion zsh > "${fpath[1]}/_devkit"        # or: eval "$(devkit completion zsh)"
+```
+
 To work from an IDE, connect with Remote-SSH to the host `devkit-<name>`.
 devkit maintains that entry in `~/.ssh/config`, and `devkit connect` prints
 the steps. Building from source needs Go 1.23 or newer; `make install` also
@@ -64,33 +72,28 @@ cross-compiles the proxy that runs inside the VM.
 
 ```mermaid
 flowchart LR
-    subgraph host["macOS host"]
-        you["you, IDE"]
-        svc["services on your Mac"]
+    mac["<b>Your Mac</b><br/>files, keys, databases"]
+    subgraph vm["Sandbox VM, one per project"]
+        code["<b>Project code</b><br/>npm, cargo, coding agents"]
+        proxy["<b>Allowlist proxy</b><br/>checks the host, logs it"]
     end
-    subgraph vm["sandbox VM (Lima, vz)"]
-        user["sandbox user<br/>shell, npm, coding agents"]
-        proxy["egress proxy<br/>runs as devkit-proxy<br/>allowlist check, logs every host"]
-        fw["iptables OUTPUT<br/>written by root at boot"]
-    end
-    net(("internet"))
-    blocked["rejected"]
+    ok(("Allowed<br/>hosts"))
+    no["Blocked"]
 
-    you -- "ssh 127.0.0.1:port" --> user
-    user -- "HTTP_PROXY / HTTPS_PROXY" --> proxy
-    user -. "direct connection" .-> fw
-    proxy --> fw
-    fw -- "from devkit-proxy: ACCEPT" --> net
-    fw -- "DNS to VM resolvers: ACCEPT" --> net
-    fw -- "allow_host: true" --> svc
-    fw -- "anything else: REJECT" --> blocked
+    mac -- "ssh" --> code
+    code -- "every connection" --> proxy
+    proxy -- "on the list" --> ok
+    proxy -- "not on the list" --> no
+    code -. "any other route:<br/>direct, to your Mac, over DNS" .-> no
 ```
 
-The proxy decides by hostname and writes one line per connection to the log
-that `devkit logs` shows. It does not inspect content; TLS passes through
-untouched. A program that ignores the proxy variables is rejected by the
-firewall rather than let out, because only the proxy's user may open outbound
-connections. In `none` mode the firewall rejects everything, including DNS.
+Three things make this hold. The VM has no shared folders and no sudo, so the
+code sees an empty Ubuntu machine. A firewall written by root at boot lets
+only the proxy's own user open connections, so a program that ignores the
+proxy settings is rejected rather than let out. And the proxy decides by
+hostname and logs every attempt, which is what `devkit logs` shows. It does
+not inspect content; TLS passes through untouched. In `none` mode the firewall
+rejects everything, DNS included.
 
 ## Configuration
 
@@ -178,7 +181,7 @@ seeds versions from the files it finds: `.nvmrc`, `engines.node`, `go.mod`,
 |---|---|---|---|
 | What you edit | `tools.versions` in `devkit.yaml` | `flake.nix` in the repo | `tools.packages` |
 | Languages | Node, Go, Python, Ruby, Rust, Java, Zig, Bun, Deno, and CLIs from the aqua registry | Everything in nixpkgs | Whatever Ubuntu 24.04 ships |
-| Pinning | `.devkit/mise.lock`, written by devkit on the first `up` | `flake.lock`, commit it | Ubuntu release |
+| Pinning | `mise.lock` inside the VM, written on the first `up` | `flake.lock`, commit it | Ubuntu release |
 | Download verification | Upstream checksums and signatures where published; GitHub attestations for Python and Ruby builds; `rustup-init` is unverified | Every store path checked against the cache's signing key; every input hashed in `flake.lock` | apt signatures |
 | Disk per VM | A 30 MB binary plus each toolchain | A few hundred MB for Nix plus each toolchain's own closure | Nothing extra |
 | Learning curve | None | You will edit `flake.nix` eventually | None |
@@ -188,19 +191,21 @@ locks its settings in `/etc/mise/config.toml`: plugin backends (asdf, vfox)
 are disabled because they are unreviewed shell scripts, provenance is checked
 on every install, and releases younger than three days are skipped. The
 sandbox user then installs `tools.versions` through the audited proxy. The
-first `devkit up` records every download's URL and checksum in
-`.devkit/mise.lock` beside `devkit.yaml`; every later `up` installs with
-`--locked` and refuses anything else. Change a version and run `devkit up
---relock`. A `mise.toml` or `.nvmrc` in the repository layers on top, as mise
-normally does.
+first `devkit up` records every download's URL and checksum in the VM's
+`mise.lock`; every later `up` installs with `--locked` and refuses anything
+else. Change a version and run `devkit up --relock`. The lock lives and dies
+with the VM, because devkit never copies anything from the VM to your Mac. A
+`mise.toml` or `.nvmrc` in the repository layers on top, as mise normally
+does.
 
 **nix.** Root installs a pinned, hash-checked multi-user Nix once; the daemon
 fetches through the proxy, so `devkit logs` shows it. `devkit init --toolchain
 nix` writes a `flake.nix` with a dev shell for the toolchains it detected,
 unless the repo already has one. `devkit up` evaluates it, and `devkit shell`
-drops you into `nix develop`. If the repo had no `flake.lock`, the one from the
-first evaluation is copied back for you to commit. IDE terminals over SSH are
-not inside the dev shell; run `nix develop` there.
+drops you into `nix develop`. Commit a `flake.lock` from the host (`nix flake
+lock`) when you want the inputs pinned for everyone; the one the VM writes
+stays in the VM. IDE terminals over SSH are not inside the dev shell; run
+`nix develop` there.
 
 **none.** Only `tools.packages` from apt. Right for C and C++ projects, where
 `build-essential`, `cmake` and `clang` from Ubuntu are usually what you want,
@@ -253,7 +258,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 |---|---|---|
 | Ubuntu 24.04 Minimal cloud image | cloud-images.ubuntu.com, release pinned in `internal/lima/template.go` | SHA-256 digest pinned; Lima refuses a mismatch |
 | mise | GitHub release pinned in `internal/provision/provision.go` | SHA-256 pinned; the pin was taken from the release's `SHASUMS256.txt` after checking its GPG signature (fingerprint `2485 3EC9 F655 CE80 B48E 6C3A 8B81 C9D1 7413 A06D`). No install script is run |
-| Toolchains via mise | nodejs.org, dl.google.com, GitHub releases, as mise documents per tool | mise's per-tool checks (Node: `SHASUMS256.txt` plus OpenPGP; Go: published `.sha256`; Python, Ruby: GitHub attestations), then pinned by URL and checksum in `.devkit/mise.lock` |
+| Toolchains via mise | nodejs.org, dl.google.com, GitHub releases, as mise documents per tool | mise's per-tool checks (Node: `SHASUMS256.txt` plus OpenPGP; Go: published `.sha256`; Python, Ruby: GitHub attestations), then pinned by URL and checksum in the VM's `mise.lock` |
 | Nix | releases.nixos.org, version pinned in `internal/provision/provision.go` | SHA-256 pinned, cross-checked against the hash in the official installer |
 | Nix packages | cache.nixos.org, flake inputs | Nix verifies the cache's Ed25519 signature; `flake.lock` pins every input by hash |
 | apt packages | Ubuntu archives | Ubuntu's signing keys shipped in the image |
@@ -279,6 +284,19 @@ internal/egressproxy  proxy implementation
 internal/embedded     embedded proxy binary
 tests/e2e             creates a real VM and checks the guarantees
 ```
+
+## Roadmap
+
+- `devkit cp vm:path dest`: an explicit, user-initiated way to pull a file
+  out of the VM, such as a build artefact or a test report. devkit itself will
+  still never write to the host on its own; whatever comes out is treated as
+  untrusted data, and you name both paths.
+- Escape tests for `source: mount`, including a read-only mount refusing
+  writes, in a VM of their own.
+- `nix develop` for IDE terminals over SSH, probably through direnv.
+- Rust toolchain verification: pin `rustup-init` by hash in devkit until mise
+  verifies it.
+- Foundry as a first-class, hash-pinned install for Solidity projects.
 
 ## License
 

@@ -155,15 +155,10 @@ func Shell(ctx context.Context, name, workdir string, args ...string) error {
 	return cmd.Run()
 }
 
-// CopyTo copies a host file into the VM.
+// CopyTo copies a host file into the VM. There is deliberately no CopyFrom:
+// nothing the guest writes is ever placed on the host by devkit.
 func CopyTo(ctx context.Context, name, src, dst string) error {
 	_, err := run(ctx, "copy", src, name+":"+dst)
-	return err
-}
-
-// CopyFrom copies a file out of the VM onto the host.
-func CopyFrom(ctx context.Context, name, src, dst string) error {
-	_, err := run(ctx, "copy", name+":"+src, dst)
 	return err
 }
 

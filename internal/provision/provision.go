@@ -127,6 +127,9 @@ chmod 700 {{.DropDir}}
 # the egress proxy is up, so apt talks to the mirrors directly here. Package
 # signatures are still verified by apt.
 APT="apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false"
+# Same for the toolchain manager archives. A stalled download must fail the
+# boot, not hang it.
+CURL=(curl -fsSL --noproxy '*' --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900)
 
 # ---- base packages (first boot) ----
 if [ ! -f /var/lib/devkit/.base ]; then
@@ -150,7 +153,7 @@ if [ "$(cat /var/lib/devkit/.mise 2>/dev/null || true)" != "$MISE_VERSION" ]; th
     *) echo "devkit: unsupported architecture $(uname -m)" >&2; exit 1 ;;
   esac
   tmp="$(mktemp -d /var/lib/devkit/mise.XXXXXX)"
-  curl -fsSL --noproxy '*' -o "$tmp/mise.tar.xz" \
+  "${CURL[@]}" -o "$tmp/mise.tar.xz" \
     "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${arch}.tar.xz"
   got="$(sha256sum "$tmp/mise.tar.xz" | awk '{print $1}')"
   if [ "$got" != "$want" ]; then
@@ -198,7 +201,7 @@ if [ ! -f /var/lib/devkit/.nix ]; then
     *) echo "devkit: unsupported architecture $(uname -m)" >&2; exit 1 ;;
   esac
   tmp="$(mktemp -d /var/lib/devkit/nix.XXXXXX)"
-  curl -fsSL --noproxy '*' -o "$tmp/nix.tar.xz" \
+  "${CURL[@]}" -o "$tmp/nix.tar.xz" \
     "https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${sys}.tar.xz"
   got="$(sha256sum "$tmp/nix.tar.xz" | awk '{print $1}')"
   if [ "$got" != "$want" ]; then
@@ -210,7 +213,7 @@ if [ ! -f /var/lib/devkit/.nix ]; then
 experimental-features = nix-command flakes
 sandbox = true
 EOF
-  "$tmp/nix-${NIX_VERSION}-${sys}/install" --daemon --yes --no-channel-add --no-modify-profile \
+  HOME=/root USER=root "$tmp/nix-${NIX_VERSION}-${sys}/install" --daemon --yes --no-channel-add --no-modify-profile \
     --nix-extra-conf-file "$tmp/extra.conf"
   rm -rf "$tmp"
   echo "$NIX_VERSION" > /var/lib/devkit/.nix
@@ -451,7 +454,7 @@ mkdir -p "$HOME/{{.WorkspaceDir}}"
 {{- end}}
 {{- if eq .Config.Tools.Manager "mise"}}
 # Toolchain versions from devkit.yaml. The lockfile beside this file pins
-# what they resolved to; devkit keeps a copy on the host in .devkit/.
+# what they resolved to on the first install; it lives with the VM.
 install -d -m 700 "$HOME/.config/mise"
 cat > "$HOME/.config/mise/config.toml" <<'EOF'
 # Written by devkit from devkit.yaml on every boot. Edit devkit.yaml instead.

@@ -42,6 +42,8 @@ func Execute() error {
 
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", project.DefaultFile, "path to devkit.yaml")
+	// cobra's built-in "devkit completion <shell>" stays enabled; see README.
+	rootCmd.CompletionOptions.HiddenDefaultCmd = false
 }
 
 // loadConfig reads the config named by --config.

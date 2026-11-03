@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -102,12 +101,15 @@ func TestSandboxGuarantees(t *testing.T) {
 	})
 
 	t.Run("toolchain lockfile recorded and enforced", func(t *testing.T) {
-		lock, err := os.ReadFile(filepath.Join(dir, ".devkit", "mise.lock"))
-		if err != nil || !strings.Contains(string(lock), "[[tools.node]]") || !strings.Contains(string(lock), "checksum = \"sha256:") {
-			t.Fatalf("first up should record node's checksum in .devkit/mise.lock: %v\n%s", err, lock)
+		lock, err := s.shell("cat ~/.config/mise/mise.lock")
+		if err != nil || !strings.Contains(lock, "[[tools.node]]") || !strings.Contains(lock, "checksum = \"sha256:") {
+			t.Fatalf("first up should record node's checksum in the VM's mise.lock: %v\n%s", err, lock)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".devkit")); err == nil {
+			t.Fatal("nothing from the VM may land on the host, not even the lockfile")
 		}
 		out := s.mustRun("up", "--no-sync", "--no-install")
-		if !strings.Contains(out, "pinned by .devkit/mise.lock") {
+		if !strings.Contains(out, "pinned by the VM's mise.lock") {
 			t.Fatalf("second up should install from the lockfile:\n%s", out)
 		}
 		// The sandbox user cannot loosen the manager's settings: they are
@@ -120,25 +122,18 @@ func TestSandboxGuarantees(t *testing.T) {
 
 	// Adversarial: code in the sandbox, or a hostile repo, tries to get a
 	// toolchain in that was not pinned, verified or allowed.
-	t.Run("tampered lockfile is refused", func(t *testing.T) {
-		lockPath := filepath.Join(dir, ".devkit", "mise.lock")
-		orig, err := os.ReadFile(lockPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		zero := regexp.MustCompile(`checksum = "sha256:[0-9a-f]{64}"`)
-		writeFile(t, lockPath, zero.ReplaceAllString(string(orig), `checksum = "sha256:`+strings.Repeat("0", 64)+`"`))
-		t.Cleanup(func() { writeFile(t, lockPath, string(orig)) })
-		// The lock verifies downloads, so make node a download again.
-		s.mustRun("shell", "mise", "uninstall", "--all", "node")
+	t.Run("mismatching checksum in the lockfile is refused", func(t *testing.T) {
+		// A download whose hash differs from the lock must not be installed,
+		// whether the lock was corrupted or upstream changed the archive.
+		s.mustRun("shell", "cp ~/.config/mise/mise.lock ~/mise.lock.orig && sed -i -E 's/sha256:[0-9a-f]{64}/sha256:"+strings.Repeat("0", 64)+"/' ~/.config/mise/mise.lock && mise uninstall --all node")
 		out, err := s.run("up", "--no-sync", "--no-install")
 		if err == nil {
-			t.Fatalf("up should fail with a tampered lockfile:\n%s", out)
+			t.Fatalf("up should fail when the download does not match the lock:\n%s", out)
 		}
 		if o, _ := s.shell("command -v node || echo no-node"); !strings.Contains(o, "no-node") {
 			t.Fatalf("node must not be installed from a mismatching checksum: %s", o)
 		}
-		writeFile(t, lockPath, string(orig))
+		s.mustRun("shell", "mv ~/mise.lock.orig ~/.config/mise/mise.lock")
 		s.mustRun("up", "--no-sync", "--no-install")
 		if o, _ := s.shell("node --version"); !strings.Contains(o, "v22.") {
 			t.Fatalf("node should come back with the genuine lockfile: %s", o)
@@ -168,6 +163,8 @@ func TestSandboxGuarantees(t *testing.T) {
 			t.Fatalf("the blocked download should be in the audit log:\n%s", logs)
 		}
 	})
+
+	t.Run("escape attempts", func(t *testing.T) { escapeAttempts(t, s, dir) })
 
 	t.Run("no sudo", func(t *testing.T) {
 		out, err := s.shell("sudo -n true 2>&1; echo exit=$?")
@@ -283,8 +280,11 @@ func TestNixToolchain(t *testing.T) {
 	s.mustRun("up")
 	t.Logf("devkit up took %s", time.Since(start).Round(time.Second))
 
-	if _, err := os.Stat(filepath.Join(dir, "flake.lock")); err != nil {
-		t.Fatal("up should copy flake.lock back to the project")
+	if _, err := os.Stat(filepath.Join(dir, "flake.lock")); err == nil {
+		t.Fatal("nothing from the VM may land on the host, not even flake.lock")
+	}
+	if out, err := s.shell("test -s flake.lock && echo locked-in-vm"); err != nil || !strings.Contains(out, "locked-in-vm") {
+		t.Fatalf("the evaluation should have written flake.lock inside the VM: %v %s", err, out)
 	}
 	out, err := s.shell("node --version && test -d node_modules/is-odd && echo deps-ok")
 	if err != nil || !strings.Contains(out, "v22.") || !strings.Contains(out, "deps-ok") {
