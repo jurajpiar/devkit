@@ -22,7 +22,8 @@ and names anything that is trusted but should not be. devkit up runs the
 same audit shallowly after installing dependencies; --deep scans every file
 in the workspace, including node_modules and vendored trees.
 
-Exit status is 1 when something stale was found.`,
+Exit status is 1 when something stale was found, 2 when the audit could not
+run to a verdict.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireLima(); err != nil {
 			return err
@@ -41,29 +42,46 @@ Exit status is 1 when something stale was found.`,
 		// Through shellScript so a Nix dev shell's node and keytool are on PATH.
 		err = lima.ExecStream(cmd.Context(), cfg.VMName(), shellScript(cfg, []string{script}))
 		switch auditExit(err) {
-		case 0:
+		case auditClean:
 			return nil
-		case 1:
-			return fmt.Errorf("stale trust found")
+		case auditStale:
+			return &exitError{code: 1, msg: "stale trust found"}
 		default:
-			return fmt.Errorf("audit did not complete: %w", err)
+			return &exitError{code: 2, msg: fmt.Sprintf("audit did not complete: %v", err)}
 		}
 	},
 }
 
-// auditExit maps an ExecStream error to the audit's verdict: 0 clean, 1
-// stale trust found, anything else means the audit itself failed (ssh, a
-// missing script, a crash) and must not be read as a finding.
+// Verdicts of the in-VM audit. The script exits 3 for stale trust and 2 for
+// a crash; 1 is what a shell wrapper such as a failing nix develop returns,
+// and anything else (ssh, a missing script) is also not a finding.
+const (
+	auditClean      = 0
+	auditStale      = 3
+	auditIncomplete = -1
+)
+
+// auditExit maps an ExecStream error to a verdict: a finding only when the
+// script itself said so, incomplete for every other failure.
 func auditExit(err error) int {
 	if err == nil {
-		return 0
+		return auditClean
 	}
 	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return ee.ExitCode()
+	if errors.As(err, &ee) && ee.ExitCode() == auditStale {
+		return auditStale
 	}
-	return -1
+	return auditIncomplete
 }
+
+// exitError carries a process exit status for the audit command.
+type exitError struct {
+	code int
+	msg  string
+}
+
+func (e *exitError) Error() string { return e.msg }
+func (e *exitError) ExitCode() int { return e.code }
 
 func init() {
 	rootCmd.AddCommand(auditCmd)

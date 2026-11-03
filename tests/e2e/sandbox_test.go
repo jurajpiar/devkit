@@ -108,7 +108,9 @@ func TestSandboxGuarantees(t *testing.T) {
 			c.Close()
 		}
 	}()
-	hostTunnel := fmt.Sprintf("curl -s -m 10 -p -x http://127.0.0.1:3128 -o /dev/null -w '%%{http_connect}' https://host.lima.internal:%d/ ; echo", hostPort)
+	// --noproxy '' so NO_PROXY (which lists the host under allow_host) cannot
+	// turn the tunnel check into a bypass.
+	hostTunnel := fmt.Sprintf("curl -s -m 10 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%%{http_connect}' https://host.lima.internal:%d/ ; echo", hostPort)
 	hostDirect := fmt.Sprintf("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/%d && head -c 20 <&3' 2>&1; echo exit=$?", hostPort)
 
 	start := time.Now()
@@ -369,6 +371,10 @@ func TestSandboxGuarantees(t *testing.T) {
 		// reach answers now, so their failures were the policy, not a dead port.
 		if out, _ = s.shell(hostDirect); !strings.Contains(out, "devkit-host-listener") {
 			t.Fatalf("allow_host should reach the host listener: %s", out)
+		}
+		// Forced through the proxy, the allowlist still refuses the host.
+		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "403" {
+			t.Fatalf("CONNECT to the host via the proxy should still be 403 under allow_host: %s", out)
 		}
 		out, _ = s.shell("echo $NO_PROXY")
 		if !strings.Contains(out, "host.lima.internal") {

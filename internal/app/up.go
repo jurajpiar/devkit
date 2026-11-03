@@ -183,8 +183,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// a runtime or a vendored bundle in the repo does not update itself.
 	fmt.Println()
 	switch err := lima.ExecStream(ctx, name, shellScript(cfg, []string{"devkit-audit"})); auditExit(err) {
-	case 0:
-	case 1:
+	case auditClean:
+	case auditStale:
 		fmt.Println("Run 'devkit audit --deep' for the full scan.")
 	default:
 		fmt.Printf("Warning: the trust audit did not complete: %v\n", err)
