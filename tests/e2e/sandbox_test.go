@@ -268,7 +268,9 @@ func TestSandboxGuarantees(t *testing.T) {
 		if before != after || !strings.Contains(before, "/etc/environment") {
 			t.Fatalf("/etc/environment changed across a reboot with a host proxy set:\n%s\n%s", before, after)
 		}
-		out, _ := s.shell("sed -n '/^#LIMA-START/,/^#LIMA-END/p' /etc/environment | grep -ci proxy; true")
+		// Proxy assignments by key, not any mention of "proxy": Lima also
+		// merges unrelated global env entries into this block.
+		out, _ := s.shell("sed -n '/^#LIMA-START/,/^#LIMA-END/p' /etc/environment | grep -ciE '^(https?_proxy|ftp_proxy|no_proxy|all_proxy)='; true")
 		if strings.TrimSpace(out) != "0" {
 			t.Fatalf("Lima's block should carry no proxy settings: %s", out)
 		}

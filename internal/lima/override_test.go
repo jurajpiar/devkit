@@ -16,6 +16,7 @@ func TestCheckOverrideFile(t *testing.T) {
 		"cpus: 4\nenv:\n  FOO: bar\n  HTTP_PROXY: \"\"\n": "",
 		"propagateProxyEnv: true\n":                       "propagateProxyEnv: true",
 		"env:\n  https_proxy: http://corp:3128\n":         "env.https_proxy",
+		"env:\n  ALL_PROXY: socks5://corp:1080\n":         "env.ALL_PROXY",
 	}
 	for content, want := range cases {
 		p := filepath.Join(dir, "override.yaml")

@@ -96,6 +96,11 @@ func Home() string {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".lima")
 	}
+	// Absolute before anything derived from it is persisted: the SSH config
+	// block is read from other directories than the one devkit up ran in.
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		return dir
 	}
