@@ -64,8 +64,19 @@ mounts: []
 
 # The host's proxy settings never enter the VM: the only egress is devkit's
 # own proxy, and a propagated value would land in Lima's /etc/environment
-# block, which must stay byte-identical across boots.
+# block, which must stay byte-identical across boots. propagateProxyEnv only
+# covers limactl's own environment; Lima also reads the macOS system proxy
+# settings, and an empty value in env is what makes it drop those.
 propagateProxyEnv: false
+env:
+  http_proxy: ""
+  https_proxy: ""
+  ftp_proxy: ""
+  no_proxy: ""
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  FTP_PROXY: ""
+  NO_PROXY: ""
 
 # Rootless containers inside the VM are opt-in.
 containerd:
