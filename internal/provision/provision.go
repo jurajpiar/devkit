@@ -110,6 +110,17 @@ MODE="{{.Config.Network.Mode}}"
 mkdir -p /etc/devkit /var/log/devkit /var/lib/devkit {{.DropDir}}
 chmod 755 /var/log/devkit
 
+# ---- logind stall guard ----
+# Lima's boot script terminates the user's sessions to apply /etc/environment
+# while its host agent is opening the first SSH session. On some boots that
+# race leaves systemd-logind spinning at 100% CPU with its D-Bus dead, so every
+# SSH login then waits out pam_systemd's timeout and the boot overruns Lima's
+# deadline. Restarting logind clears it; sessions survive a logind restart.
+if ! timeout 5 loginctl list-sessions >/dev/null 2>&1; then
+  echo "devkit: systemd-logind is unresponsive; restarting it" >&2
+  systemctl restart systemd-logind || true
+fi
+
 # ---- policy files, regenerated from devkit.yaml on every boot ----
 # Quoted heredocs: values come from the template, never from shell expansion.
 cat > /etc/devkit/network.conf <<'EOF'
@@ -313,6 +324,15 @@ EOF
 else
   rm -f /etc/profile.d/devkit-proxy.sh /etc/apt/apt.conf.d/99devkit-proxy
   sed -i '/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d' /etc/environment
+fi
+# Keep Lima's block at the end of /etc/environment. Lima's boot script rewrites
+# that block on every boot and, if the file then differs, terminates the user's
+# sessions, which is the trigger for the logind stall above. With the block
+# last, later boots see no change and nothing is terminated.
+if grep -q '^#LIMA-START' /etc/environment; then
+  limablock="$(sed -n '/^#LIMA-START/,/^#LIMA-END/p' /etc/environment)"
+  sed -i '/^#LIMA-START/,/^#LIMA-END/d' /etc/environment
+  printf '%s\n' "$limablock" >> /etc/environment
 fi
 {{- if eq .Config.Tools.Manager "nix"}}
 # The Nix daemon does the downloading, so it needs the proxy too. Nix passes
