@@ -85,15 +85,24 @@ func Dir(name string) string {
 	return filepath.Join(Home(), name)
 }
 
-// Home is Lima's data directory, resolved the way limactl does it: LIMA_HOME
-// when set, otherwise ~/.lima. Every path devkit derives from it must agree
-// with limactl, or a check reads one file while Lima uses another.
+// Home is Lima's data directory, resolved the way limactl's LimaDir does it:
+// LIMA_HOME when set, otherwise ~/.lima, returned as given when it does not
+// exist yet and with symlinks resolved when it does. Every path devkit
+// derives from it must agree with limactl, or a check reads one file while
+// Lima uses another.
 func Home() string {
-	if h := os.Getenv("LIMA_HOME"); h != "" {
-		return h
+	dir := os.Getenv("LIMA_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".lima")
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".lima")
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return dir
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return real
+	}
+	return dir
 }
 
 // ConfigPath is the instance's lima.yaml.

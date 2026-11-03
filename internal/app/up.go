@@ -118,7 +118,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	default:
-		prev, _ := os.ReadFile(renderedPath)
+		// Compare with the instance's own lima.yaml, which Lima stores
+		// verbatim, rather than a cache keyed by name: two Lima homes can
+		// hold same-named instances.
+		prev, _ := os.ReadFile(lima.ConfigPath(name))
 		if string(prev) != rendered {
 			if inst.Running() {
 				fmt.Println("devkit.yaml changed; restarting VM to apply it")

@@ -21,7 +21,7 @@ Host %[2]s
   HostName 127.0.0.1
   Port %[3]d
   User %[4]s
-  IdentityFile %[5]s
+  IdentityFile "%[5]s"
   IdentitiesOnly yes
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
