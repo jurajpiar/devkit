@@ -71,21 +71,33 @@ cross-compiles the proxy that runs inside the VM.
 ## How it works, in one picture
 
 ```mermaid
-flowchart LR
-    mac["<b>Your Mac</b><br/>files, keys, databases"]
-    subgraph vm["Sandbox VM, one per project"]
-        code["<b>Project code</b><br/>npm, cargo, coding agents"]
-        proxy["<b>Allowlist proxy</b><br/>checks the host, logs it"]
-    end
-    ok(("Allowed<br/>hosts"))
-    no["Blocked"]
+sequenceDiagram
+    participant Mac as Your Mac
+    participant Code as Project code<br/>in the VM
+    participant Proxy as Allowlist proxy<br/>in the VM
+    participant FW as Firewall<br/>in the VM
+    participant Net as Internet
 
-    mac -- "ssh" --> code
-    code -- "every connection" --> proxy
-    proxy -- "on the list" --> ok
-    proxy -- "not on the list" --> no
-    code -- "DNS, to the VM's<br/>resolvers only" --> ok
-    code -. "any other route:<br/>direct, or to your Mac" .-> no
+    Mac->>Code: ssh (the only way in)
+
+    Code->>Proxy: fetch registry.npmjs.org
+    Note over Proxy: on the list, logged ALLOWED
+    Proxy->>FW: connect as the proxy's user
+    FW->>Net: accepted
+    Net-->>Code: response
+
+    Code->>Proxy: fetch evil.example
+    Note over Proxy: not on the list, logged BLOCKED
+    Proxy-->>Code: 403
+
+    Code->>FW: connect directly, skipping the proxy
+    FW-->>Code: rejected
+
+    Code->>FW: connect to your Mac
+    FW-->>Code: rejected
+
+    Code->>FW: DNS query
+    FW->>Net: accepted, to the VM's resolvers only
 ```
 
 Three things make this hold. The VM has no shared folders and no sudo, so the
