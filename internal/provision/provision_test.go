@@ -277,9 +277,11 @@ func TestUserScript(t *testing.T) {
 	if s, err := User(p); err != nil || !strings.Contains(s, `ln -s '/Users/alice/it'\''s $(evil) `+"`here`'") {
 		t.Errorf("mount path should be single-quoted as one word: %v\n%s", err, s)
 	}
-	p.MountPath = "/Users/alice/proj\nEOF\nrm -rf /"
-	if _, err := System(p); err == nil || !strings.Contains(err.Error(), "line break") {
-		t.Errorf("a mount path with a line break must be refused, got %v", err)
+	for _, brk := range []string{"\n", "\r", "\u0085", "\u2028", "\u2029"} {
+		p.MountPath = "/Users/alice/proj" + brk + "EOF" + brk + "rm -rf /"
+		if _, err := System(p); err == nil || !strings.Contains(err.Error(), "line break") {
+			t.Errorf("a mount path with %q must be refused, got %v", brk, err)
+		}
 	}
 	if _, err := User(p); err == nil {
 		t.Error("the user script must refuse it too")

@@ -39,8 +39,10 @@ func User(p Params) (string, error) {
 func render(src string, p Params) (string, error) {
 	// MountPath is the host's working directory, chosen by whoever named it.
 	// It lands in a root-run quoted heredoc, where only a line break could
-	// end the document early, and in the user script through shq.
-	if strings.ContainsAny(p.MountPath, "\n\r") {
+	// end the document early, and in the user script through shq. The script
+	// travels inside Lima's YAML, whose parser also treats NEL, U+2028 and
+	// U+2029 as line breaks and normalises them to newlines, so those count.
+	if strings.ContainsAny(p.MountPath, "\n\r\u0085\u2028\u2029") {
 		return "", fmt.Errorf("project path contains a line break, which cannot be provisioned safely: %q", p.MountPath)
 	}
 	t, err := template.New("script").Funcs(template.FuncMap{
