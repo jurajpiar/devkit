@@ -34,9 +34,21 @@ func TestHomeFollowsLimaHome(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("LIMA_HOME", filepath.Join(link, "_config", ".."))
+	// The ".." is kept raw: filepath.Join would clean it away before the
+	// symlink is ever consulted, which is exactly the bug being tested.
+	t.Setenv("LIMA_HOME", link+"/_config/..")
 	if got := Home(); got != real {
 		t.Errorf("Home() through a symlink = %q, want %q", got, real)
+	}
+	// And the case that distinguishes the orders: link -> real/_config, so
+	// link/.. must be real (the target's parent), not the link's directory.
+	link2 := filepath.Join(filepath.Dir(link), "link2")
+	if err := os.Symlink(filepath.Join(real, "_config"), link2); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIMA_HOME", link2+"/..")
+	if got := Home(); got != real {
+		t.Errorf("Home() with link2/.. = %q, want %q (Abs before EvalSymlinks would give %q)", got, real, filepath.Dir(link2))
 	}
 	// A relative LIMA_HOME is made absolute, so the path persisted in the
 	// SSH config does not depend on the directory devkit up ran in.

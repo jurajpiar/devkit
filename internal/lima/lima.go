@@ -96,16 +96,17 @@ func Home() string {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".lima")
 	}
-	// Absolute before anything derived from it is persisted: the SSH config
-	// block is read from other directories than the one devkit up ran in.
+	// Symlinks first, as limactl does, because Abs cleans ".." before any
+	// symlink in the path is followed: a/link/.. must land where the link's
+	// target's parent is, not in a. Then absolute, so nothing derived from it
+	// and persisted (the SSH config block) depends on the current directory.
+	if _, err := os.Stat(dir); err == nil {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = real
+		}
+	}
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
-	}
-	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
-		return dir
-	}
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
-		return real
 	}
 	return dir
 }
