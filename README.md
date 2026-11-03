@@ -34,8 +34,10 @@ make install        # cross-compiles the egress proxy for the VM, embeds it, ins
 devkit doctor       # checks Lima, the proxy binary and the host
 ```
 
-`make install` copies the binary to `/usr/local/bin`. A plain `go build` also
-works; devkit then builds the proxy with your Go toolchain on first use.
+`make install` copies the binary to `~/.local/bin`; no sudo is needed, but make
+sure that directory is on your `PATH`. Pass `BINDIR=/some/dir` to install
+elsewhere. A plain `go build` also works; devkit then builds the proxy with
+your Go toolchain on first use.
 
 ## Use
 
@@ -60,6 +62,38 @@ To work from VS Code or Cursor, use the Remote-SSH extension and connect to
 `devkit-<name>`. devkit maintains the entry in `~/.ssh/config`; `devkit
 connect` prints the steps. Ports your app listens on inside the VM appear on
 `127.0.0.1` on your Mac automatically.
+
+## How traffic leaves the VM
+
+```mermaid
+flowchart LR
+    subgraph host["macOS host"]
+        you["you, IDE"]
+        svc["services on your Mac"]
+    end
+    subgraph vm["sandbox VM (Lima, vz)"]
+        user["sandbox user<br/>shell, npm, coding agents"]
+        proxy["egress proxy<br/>runs as devkit-proxy<br/>allowlist check, logs every host"]
+        fw["iptables OUTPUT<br/>written by root at boot"]
+    end
+    net(("internet"))
+    blocked["rejected"]
+
+    you -- "ssh 127.0.0.1:port" --> user
+    user -- "HTTP_PROXY / HTTPS_PROXY" --> proxy
+    user -. "direct connection" .-> fw
+    proxy --> fw
+    fw -- "from devkit-proxy: ACCEPT" --> net
+    fw -- "DNS to VM resolvers: ACCEPT" --> net
+    fw -- "allow_host: true" --> svc
+    fw -- "anything else: REJECT" --> blocked
+```
+
+The proxy decides by hostname and writes one line per connection to the log
+that `devkit logs` shows. It does not inspect content; TLS passes through
+untouched. A program that ignores the proxy variables is rejected by the
+firewall rather than let out, because only the proxy's user may open outbound
+connections. In `none` mode the firewall rejects everything, including DNS.
 
 ## Configuration
 
