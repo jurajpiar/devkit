@@ -25,15 +25,16 @@ in the workspace, including node_modules and vendored trees.
 Exit status is 1 when something stale was found, 2 when the audit could not
 run to a verdict.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Preflight failures are not findings either: status 2, cause kept.
 		if err := requireLima(); err != nil {
-			return err
+			return &exitError{code: 2, msg: err.Error()}
 		}
 		cfg, err := loadConfig(cmd)
 		if err != nil {
-			return err
+			return &exitError{code: 2, msg: err.Error()}
 		}
 		if err := mustBeRunning(cmd, cfg); err != nil {
-			return err
+			return &exitError{code: 2, msg: err.Error()}
 		}
 		script := "devkit-audit"
 		if deep, _ := cmd.Flags().GetBool("deep"); deep {

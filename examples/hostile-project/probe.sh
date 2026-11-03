@@ -91,7 +91,8 @@ done
 code="$(curl -s -m 8 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%{http_connect}' https://host.lima.internal:2222/ 2>/dev/null)"
 case "$code" in
   403) held "proxy refuses a tunnel to your Mac (403)" ;;
-  502) held "proxy tried to dial your Mac and the firewall rejected it (502)" ;;
+  502) if [ "$ALLOW_HOST" = 1 ]; then note "proxy dialled your Mac :2222 and nothing answered (allow_host: true; a closed port, not the firewall)"
+       else held "proxy tried to dial your Mac and the firewall rejected it (502)"; fi ;;
   200) if [ "$ALLOW_HOST" = 1 ]; then note "proxy opened a tunnel to your Mac :2222 (allow_host: true)"
        else leaked "proxy opened a TCP tunnel to your Mac :2222"; fi ;;
   000) if [ "$MODE" = none ]; then held "proxy is off (none mode)"

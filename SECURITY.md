@@ -49,7 +49,8 @@ there, not devkit.
 traffic to that address except DNS to the configured resolvers unless
 `network.allow_host: true`, in which case the host is reachable directly and
 is listed in `NO_PROXY`, so that traffic is not audited. In `none` mode DNS is
-rejected too.
+rejected too, unless `allow_host: true`, which keeps the host reachable and,
+with it, any resolver running there.
 
 **Egress allowlist.** In `allowlist` and `open` modes an iptables `OUTPUT`
 chain accepts loopback, established connections, DNS to the resolvers in
@@ -99,7 +100,9 @@ substitute against the cache's signing key and pins inputs in `flake.lock`.
 
 **Air gap.** `network.mode: none` rejects all outbound traffic including DNS.
 Incoming SSH still works because its return packets are an established
-connection.
+connection. Combined with `allow_host: true` the gap has one opening: the
+host, and therefore DNS through the host's resolver. Pair them only when
+that is what you want.
 
 **The sandbox cannot loosen the policy.** The user account inside the VM can
 run exactly three commands as root, all read-only checks Lima's host agent

@@ -37,8 +37,15 @@ func User(p Params) (string, error) {
 }
 
 func render(src string, p Params) (string, error) {
+	// MountPath is the host's working directory, chosen by whoever named it.
+	// It lands in a root-run quoted heredoc, where only a line break could
+	// end the document early, and in the user script through shq.
+	if strings.ContainsAny(p.MountPath, "\n\r") {
+		return "", fmt.Errorf("project path contains a line break, which cannot be provisioned safely: %q", p.MountPath)
+	}
 	t, err := template.New("script").Funcs(template.FuncMap{
 		"join": strings.Join,
+		"shq":  shellQuote,
 		"bool": func(b bool) string {
 			if b {
 				return "1"
@@ -539,7 +546,7 @@ const userTmpl = `#!/bin/bash
 set -euo pipefail
 {{- if eq .Config.Source "mount"}}
 if [ ! -e "$HOME/{{.WorkspaceDir}}" ]; then
-  ln -s "{{.MountPath}}" "$HOME/{{.WorkspaceDir}}"
+  ln -s {{shq .MountPath}} "$HOME/{{.WorkspaceDir}}"
 fi
 {{- else}}
 mkdir -p "$HOME/{{.WorkspaceDir}}"
@@ -568,4 +575,10 @@ type templateData struct {
 	MiseVersion, MiseArm64SHA, MiseAmd64SHA                                    string
 	NixVersion, NixArm64SHA, NixAmd64SHA                                       string
 	AuditScript                                                                string
+}
+
+// shellQuote wraps s in single quotes for use as one shell word, with any
+// single quote inside it closed, escaped and reopened.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

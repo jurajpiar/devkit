@@ -487,12 +487,24 @@ func TestNixToolchain(t *testing.T) {
 // handshake over it with Node's own verifier, printing the error code.
 const nodeTLSProbe = `const net = require('net'), tls = require('tls');
 const host = 'objects.githubusercontent.com';
+setTimeout(() => { console.log('timeout'); process.exit(); }, 20000);
 const s = net.connect(3128, '127.0.0.1', () => s.write('CONNECT ' + host + ':443 HTTP/1.1\r\nHost: ' + host + ':443\r\n\r\n'));
-s.once('data', d => {
-  if (!/ 200 /.test(d.toString())) { console.log('tunnel: ' + d.toString().split('\r\n')[0]); process.exit(); }
+// Buffer the whole CONNECT response: one data event may hold part of the
+// status line, or the headers plus the first TLS bytes, which go back.
+let buf = Buffer.alloc(0);
+const onData = d => {
+  buf = Buffer.concat([buf, d]);
+  const end = buf.indexOf('\r\n\r\n');
+  if (end < 0) return;
+  s.removeListener('data', onData);
+  const head = buf.subarray(0, end).toString(), rest = buf.subarray(end + 4);
+  if (!/^HTTP\/1\.[01] 200 /.test(head)) { console.log('tunnel: ' + head.split('\r\n')[0]); process.exit(); }
+  if (rest.length) s.unshift(rest);
   const t = tls.connect({ socket: s, servername: host }, () => { console.log('ok authorized=' + t.authorized); process.exit(); });
   t.on('error', e => { console.log('failed: ' + e.code); process.exit(); });
-});`
+};
+s.on('data', onData);
+s.on('error', e => { console.log('proxy: ' + e.code); process.exit(); });`
 
 // setYAML replaces one line fragment in devkit.yaml in place.
 func setYAML(t *testing.T, path, from, to string) {

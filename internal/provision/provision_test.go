@@ -265,12 +265,27 @@ func TestUserScript(t *testing.T) {
 		}
 	}
 	s, _ = User(params(func(c *project.Config) { c.Source = project.SourceMount }))
-	if !strings.Contains(s, `ln -s "/Users/alice/proj" "$HOME/workspace"`) {
+	if !strings.Contains(s, `ln -s '/Users/alice/proj' "$HOME/workspace"`) {
 		t.Errorf("mount mode should symlink the mount: %s", s)
 	}
 	sys, _ := System(params(func(c *project.Config) { c.Source = project.SourceMount }))
 	if !strings.Contains(sys, "SOURCE=mount\nMOUNT_POINT=/Users/alice/proj\n") {
 		t.Errorf("mount mode should record the mount point for the probe: %s", sys)
+	}
+	// The path is the host's choice: it is one shell word in the user
+	// script, and a line break, the only thing that could end the root
+	// heredoc early, is refused outright.
+	p := params(func(c *project.Config) { c.Source = project.SourceMount })
+	p.MountPath = "/Users/alice/it's $(evil) `here`"
+	if s, err := User(p); err != nil || !strings.Contains(s, `ln -s '/Users/alice/it'\''s $(evil) `+"`here`'") {
+		t.Errorf("mount path should be single-quoted as one word: %v\n%s", err, s)
+	}
+	p.MountPath = "/Users/alice/proj\nEOF\nrm -rf /"
+	if _, err := System(p); err == nil || !strings.Contains(err.Error(), "line break") {
+		t.Errorf("a mount path with a line break must be refused, got %v", err)
+	}
+	if _, err := User(p); err == nil {
+		t.Error("the user script must refuse it too")
 	}
 }
 
