@@ -2,6 +2,9 @@
 
 GUEST_ARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 PROXY_BIN := internal/embedded/bin/egressproxy-linux-$(GUEST_ARCH)
+# Where 'make install' puts the binary. Defaults to a user-owned directory so
+# no sudo is needed; override with BINDIR=/some/dir.
+BINDIR ?= $(HOME)/.local/bin
 
 all: build
 
@@ -22,7 +25,8 @@ test-e2e: build
 	DEVKIT_E2E=1 go test ./tests/e2e/... -v -count=1 -timeout 30m
 
 install: build
-	install -m 755 devkit /usr/local/bin/devkit
+	install -d $(BINDIR)
+	install -m 755 devkit $(BINDIR)/devkit
 
 clean:
 	rm -f devkit $(PROXY_BIN)
