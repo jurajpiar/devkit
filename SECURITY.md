@@ -30,6 +30,13 @@ the VM are available as a convenience, not as a protection layer.
 home-directory mount is never created. `source: mount` is the explicit opt-in,
 read-only unless `mount_writable: true`.
 
+**Nothing comes back.** devkit copies files into the VM (`source: copy`, the
+proxy binary) and never out of it. There is no guest-to-host copy in the code,
+toolchain lockfiles stay in the VM, and the only guest output devkit prints
+on the host is stripped of control characters first. The end-to-end suite has
+a hostile workspace rewrite every file devkit might be tempted to bring back
+and checks that the project directory on the host is byte-for-byte unchanged.
+
 **No access to the host.** The guest can normally reach the host at
 `host.lima.internal`, which is also its gateway. The firewall rejects all
 traffic to that address except DNS to the configured resolvers unless
@@ -59,10 +66,11 @@ manager (mise or Nix) from a release archive pinned by SHA-256 in devkit's
 source, with the pin taken after verifying the upstream signature. The
 toolchains come in afterwards as the sandbox user, through the proxy and into
 the audit log. mise runs with plugin backends disabled, provenance checks on
-every install, a three-day minimum release age, and a lockfile that devkit
-writes on the first run and enforces with `--locked` afterwards. Nix checks
-every substitute against the cache's signing key and pins inputs in
-`flake.lock`.
+every install, a three-day minimum release age, and a lockfile written in the
+VM on the first run and enforced with `--locked` afterwards. The sandbox user
+owns that lockfile, so it guards against upstream changing an archive, not
+against the sandbox itself, which can already run anything. Nix checks every
+substitute against the cache's signing key and pins inputs in `flake.lock`.
 
 **Air gap.** `network.mode: none` rejects all outbound traffic including DNS.
 Incoming SSH still works because its return packets are an established
@@ -87,6 +95,17 @@ target host to `/var/log/devkit/egress.log`. `devkit logs` reads it, and
 
 **Localhost-only exposure.** Lima forwards ports the guest listens on to
 `127.0.0.1` on the host. Nothing is reachable from your network.
+
+## What the escape tests cover
+
+`tests/e2e/escape_test.go` runs inside a real VM and tries, as the sandbox
+user, to: reach the host by name, gateway IP, every port form, UDP and IPv6,
+directly and through the proxy; flush the firewall, open raw sockets, bind
+port 22, switch to the proxy's user, kill the proxy, or use a user namespace
+to get around the OUTPUT chain; read secrets from Lima's cidata, find a host
+mount, or dial the host over vsock; write to any policy file; and get a file
+back onto the host by rewriting the workspace before `devkit up`. Hypervisor
+escapes are not tested, because no test of ours would find one.
 
 ## Accepted risks
 

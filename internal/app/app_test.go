@@ -253,3 +253,10 @@ func TestRenderFlake(t *testing.T) {
 		t.Error("an empty version set should still produce a usable shell")
 	}
 }
+
+func TestPrintableStripsControlCharacters(t *testing.T) {
+	in := "evil\x1b[2J\x1b]0;pwned\x07.example\r\n\x7f"
+	if got := printable(in); got != "evil[2J]0;pwned.example" {
+		t.Errorf("printable(%q) = %q", in, got)
+	}
+}
