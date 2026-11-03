@@ -25,7 +25,8 @@ stale = 0
 ref_note = ""
 
 def _crash(t, v, tb):
-    # A crash is not a finding: exit 1 means stale trust, 2 means no verdict.
+    # A crash is not a finding: exit 3 means stale trust, 2 means no verdict.
+    # 1 is left to the shell wrapper (a Nix dev shell that fails to start).
     print(f"audit failed: {t.__name__}: {v}", flush=True)
     os._exit(2)
 sys.excepthook = _crash
@@ -241,6 +242,6 @@ say(f"  project files: {len(pems)} certificate files scanned, {found} untrusted 
 say(f"  {time.monotonic() - START:.1f}s" + ("" if DEEP else ", shallow; devkit audit --deep scans everything"))
 if stale:
     say(f"{stale} finding(s). A root the reference no longer trusts is stale: update the bundle or runtime that carries it.")
-    sys.exit(1)
+    sys.exit(3)
 say("Nothing stale.")
 `

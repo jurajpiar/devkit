@@ -26,7 +26,12 @@ section(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 # The policy, as root applied it. Readable, not writable.
 MODE=allowlist ALLOW_HOST=0 SOURCE=copy MOUNT_POINT=
 if [ -r /etc/devkit/network.conf ]; then . /etc/devkit/network.conf; fi
-if [ -r /etc/devkit/source.conf ]; then . /etc/devkit/source.conf; fi
+# source.conf is read as data, not sourced: MOUNT_POINT is a host path and
+# may contain spaces or shell metacharacters.
+if [ -r /etc/devkit/source.conf ]; then
+  SOURCE="$(sed -n 's/^SOURCE=//p' /etc/devkit/source.conf)"
+  MOUNT_POINT="$(sed -n 's/^MOUNT_POINT=//p' /etc/devkit/source.conf)"
+fi
 printf 'Policy: network.mode=%s allow_host=%s source=%s%s\n' "$MODE" "$ALLOW_HOST" "$SOURCE" "${MOUNT_POINT:+ at $MOUNT_POINT}"
 
 # tcp HOST PORT: true if a TCP connection opens within 4 seconds.
@@ -81,7 +86,9 @@ done
 # it; 200 means a TCP tunnel to your Mac is open. (A plain-HTTP request would
 # be ambiguous: the proxy also answers 502 after connecting to a non-HTTP
 # listener such as sshd and failing to parse its reply.)
-code="$(curl -s -m 8 -p -x http://127.0.0.1:3128 -o /dev/null -w '%{http_connect}' https://host.lima.internal:2222/ 2>/dev/null)"
+# --noproxy '' because with allow_host the host is in NO_PROXY, which curl
+# honours even with -x; the check must measure the proxy, not a bypass.
+code="$(curl -s -m 8 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%{http_connect}' https://host.lima.internal:2222/ 2>/dev/null)"
 case "$code" in
   403) held "proxy refuses a tunnel to your Mac (403)" ;;
   502) held "proxy tried to dial your Mac and the firewall rejected it (502)" ;;
@@ -133,15 +140,19 @@ for p in /Users "$HOME/.aws/credentials" "$HOME/.config/gcloud"; do
     esac
   else held "$p not present in the VM"; fi
 done
-mounts="$(findmnt -t virtiofs -n -o TARGET 2>/dev/null)"
-if [ -z "$mounts" ]; then
+# One target per line; findmnt escapes whitespace as \x20, so decode it
+# before comparing with the configured path.
+mounts=0
+while IFS= read -r raw; do
+  [ -n "$raw" ] || continue
+  mounts=$((mounts+1))
+  m="$(printf '%b' "$raw")"
+  if [ "$SOURCE" = mount ] && [ "$m" = "$MOUNT_POINT" ]; then note "project directory mounted at $m (source: mount, as configured)"
+  else leaked "host directory mounted at $m, which devkit.yaml does not ask for"; fi
+done < <(findmnt -t virtiofs -n -o TARGET 2>/dev/null)
+if [ "$mounts" = 0 ]; then
   if [ "$SOURCE" = mount ]; then leaked "source: mount is configured but nothing is mounted at $MOUNT_POINT"
   else held "no host directory mounted"; fi
-else
-  for m in $mounts; do
-    if [ "$SOURCE" = mount ] && [ "$m" = "$MOUNT_POINT" ]; then note "project directory mounted at $m (source: mount, as configured)"
-    else leaked "host directory mounted at $m, which devkit.yaml does not ask for"; fi
-  done
 fi
 # The guest user has its own ~/.ssh with an authorized_keys holding your
 # public key, which is how SSH in works. What must never appear is a private
