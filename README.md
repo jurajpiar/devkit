@@ -150,6 +150,7 @@ network:
     - github.com
     - "**.github.com"
   allow_host: false     # reach services on your Mac
+  # distrust: [AAA Certificate Services]   # root CAs the VM must not trust
 
 # exclude: [.git, node_modules]   # never copied into the VM (defaults apply)
 # mount_writable: false           # source: mount only; lets the sandbox edit your files
@@ -175,6 +176,15 @@ network:
 Allowed hosts are hostnames or IPs: `example.com` exact, `*.example.com` one
 level, `**.example.com` any depth. Anything else is rejected at validation.
 DNS is permitted only to the VM's configured resolvers.
+
+**Trust store.** The VM trusts what Ubuntu's `ca-certificates` package
+trusts, refreshed by root on every boot, so a VM created before a CA was
+removed upstream catches up on its next start. `network.distrust` names roots
+to remove on top of that, for the cases where the distro lags the browsers.
+Runtimes that bring their own root list (Node, Python's certifi, pip, curl)
+are pointed at the system bundle instead, so both the distro's updates and
+your `distrust` list apply to them. `devkit up` ends with a short trust audit;
+`devkit audit --deep` scans every file. See SECURITY.md for what it catches.
 
 The sandbox cannot reach your Mac in any mode unless `allow_host` is true. With
 `allow_host: true` the VM reaches the host directly at `host.lima.internal`,
@@ -253,6 +263,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | `devkit rm [-f] [name]` | Delete the VM. Without a name, the current project's; completion lists the devkit VMs |
 | `devkit ls` | List devkit VMs |
 | `devkit doctor` | Check the host |
+| `devkit audit [--deep]` | Report roots the VM, its runtimes or the project trust that Mozilla no longer does |
 
 ## Under the hood
 

@@ -68,6 +68,24 @@ hostile `devkit.yaml` cannot run commands as root in the VM. `install:` is
 deliberately free-form: it runs as the sandbox user, which is the thing being
 sandboxed.
 
+**TLS trust is the distro's, kept current, and auditable.** Non-browser TLS
+clients check no revocation: a mis-issued certificate from a compromised CA
+stays valid for them until their trust bundle is updated. devkit keeps the
+VM's bundle current by refreshing `ca-certificates` on every boot, and makes
+that bundle authoritative for runtimes that would otherwise carry their own
+stale copy (Node via `--use-openssl-ca`, Python and pip via `SSL_CERT_FILE`,
+`REQUESTS_CA_BUNDLE` and `PIP_CERT`, curl via `CURL_CA_BUNDLE`).
+`network.distrust` removes named roots on top of that, for cases where the
+distro lags the browsers, such as a cross-signing root they have stopped
+trusting. There is no CA list inside devkit to go stale: `devkit audit`
+compares what the system, Node, Java, certifi bundles and certificate files
+in the project trust against Mozilla's current root store, fetched through
+the proxy, and names anything trusted that should not be, with the
+`distrust` entry to add. `devkit up` runs it shallowly every time. What it
+cannot fix is a compiled program that embeds its own bundle and ignores the
+environment, though it can find one by fingerprint; and the proxy cannot
+inspect certificates, because TLS 1.3 encrypts them.
+
 **Toolchains are installed by the sandbox user.** Root installs only the
 manager (mise or Nix) from a release archive pinned by SHA-256 in devkit's
 source, with the pin taken after verifying the upstream signature. The
