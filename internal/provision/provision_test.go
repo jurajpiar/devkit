@@ -134,6 +134,42 @@ func TestPolicyFilesAreNotShellExpanded(t *testing.T) {
 	}
 }
 
+func TestSystemScriptTrustStore(t *testing.T) {
+	s, err := System(params(func(c *project.Config) {
+		c.Network.Distrust = []string{"AAA Certificate Services", "emSign ECC Root CA - G3"}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"$APT install -y -q --only-upgrade ca-certificates",
+		"systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service",
+		"systemctl mask apt-daily.service apt-daily-upgrade.service",
+		"-o DPkg::Lock::Timeout=300",
+		"/var/lib/devkit/.distrust",
+		`n="AAA Certificate Services"; f="${n// /_}"`,
+		`n="emSign ECC Root CA - G3"`,
+		"update-ca-certificates --fresh",
+		`export NODE_OPTIONS="--use-openssl-ca${NODE_OPTIONS:+ $NODE_OPTIONS}"`,
+		"export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+		"cat > /usr/local/bin/devkit-audit <<'PYEOF'\n#!/usr/bin/env python3",
+		"\nPYEOF\nchmod 755 /usr/local/bin/devkit-audit",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("system script missing %q", want)
+		}
+	}
+	// The audit script must not terminate its own heredoc early.
+	body := s[strings.Index(s, "<<'PYEOF'")+9 : strings.Index(s, "\nPYEOF\n")]
+	if strings.Count(s, "\nPYEOF\n") != 1 || strings.Contains(body, "PYEOF") {
+		t.Error("audit script heredoc is not intact")
+	}
+	none, _ := System(params(func(c *project.Config) { c.Network.Mode = project.NetworkNone }))
+	if !strings.Contains(none, "if [ \"$MODE\" != \"none\" ]; then\n  ($APT update -q") {
+		t.Error("the bundle refresh must be skipped when air-gapped")
+	}
+}
+
 func TestSystemScriptNone(t *testing.T) {
 	s, err := System(params(func(c *project.Config) { c.Network.Mode = project.NetworkNone }))
 	if err != nil {

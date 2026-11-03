@@ -98,6 +98,11 @@ type Network struct {
 	Allow []string `yaml:"allow,omitempty"`
 	// AllowHost lets the VM reach services on the macOS host. Off by default.
 	AllowHost bool `yaml:"allow_host"`
+	// Distrust names root CAs, as in the system bundle ("AAA Certificate
+	// Services"), that the VM must not trust for TLS. Applied by root at
+	// boot on top of the distro's current ca-certificates package, which is
+	// the source of truth and is refreshed on every boot. Empty by default.
+	Distrust []string `yaml:"distrust,omitempty"`
 }
 
 // DefaultAllow is the seed allowlist every project gets. devkit init adds
@@ -234,6 +239,9 @@ var (
 	toolRe    = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,40}$`)
 	versionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$`)
 	pkgRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
+	// distrustRe is a root CA display name as the system bundle spells it.
+	// The provisioning script maps spaces to underscores to find the file.
+	distrustRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,80}$`)
 )
 
 // Validate checks the config for mistakes a user could make.
@@ -290,6 +298,11 @@ func (c *Config) Validate() error {
 	for _, p := range c.Tools.Packages {
 		if !pkgRe.MatchString(p) {
 			return fmt.Errorf("tools.packages entry %q is not a valid apt package name", p)
+		}
+	}
+	for _, d := range c.Network.Distrust {
+		if !distrustRe.MatchString(d) {
+			return fmt.Errorf("network.distrust entry %q is not a root CA name", d)
 		}
 	}
 	for i, h := range c.Network.Allow {

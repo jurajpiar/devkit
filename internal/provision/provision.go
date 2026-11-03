@@ -63,6 +63,7 @@ func render(src string, p Params) (string, error) {
 		NixVersion:    NixVersion,
 		NixArm64SHA:   NixArm64SHA,
 		NixAmd64SHA:   NixAmd64SHA,
+		AuditScript:   AuditScript,
 	}
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
@@ -123,10 +124,18 @@ chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256
 chown "$DEVKIT_USER" {{.DropDir}}
 chmod 700 {{.DropDir}}
 
+# No background apt. The cloud image runs unattended-upgrades and the
+# apt-daily timers at boot; they hold the dpkg lock for as long as their
+# download takes, which blocks this script until Lima's boot timeout. Nothing
+# they fetch could pass the allowlist afterwards anyway.
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
+systemctl stop apt-daily.service apt-daily-upgrade.service >/dev/null 2>&1 || true
+systemctl mask apt-daily.service apt-daily-upgrade.service >/dev/null 2>&1 || true
 # Provisioning runs before the firewall is applied for this boot and before
 # the egress proxy is up, so apt talks to the mirrors directly here. Package
-# signatures are still verified by apt.
-APT="apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false"
+# signatures are still verified by apt. The lock timeout bounds the wait if
+# something still holds the lock, instead of hanging the boot.
+APT="apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false -o DPkg::Lock::Timeout=300"
 # Same for the toolchain manager archives. A stalled download must fail the
 # boot, not hang it.
 CURL=(curl -fsSL --noproxy '*' --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900)
@@ -236,6 +245,46 @@ if [ -n "$WANT_PKGS" ] && [ "$(cat /var/lib/devkit/.packages 2>/dev/null || true
   $APT install -y --no-install-recommends $WANT_PKGS
   echo "$WANT_PKGS" > /var/lib/devkit/.packages
 fi
+
+# ---- trust store: the distro's current bundle, minus network.distrust ----
+# ca-certificates is the source of truth and is refreshed on every boot, so a
+# VM created before a CA was removed upstream catches up on its next start.
+# Runs before the firewall, like apt's other work here; apt verifies it.
+if [ "$MODE" != "none" ]; then
+  ($APT update -q && $APT install -y -q --only-upgrade ca-certificates) >/dev/null 2>&1 \
+    || echo "devkit: could not refresh ca-certificates; keeping the installed bundle" >&2
+fi
+CACONF=/etc/ca-certificates.conf
+# Undo the names applied on the previous boot, then apply this boot's. The
+# names come from devkit.yaml, validated to letters, digits, space . _ ( ) -.
+if [ -f /var/lib/devkit/.distrust ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] && sed -i "s|^!mozilla/$f\.crt\$|mozilla/$f.crt|" "$CACONF"
+  done < /var/lib/devkit/.distrust
+fi
+: > /var/lib/devkit/.distrust
+{{- range .Config.Network.Distrust}}
+n="{{.}}"; f="${n// /_}"; f="${f//./\\.}"
+if grep -q "^!\?mozilla/$f\.crt\$" "$CACONF"; then
+  sed -i "s|^mozilla/$f\.crt\$|!mozilla/$f.crt|" "$CACONF"
+  echo "${n// /_}" >> /var/lib/devkit/.distrust
+else
+  echo "devkit: network.distrust: no root named '$n' in the system bundle" >&2
+fi
+{{- end}}
+update-ca-certificates --fresh >/dev/null 2>&1 || true
+# Runtimes that carry their own root list use the system bundle instead, so
+# the distro's updates and network.distrust apply to them too.
+cat > /etc/profile.d/devkit-trust.sh <<'EOF'
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/certs
+export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+export NODE_OPTIONS="--use-openssl-ca${NODE_OPTIONS:+ $NODE_OPTIONS}"
+EOF
+cat > /usr/local/bin/devkit-audit <<'PYEOF'
+{{.AuditScript}}
+PYEOF
+chmod 755 /usr/local/bin/devkit-audit
 
 # ---- proxy account and proxy environment ----
 id devkit-proxy >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin devkit-proxy
@@ -475,4 +524,5 @@ type templateData struct {
 	EgressBinary, EgressLog, DropDir, ProxyListen, WorkspaceDir, EgressService string
 	MiseVersion, MiseArm64SHA, MiseAmd64SHA                                    string
 	NixVersion, NixArm64SHA, NixAmd64SHA                                       string
+	AuditScript                                                                string
 }

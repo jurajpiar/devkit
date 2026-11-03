@@ -171,6 +171,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 		printBlocked(ctx, name)
 	}
+	// Stale trust is worth a few seconds on every up: a bundled root list in
+	// a runtime or a vendored bundle in the repo does not update itself.
+	fmt.Println()
+	if err := lima.ExecStream(ctx, name, "devkit-audit"); err != nil {
+		fmt.Println("Run 'devkit audit --deep' for the full scan.")
+	}
 
 	fmt.Println()
 	fmt.Printf("Ready. Network: %s\n", describeNetwork(cfg))

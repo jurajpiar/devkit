@@ -166,6 +166,46 @@ func TestSandboxGuarantees(t *testing.T) {
 
 	t.Run("escape attempts", func(t *testing.T) { escapeAttempts(t, s, dir) })
 
+	t.Run("trust audit runs and reads the reference store", func(t *testing.T) {
+		out, _ := s.run("audit")
+		for _, want := range []string{"reference: Mozilla root store", "system bundle:", "node bundled roots", "unused: NODE_OPTIONS=--use-openssl-ca", "project files:"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("audit output missing %q:\n%s", want, out)
+			}
+		}
+		// A fresh VM has nothing stale: Node is on the system store and the
+		// system bundle is the distro's current one.
+		if !strings.Contains(out, "Nothing stale.") {
+			t.Fatalf("a fresh VM should audit clean:\n%s", out)
+		}
+	})
+
+	t.Run("distrusted root is rejected by curl and node", func(t *testing.T) {
+		// objects.githubusercontent.com is on the allowlist and chains to
+		// Let's Encrypt. Distrust both ISRG roots and the TLS handshake must
+		// fail for every client on the system store, Node included.
+		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: false", "allow_host: false\n  distrust: [ISRG Root X1, ISRG Root X2]")
+		s.mustRun("up", "--no-sync", "--no-install")
+		out, _ := s.shell("curl -sS -m 15 -o /dev/null https://objects.githubusercontent.com/ 2>&1; echo exit=$?")
+		if !strings.Contains(out, "certificate") || strings.Contains(out, "exit=0") {
+			t.Fatalf("curl should fail certificate verification under distrust: %s", out)
+		}
+		out, _ = s.shell(`node -e "fetch('https://objects.githubusercontent.com/').then(r=>console.log('reached '+r.status)).catch(e=>console.log('failed: '+(e.cause&&e.cause.code)))"`)
+		if !strings.Contains(out, "failed:") {
+			t.Fatalf("node should use the system store and fail under distrust: %s", out)
+		}
+		out, _ = s.shell("grep -c '^!mozilla/ISRG' /etc/ca-certificates.conf; devkit-audit | grep -c 'distrusted by devkit.yaml'")
+		if !strings.HasPrefix(strings.TrimSpace(out), "2") {
+			t.Fatalf("both roots should be marked in ca-certificates.conf: %s", out)
+		}
+		setYAML(t, filepath.Join(dir, "devkit.yaml"), "\n  distrust: [ISRG Root X1, ISRG Root X2]", "")
+		s.mustRun("up", "--no-sync", "--no-install")
+		out, _ = s.shell("curl -s -m 15 -o /dev/null -w '%{http_code}' https://objects.githubusercontent.com/; echo; grep -c '^!mozilla/ISRG' /etc/ca-certificates.conf; true")
+		if strings.Contains(out, "000") || !strings.Contains(out, "\n0\n") {
+			t.Fatalf("removing the distrust entries should restore trust and clear the conf: %s", out)
+		}
+	})
+
 	t.Run("no sudo", func(t *testing.T) {
 		out, err := s.shell("sudo -n true 2>&1; echo exit=$?")
 		if err != nil || !strings.Contains(out, "exit=1") {

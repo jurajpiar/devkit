@@ -47,6 +47,8 @@ func TestParseRejects(t *testing.T) {
 		"bad manager":     "name: a\ntools:\n  manager: asdf\n",
 		"nix + versions":  "name: a\ntools:\n  manager: nix\n  versions: {node: \"22\"}\n",
 		"backend in key":  "name: a\ntools:\n  versions: {\"aqua:x/y\": \"1\"}\n",
+		"bad distrust":    "name: a\nnetwork:\n  distrust: [\"x; rm -rf /\"]\n",
+		"distrust quote":  "name: a\nnetwork:\n  distrust: ['a\"b']\n",
 		"version inject":  "name: a\ntools:\n  versions: {node: \"22\\\"\\nEOF\\n\"}\n",
 		"bad package":     "name: a\ntools:\n  packages: [\"rm -rf /\"]\n",
 		"bad allow":       "name: a\nnetwork:\n  allow: [\"a b\"]\n",
@@ -137,6 +139,9 @@ func TestAllowGrammar(t *testing.T) {
 	}
 	if c.Network.Allow[0] != "example.com" {
 		t.Errorf("entries should be lower-cased, got %q", c.Network.Allow[0])
+	}
+	if c, err := Parse([]byte("name: a\nnetwork:\n  distrust: [AAA Certificate Services, \"emSign ECC Root CA - G3\"]\n")); err != nil || len(c.Network.Distrust) != 2 {
+		t.Errorf("ordinary distrust names rejected: %v", err)
 	}
 	if _, err := Parse([]byte("name: a\nsource: git\nrepo: git@github.com:org/repo.git\nbranch: feat/x.1\n")); err != nil {
 		t.Errorf("ordinary git url and branch rejected: %v", err)
