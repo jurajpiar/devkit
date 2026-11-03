@@ -122,11 +122,23 @@ chmod 755 /var/log/devkit
 # while its host agent is opening the first SSH session. On some boots that
 # race leaves systemd-logind spinning at 100% CPU with its D-Bus dead, so every
 # SSH login then waits out pam_systemd's timeout and the boot overruns Lima's
-# deadline. Restarting logind clears it; sessions survive a logind restart.
+# deadline. A spinning logind never handles SIGTERM, so a plain restart would
+# first wait out the 90 s stop timeout: kill it outright and start it again.
+# Sessions survive a logind restart.
 if ! timeout 5 loginctl list-sessions >/dev/null 2>&1; then
-  echo "devkit: systemd-logind is unresponsive; restarting it" >&2
-  systemctl restart systemd-logind || true
+  echo "devkit: systemd-logind is unresponsive; killing and restarting it" >&2
+  systemctl kill --signal=SIGKILL systemd-logind.service || true
+  systemctl start systemd-logind.service || true
+  for _ in $(seq 1 20); do
+    timeout 2 loginctl list-sessions >/dev/null 2>&1 && break
+    sleep 0.5
+  done
 fi
+# Lima enables linger for the user in its own boot scripts, but that call
+# fails silently while logind is spinning, and Lima's boot.sh then waits
+# forever for the user manager before the user provisioning. Enable it again
+# now that logind answers; it is idempotent and starts the user manager.
+loginctl enable-linger "$DEVKIT_USER" || true
 
 # ---- policy files, regenerated from devkit.yaml on every boot ----
 # Quoted heredocs: values come from the template, never from shell expansion.
