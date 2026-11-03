@@ -114,6 +114,11 @@ mount, or dial the host over vsock; write to any policy file; and get a file
 back onto the host by rewriting the workspace before `devkit up`. Hypervisor
 escapes are not tested, because no test of ours would find one.
 
+`examples/hostile-project` is the same idea by hand: a project whose code and
+install step try the same escapes and report, line by line, whether each was
+stopped. Run it in any mode to watch the boundary hold, and loosen
+`devkit.yaml` to watch it give way where you told it to.
+
 ## Accepted risks
 
 - **DNS exfiltration.** In `allowlist` and `open` modes DNS to the configured

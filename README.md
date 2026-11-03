@@ -110,6 +110,11 @@ exception: the VM may query its configured resolvers, so a determined program
 can tunnel data through DNS. `none` mode closes that too by rejecting
 everything, DNS included.
 
+To see this for yourself rather than take it on trust, `examples/hostile-project`
+is a project whose code tries to break out and reports, line by line, whether
+each attempt was stopped. Run it, then loosen `devkit.yaml` and watch the
+boundary give way exactly where you told it to.
+
 ## Configuration
 
 `devkit init` writes this file. Edit it and run `devkit up` again to apply; the

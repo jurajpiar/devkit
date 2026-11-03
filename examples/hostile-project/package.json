@@ -1,0 +1,11 @@
+{
+  "name": "devkit-hostile-project",
+  "version": "1.0.0",
+  "description": "A project that tries to escape the devkit sandbox, to prove it cannot",
+  "private": true,
+  "scripts": {
+    "postinstall": "bash ./probe.sh || true",
+    "attack": "bash ./probe.sh"
+  },
+  "license": "MIT"
+}
