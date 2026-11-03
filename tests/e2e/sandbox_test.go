@@ -361,8 +361,12 @@ func TestSandboxGuarantees(t *testing.T) {
 	})
 
 	t.Run("allow_host opens the host", func(t *testing.T) {
+		// Back on allowlist mode: the subtest before this one left the VM
+		// open. Reset in a cleanup so a failure here cannot leak allow_host
+		// into the air-gap subtest, where it would open DNS to the host.
 		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: false", "allow_host: true")
-		s.mustRun("up", "--no-sync", "--no-install")
+		t.Cleanup(func() { setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: true", "allow_host: false") })
+		s.mustRun("up", "--network", "allowlist", "--no-sync", "--no-install")
 		out, _ := s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/2222' 2>&1; echo exit=$?")
 		if !strings.Contains(out, "exit=0") {
 			t.Fatalf("host should be reachable with allow_host: %s", out)
@@ -380,7 +384,6 @@ func TestSandboxGuarantees(t *testing.T) {
 		if !strings.Contains(out, "host.lima.internal") {
 			t.Fatalf("host should bypass the proxy with allow_host: %s", out)
 		}
-		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: true", "allow_host: false")
 	})
 
 	t.Run("air gap", func(t *testing.T) {
