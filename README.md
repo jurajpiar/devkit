@@ -43,20 +43,24 @@ your Go toolchain on first use.
 
 ```bash
 cd my-project
-devkit init         # writes devkit.yaml (Node.js version from .nvmrc or package.json)
-devkit up           # creates the VM, copies the code in, installs dependencies
+devkit init         # detects the languages used, writes devkit.yaml
+devkit up           # creates the VM, copies the code in, installs toolchains and dependencies
 devkit shell        # shell inside the VM, in ~/workspace
 devkit logs         # every host the sandbox tried to reach, allowed or blocked
 devkit rm           # delete the VM and everything in it
 ```
 
 The first `devkit up` downloads the Ubuntu image (about 220 MB, checked
-against a pinned digest) and provisions the machine, which takes a few minutes.
-After that, `up` takes seconds.
+against a pinned digest), provisions the machine and installs the toolchains
+from `tools.versions`, which takes a few minutes. After that, `up` takes
+seconds.
 
-Dependencies are installed from the lockfile only (`npm ci`, `pnpm install
---frozen-lockfile`, `yarn install --frozen-lockfile`). Without a lockfile
-devkit falls back to `npm install` and tells you to commit the result.
+Dependencies are installed from whichever lockfile is present and from nothing
+else: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install
+--frozen-lockfile`, `go mod download`, `cargo fetch --locked`, `uv sync
+--frozen`, `bundle install`, and so on. Set `install:` in `devkit.yaml` when
+the guess is wrong. A Node project without a lockfile gets `npm install` and a
+reminder to commit the result.
 
 To work from VS Code or Cursor, use the Remote-SSH extension and connect to
 `devkit-<name>`. devkit maintains the entry in `~/.ssh/config`; `devkit
@@ -107,9 +111,14 @@ source: copy            # copy | git | mount
 # branch: main
 
 tools:
-  node: "22"            # Node.js major version (22, 24 or 26 are LTS), or omit
+  manager: mise         # mise | nix | none, see Toolchains below
+  versions:             # mise tool: version, seeded by devkit init
+    node: "22"
+    go: "1.27"
   containers: false     # rootless containerd + nerdctl inside the VM
-  # packages: [postgresql-client]
+  packages: [pkg-config]  # extra apt packages
+
+# install: make deps    # replaces the lockfile-based install devkit picks
 
 vm:
   cpus: 4
@@ -158,12 +167,59 @@ bypassing the proxy and its log.
 **Containers** are opt-in. With `containers: true` the VM gets rootless
 containerd and `nerdctl` for databases and services.
 
+## Toolchains
+
+`tools.manager` decides how language toolchains get into the VM. `devkit init`
+picks `mise` unless `--toolchain` or `DEVKIT_TOOLCHAIN` says otherwise, and
+seeds versions from the files it finds: `.nvmrc`, `engines.node`, `go.mod`,
+`rust-toolchain.toml`, `.python-version`, `.ruby-version`, `.java-version`.
+
+| | `mise` | `nix` | `none` |
+|---|---|---|---|
+| What you edit | `tools.versions` in `devkit.yaml` | `flake.nix` in the repo | `tools.packages` |
+| Languages | Node, Go, Python, Ruby, Rust, Java, Zig, Bun, Deno, and CLIs from the aqua registry | Everything in nixpkgs | Whatever Ubuntu 24.04 ships |
+| Pinning | `.devkit/mise.lock`, written by devkit on the first `up` | `flake.lock`, commit it | Ubuntu release |
+| Download verification | Upstream checksums and signatures where published; GitHub attestations for Python and Ruby builds; `rustup-init` is unverified | Every store path checked against the cache's signing key; every input hashed in `flake.lock` | apt signatures |
+| Disk per VM | A 30 MB binary plus each toolchain | A few hundred MB for Nix plus each toolchain's own closure | Nothing extra |
+| Learning curve | None | You will edit `flake.nix` eventually | None |
+
+**mise.** Root installs a pinned, hash-checked mise release at boot and
+locks its settings in `/etc/mise/config.toml`: plugin backends (asdf, vfox)
+are disabled because they are unreviewed shell scripts, provenance is checked
+on every install, and releases younger than three days are skipped. The
+sandbox user then installs `tools.versions` through the audited proxy. The
+first `devkit up` records every download's URL and checksum in
+`.devkit/mise.lock` beside `devkit.yaml`; every later `up` installs with
+`--locked` and refuses anything else. Change a version and run `devkit up
+--relock`. A `mise.toml` or `.nvmrc` in the repository layers on top, as mise
+normally does.
+
+**nix.** Root installs a pinned, hash-checked multi-user Nix once; the daemon
+fetches through the proxy, so `devkit logs` shows it. `devkit init --toolchain
+nix` writes a `flake.nix` with a dev shell for the toolchains it detected,
+unless the repo already has one. `devkit up` evaluates it, and `devkit shell`
+drops you into `nix develop`. If the repo had no `flake.lock`, the one from the
+first evaluation is copied back for you to commit. IDE terminals over SSH are
+not inside the dev shell; run `nix develop` there.
+
+**none.** Only `tools.packages` from apt. Right for C and C++ projects, where
+`build-essential`, `cmake` and `clang` from Ubuntu are usually what you want,
+and for anything else you would rather install by hand with `install:`.
+
+Rust is the weak spot in every column: `rustup-init` is fetched without a
+signature check by mise, and nixpkgs' `rustc` is fine but `rustup` is not
+there. Java through mise checks a catalogue checksum only; prefer
+`packages: [openjdk-21-jdk]` under `none` or `mise` when that matters.
+Solidity tooling is covered by npm (Hardhat) and by `binaries.soliditylang.org`
+for solc, which both Hardhat and Foundry verify; install Foundry with
+`install:` and pin its version.
+
 ## Commands
 
 | Command | Description |
 |---|---|
-| `devkit init [repo-url]` | Write `devkit.yaml`. Flags: `--name`, `--node`, `--network`, `--force` |
-| `devkit up` | Create or start the VM, sync source, install dependencies. Flags: `--network`, `--no-sync`, `--no-install` |
+| `devkit init [repo-url]` | Write `devkit.yaml`. Flags: `--name`, `--toolchain`, `--node`, `--network`, `--force` |
+| `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock` |
 | `devkit shell [cmd]` | Shell in the VM, or run a command |
 | `devkit sync` | Copy the directory again, or `git pull` |
 | `devkit logs [-f] [-n N]` | Egress audit log |
@@ -181,6 +237,9 @@ containerd and `nerdctl` for databases and services.
   applies the firewall and starts the egress proxy. Code in the VM cannot change
   the policy because it has no root. Config values are validated against a
   strict grammar before they reach the script.
+- Toolchain managers are installed by root from release archives pinned by
+  SHA-256 in `internal/provision/provision.go`. The toolchains themselves are
+  installed by the sandbox user, through the proxy, so they show in the log.
 - The egress proxy is a small Go HTTP/CONNECT proxy embedded in the `devkit`
   binary. Root inside the VM copies the staged binary to a private location and
   installs it only if its SHA-256 matches the one recorded at provisioning time.
@@ -193,14 +252,18 @@ containerd and `nerdctl` for databases and services.
 | Resource | Source | Verification |
 |---|---|---|
 | Ubuntu 24.04 Minimal cloud image | cloud-images.ubuntu.com, release pinned in `internal/lima/template.go` | SHA-256 digest pinned; Lima refuses a mismatch |
-| Node.js | NodeSource apt repository for the configured major | apt signature check against NodeSource's key, which is embedded in devkit (fingerprint `6F71 F525 2828 41EE DAF8 51B4 2F59 B5F9 9B1B E0B4`). No remote script is run |
+| mise | GitHub release pinned in `internal/provision/provision.go` | SHA-256 pinned; the pin was taken from the release's `SHASUMS256.txt` after checking its GPG signature (fingerprint `2485 3EC9 F655 CE80 B48E 6C3A 8B81 C9D1 7413 A06D`). No install script is run |
+| Toolchains via mise | nodejs.org, dl.google.com, GitHub releases, as mise documents per tool | mise's per-tool checks (Node: `SHASUMS256.txt` plus OpenPGP; Go: published `.sha256`; Python, Ruby: GitHub attestations), then pinned by URL and checksum in `.devkit/mise.lock` |
+| Nix | releases.nixos.org, version pinned in `internal/provision/provision.go` | SHA-256 pinned, cross-checked against the hash in the official installer |
+| Nix packages | cache.nixos.org, flake inputs | Nix verifies the cache's Ed25519 signature; `flake.lock` pins every input by hash |
 | apt packages | Ubuntu archives | Ubuntu's signing keys shipped in the image |
 | Project dependencies | Whatever the lockfile says, inside the sandbox | Lockfile integrity hashes, enforced by `npm ci` and friends |
 | devkit's own Go modules | proxy.golang.org | `go.sum`; `go mod verify` passes |
 | Lima | Homebrew | Homebrew's bottle checksums |
 
 Bump the image deliberately: update the release path and both digests together
-from the `SHA256SUMS` file for that release.
+from the `SHA256SUMS` file for that release. Bump mise and Nix the same way:
+verify the upstream signature, then change the version and both hashes.
 
 ## Project layout
 
@@ -209,7 +272,7 @@ cmd/devkit            CLI entry point
 cmd/egressproxy       the proxy that runs inside the VM
 internal/app          commands
 internal/project      devkit.yaml schema and validation
-internal/detector     Node.js version detection for devkit init
+internal/detect       language detection for devkit init
 internal/lima         limactl wrapper and instance config rendering
 internal/provision    scripts that run inside the VM (the security policy)
 internal/egressproxy  proxy implementation

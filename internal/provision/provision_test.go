@@ -10,7 +10,8 @@ import (
 func params(mod func(*project.Config)) Params {
 	c := project.Default()
 	c.Name = "test"
-	c.Tools.Node = "22"
+	c.Tools.Manager = project.ManagerMise
+	c.Tools.Versions = map[string]string{"node": "22", "go": "1.27"}
 	if mod != nil {
 		mod(c)
 	}
@@ -25,12 +26,19 @@ func TestSystemScriptAllowlist(t *testing.T) {
 	for _, want := range []string{
 		"MODE=\"allowlist\"",
 		"ALLOW_HOST=0",
-		"EXTRA_ARGS=-allowed=registry.npmjs.org,",
+		"EXTRA_ARGS=-allowed=github.com,",
 		`echo "abc123" > /etc/devkit/egress.sha256`,
-		`NODE_MAJOR="22"`,
-		"signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_${NODE_MAJOR}.x",
-		"-----BEGIN PGP PUBLIC KEY BLOCK-----",
-		"/var/lib/devkit/.node",
+		`MISE_VERSION="` + MiseVersion + `"`,
+		`want="` + MiseArm64SHA + `"`,
+		`want="` + MiseAmd64SHA + `"`,
+		"https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${arch}.tar.xz",
+		`if [ "$got" != "$want" ]; then`,
+		`install -m 755 -o root -g root "$tmp/mise/bin/mise" /usr/local/bin/mise`,
+		`disable_backends = ["asdf", "vfox"]`,
+		"paranoid = true",
+		`lockfile_platforms = ["linux-arm64", "linux-x64"]`,
+		`trusted_config_paths = ["$DEVKIT_HOME/workspace"]`,
+		`export PATH="$HOME/.local/share/mise/shims:$PATH"`,
 		"--uid-owner devkit-proxy -j ACCEPT",
 		"rm -f /etc/sudoers.d/90-cloud-init-users",
 		"NOPASSWD: DEVKIT_LIMA",
@@ -55,7 +63,7 @@ func TestSystemScriptAllowlist(t *testing.T) {
 	if strings.Contains(s, "NOPASSWD:ALL") {
 		t.Error("full sudo must not be granted by default")
 	}
-	for _, bad := range []string{"curl -fsSL \"https://deb.nodesource.com", "| bash", "sha256sum \"$f\""} {
+	for _, bad := range []string{"nodesource", "| bash", "| sh", "sha256sum \"$f\"", "releases.nixos.org"} {
 		if strings.Contains(s, bad) {
 			t.Errorf("system script must not contain %q", bad)
 		}
@@ -74,7 +82,8 @@ func TestSystemScriptOpenAndSudo(t *testing.T) {
 		c.Network.Mode = project.NetworkOpen
 		c.Network.AllowHost = true
 		c.Sudo = true
-		c.Tools.Node = ""
+		c.Tools.Manager = project.ManagerNone
+		c.Tools.Versions = nil
 		c.Tools.Packages = []string{"postgresql-client", "jq"}
 	}))
 	if err != nil {
@@ -95,8 +104,13 @@ func TestSystemScriptOpenAndSudo(t *testing.T) {
 			t.Errorf("system script missing %q", want)
 		}
 	}
-	if strings.Contains(s, "nodesource") {
-		t.Error("node must not be installed when tools.node is empty")
+	for _, bad := range []string{"MISE_VERSION=", "NIX_VERSION=", "github.com/jdx/mise"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("manager: none must not install a toolchain manager; found %q", bad)
+		}
+	}
+	if !strings.Contains(s, "rm -f /etc/profile.d/devkit-mise.sh") {
+		t.Error("switching away from mise must drop its profile hook")
 	}
 	if strings.Contains(s, "open) ;;") {
 		t.Error("open mode must not leave the OUTPUT chain unrestricted")
@@ -130,6 +144,43 @@ func TestSystemScriptNone(t *testing.T) {
 	}
 }
 
+func TestSystemScriptNix(t *testing.T) {
+	s, err := System(params(func(c *project.Config) {
+		c.Tools.Manager = project.ManagerNix
+		c.Tools.Versions = nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`NIX_VERSION="` + NixVersion + `"`,
+		`want="` + NixArm64SHA + `"`,
+		`want="` + NixAmd64SHA + `"`,
+		"https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${sys}.tar.xz",
+		`echo "devkit: refused Nix ${NIX_VERSION} with hash $got (expected $want)"`,
+		"--daemon --yes --no-channel-add --no-modify-profile",
+		"experimental-features = nix-command flakes",
+		"/etc/systemd/system/nix-daemon.service.d/devkit-proxy.conf",
+		"Environment=HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL",
+		". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("nix system script missing %q", want)
+		}
+	}
+	if strings.Contains(s, "MISE_VERSION=") {
+		t.Error("nix mode must not install mise")
+	}
+	// The download must run before the proxy is up and never through it.
+	if !strings.Contains(s, `curl -fsSL --noproxy '*' -o "$tmp/nix.tar.xz"`) {
+		t.Error("nix archive must be fetched directly, like apt during provisioning")
+	}
+	u, _ := User(params(func(c *project.Config) { c.Tools.Manager = project.ManagerNix; c.Tools.Versions = nil }))
+	if strings.Contains(u, "mise") {
+		t.Error("nix mode must not write a mise config")
+	}
+}
+
 func TestUserScript(t *testing.T) {
 	s, err := User(params(nil))
 	if err != nil {
@@ -137,6 +188,16 @@ func TestUserScript(t *testing.T) {
 	}
 	if !strings.Contains(s, `mkdir -p "$HOME/workspace"`) {
 		t.Errorf("copy mode should create the workspace: %s", s)
+	}
+	// Versions are written through a quoted heredoc, sorted, one per line.
+	for _, want := range []string{
+		`cat > "$HOME/.config/mise/config.toml" <<'EOF'`,
+		"lockfile = true",
+		"[tools]\ngo = \"1.27\"\nnode = \"22\"\nEOF",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("user script missing %q:\n%s", want, s)
+		}
 	}
 	s, _ = User(params(func(c *project.Config) { c.Source = project.SourceMount }))
 	if !strings.Contains(s, `ln -s "/Users/alice/proj" "$HOME/workspace"`) {

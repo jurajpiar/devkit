@@ -43,7 +43,11 @@ func TestParseRejects(t *testing.T) {
 		"bad source":      "name: a\nsource: docker\n",
 		"bad mode":        "name: a\nnetwork:\n  mode: paranoid\n",
 		"bad port":        "name: a\nssh_port: 22\n",
-		"bad node":        "name: a\ntools:\n  node: latest\n",
+		"bad node":        "name: a\ntools:\n  node: \"22; id\"\n",
+		"bad manager":     "name: a\ntools:\n  manager: asdf\n",
+		"nix + versions":  "name: a\ntools:\n  manager: nix\n  versions: {node: \"22\"}\n",
+		"backend in key":  "name: a\ntools:\n  versions: {\"aqua:x/y\": \"1\"}\n",
+		"version inject":  "name: a\ntools:\n  versions: {node: \"22\\\"\\nEOF\\n\"}\n",
 		"bad package":     "name: a\ntools:\n  packages: [\"rm -rf /\"]\n",
 		"bad allow":       "name: a\nnetwork:\n  allow: [\"a b\"]\n",
 		"allow injection": "name: a\nnetwork:\n  allow: [\"$(touch${IFS}/tmp/pwn)\"]\n",
@@ -61,6 +65,33 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
+func TestToolsDefaults(t *testing.T) {
+	c, err := Parse([]byte("name: a\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Tools.Manager != ManagerNone || len(c.Tools.Versions) != 0 {
+		t.Fatalf("no versions should mean no manager: %+v", c.Tools)
+	}
+	c, err = Parse([]byte("name: a\ntools:\n  node: \"22\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Tools.Manager != ManagerMise || c.Tools.Versions["node"] != "22" || c.Tools.Node != "" {
+		t.Fatalf("tools.node should become versions.node under mise: %+v", c.Tools)
+	}
+	c, err = Parse([]byte("name: a\ntools:\n  node: \"20\"\n  versions: {node: \"22\", go: \"1.27\"}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Tools.Versions["node"] != "22" {
+		t.Fatal("versions.node should win over the shorthand")
+	}
+	if _, err := Parse([]byte("name: a\ntools:\n  manager: nix\n")); err != nil {
+		t.Fatalf("nix without versions must be valid: %v", err)
+	}
+}
+
 func TestExplicitEmptyAllowIsKept(t *testing.T) {
 	c, err := Parse([]byte("name: a\nnetwork:\n  mode: allowlist\n  allow: []\n"))
 	if err != nil {
@@ -74,7 +105,9 @@ func TestExplicitEmptyAllowIsKept(t *testing.T) {
 func TestSaveLoadRoundTrip(t *testing.T) {
 	c := Default()
 	c.Name = "round-trip"
-	c.Tools.Node = "20"
+	c.Tools.Manager = ManagerMise
+	c.Tools.Versions = map[string]string{"node": "20"}
+	c.Install = "make deps"
 	c.Network.Mode = NetworkNone
 	path := filepath.Join(t.TempDir(), "devkit.yaml")
 	if err := c.Save(path); err != nil {
@@ -84,7 +117,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != c.Name || got.Tools.Node != "20" || got.Network.Mode != NetworkNone {
+	if got.Name != c.Name || got.Tools.Manager != ManagerMise || got.Tools.Versions["node"] != "20" ||
+		got.Install != "make deps" || got.Network.Mode != NetworkNone {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 }

@@ -51,13 +51,18 @@ func render(src string, p Params) (string, error) {
 	}
 	data := templateData{
 		Params:        p,
-		NodeSourceKey: nodeSourceKey,
 		EgressBinary:  EgressBinary,
 		EgressLog:     EgressLog,
 		DropDir:       DropDir,
 		ProxyListen:   ProxyListen,
 		WorkspaceDir:  WorkspaceDir,
 		EgressService: EgressService,
+		MiseVersion:   MiseVersion,
+		MiseArm64SHA:  MiseArm64SHA,
+		MiseAmd64SHA:  MiseAmd64SHA,
+		NixVersion:    NixVersion,
+		NixArm64SHA:   NixArm64SHA,
+		NixAmd64SHA:   NixAmd64SHA,
 	}
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
@@ -65,6 +70,24 @@ func render(src string, p Params) (string, error) {
 	}
 	return buf.String(), nil
 }
+
+// Toolchain managers are installed by root from release archives pinned by
+// SHA-256. Bump deliberately and re-verify the upstream signature.
+const (
+	// mise: hashes are from the release's SHASUMS256.txt, whose GPG
+	// signature by "mise releases <release@mise.jdx.dev>" (fingerprint
+	// 2485 3EC9 F655 CE80 B48E 6C3A 8B81 C9D1 7413 A06D) was verified when
+	// this pin was made. The release was at least two weeks old at the time.
+	MiseVersion  = "v2026.10.15"
+	MiseArm64SHA = "d14b44dffea91562ff0611e4ae33472088224da5778a4d071d60e87d463942ff"
+	MiseAmd64SHA = "4cf6fcd45b730e0c48c59b9a056ed6701be14abf44f999d69aa70afd1004fc32"
+	// Nix: hashes are the ones embedded in the official installer at
+	// https://nixos.org/nix/install for this version, cross-checked against
+	// a download of the aarch64 archive.
+	NixVersion  = "2.35.4"
+	NixArm64SHA = "14a940a2d0ae5b2c623dc2ca168311c9367fd4bc416f6ded0c1087089d6de934"
+	NixAmd64SHA = "ff66236d2f7e2a21f3350e73668e021ac6a8881ef277a38e16e952bfb22718c3"
+)
 
 // Guest paths shared with the CLI.
 const (
@@ -109,29 +132,98 @@ APT="apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false"
 if [ ! -f /var/lib/devkit/.base ]; then
   $APT update
   $APT install -y --no-install-recommends \
-    git curl ca-certificates build-essential iptables openssh-client unzip rsync python3
+    git curl ca-certificates build-essential iptables openssh-client unzip xz-utils rsync python3
   touch /var/lib/devkit/.base
 fi
-{{- if .Config.Tools.Node}}
+DEVKIT_HOME="$(getent passwd "$DEVKIT_USER" | cut -d: -f6)"
+{{- if eq .Config.Tools.Manager "mise"}}
 
-# ---- Node.js from NodeSource's apt repository (re-run when the major changes) ----
-# The repository signing key is embedded, not downloaded, so no remote script
-# is ever executed. Key: NodeSource, fingerprint
-# 6F71 F525 2828 41EE DAF8 51B4 2F59 B5F9 9B1B E0B4. apt verifies every package.
-NODE_MAJOR="{{.Config.Tools.Node}}"
-if [ "$(cat /var/lib/devkit/.node 2>/dev/null || true)" != "$NODE_MAJOR" ]; then
-  install -d -m 755 /etc/apt/keyrings
-  cat > /etc/apt/keyrings/nodesource.asc <<'EOF'
-{{.NodeSourceKey}}
-EOF
-  chmod 644 /etc/apt/keyrings/nodesource.asc
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-    > /etc/apt/sources.list.d/nodesource.list
-  $APT update
-  $APT install -y --allow-downgrades nodejs
-  corepack enable || true
-  echo "$NODE_MAJOR" > /var/lib/devkit/.node
+# ---- mise, the toolchain manager: pinned release, verified by SHA-256 ----
+# The hashes are from the release's signed SHASUMS256.txt (see provision.go).
+# Toolchains themselves are installed later by the sandbox user through the
+# audited proxy; mise verifies each against upstream checksums or signatures.
+MISE_VERSION="{{.MiseVersion}}"
+if [ "$(cat /var/lib/devkit/.mise 2>/dev/null || true)" != "$MISE_VERSION" ]; then
+  case "$(uname -m)" in
+    aarch64) arch=arm64; want="{{.MiseArm64SHA}}" ;;
+    x86_64)  arch=x64;   want="{{.MiseAmd64SHA}}" ;;
+    *) echo "devkit: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+  esac
+  tmp="$(mktemp -d /var/lib/devkit/mise.XXXXXX)"
+  curl -fsSL --noproxy '*' -o "$tmp/mise.tar.xz" \
+    "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${arch}.tar.xz"
+  got="$(sha256sum "$tmp/mise.tar.xz" | awk '{print $1}')"
+  if [ "$got" != "$want" ]; then
+    echo "devkit: refused mise ${MISE_VERSION} with hash $got (expected $want)" >&2
+    rm -rf "$tmp"; exit 1
+  fi
+  tar -xJf "$tmp/mise.tar.xz" -C "$tmp"
+  install -m 755 -o root -g root "$tmp/mise/bin/mise" /usr/local/bin/mise
+  rm -rf "$tmp"
+  echo "$MISE_VERSION" > /var/lib/devkit/.mise
 fi
+# System settings the sandbox user cannot loosen: no plugin backends (they
+# are unreviewed shell scripts), provenance checked on every install, and
+# repository config files trusted only under the workspace.
+install -d -m 755 /etc/mise
+cat > /etc/mise/config.toml <<EOF
+# Written by devkit on every boot.
+[settings]
+disable_backends = ["asdf", "vfox"]
+paranoid = true
+trusted_config_paths = ["$DEVKIT_HOME/{{.WorkspaceDir}}"]
+minimum_release_age = "72h"
+# The VM is glibc Linux; locking other platforms would fetch checksums from
+# hosts outside the allowlist for nothing.
+lockfile_platforms = ["linux-arm64", "linux-x64"]
+idiomatic_version_file_enable_tools = ["node", "go", "python", "ruby", "java", "rust"]
+EOF
+chmod 644 /etc/mise/config.toml
+cat > /etc/profile.d/devkit-mise.sh <<'EOF'
+export PATH="$HOME/.local/share/mise/shims:$PATH"
+EOF
+{{- else}}
+rm -f /etc/profile.d/devkit-mise.sh
+{{- end}}
+{{- if eq .Config.Tools.Manager "nix"}}
+
+# ---- Nix (multi-user): pinned release, verified by SHA-256 ----
+# Installed once. The daemon fetches through the audited proxy; substitutes
+# from cache.nixos.org are checked against the cache's signing key by Nix.
+NIX_VERSION="{{.NixVersion}}"
+if [ ! -f /var/lib/devkit/.nix ]; then
+  case "$(uname -m)" in
+    aarch64) sys=aarch64-linux; want="{{.NixArm64SHA}}" ;;
+    x86_64)  sys=x86_64-linux;  want="{{.NixAmd64SHA}}" ;;
+    *) echo "devkit: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+  esac
+  tmp="$(mktemp -d /var/lib/devkit/nix.XXXXXX)"
+  curl -fsSL --noproxy '*' -o "$tmp/nix.tar.xz" \
+    "https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${sys}.tar.xz"
+  got="$(sha256sum "$tmp/nix.tar.xz" | awk '{print $1}')"
+  if [ "$got" != "$want" ]; then
+    echo "devkit: refused Nix ${NIX_VERSION} with hash $got (expected $want)" >&2
+    rm -rf "$tmp"; exit 1
+  fi
+  tar -xJf "$tmp/nix.tar.xz" -C "$tmp"
+  cat > "$tmp/extra.conf" <<'EOF'
+experimental-features = nix-command flakes
+sandbox = true
+EOF
+  "$tmp/nix-${NIX_VERSION}-${sys}/install" --daemon --yes --no-channel-add --no-modify-profile \
+    --nix-extra-conf-file "$tmp/extra.conf"
+  rm -rf "$tmp"
+  echo "$NIX_VERSION" > /var/lib/devkit/.nix
+elif [ "$(cat /var/lib/devkit/.nix)" != "$NIX_VERSION" ]; then
+  echo "devkit: Nix $(cat /var/lib/devkit/.nix) is installed; devkit now pins ${NIX_VERSION}. Recreate the VM (devkit rm) to upgrade." >&2
+fi
+cat > /etc/profile.d/devkit-nix.sh <<'EOF'
+if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
+  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+fi
+EOF
+{{- else}}
+rm -f /etc/profile.d/devkit-nix.sh
 {{- end}}
 
 # ---- extra packages (re-run only when the list changes) ----
@@ -170,6 +262,23 @@ else
   rm -f /etc/profile.d/devkit-proxy.sh /etc/apt/apt.conf.d/99devkit-proxy
   sed -i '/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d' /etc/environment
 fi
+{{- if eq .Config.Tools.Manager "nix"}}
+# The Nix daemon does the downloading, so it needs the proxy too. Nix passes
+# the proxy variables into fixed-output builds, which is where flake inputs
+# and source tarballs are fetched.
+install -d -m 755 /etc/systemd/system/nix-daemon.service.d
+if [ "$MODE" != "none" ]; then
+  cat > /etc/systemd/system/nix-daemon.service.d/devkit-proxy.conf <<EOF
+[Service]
+Environment=HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL http_proxy=$PROXY_URL https_proxy=$PROXY_URL
+Environment=NO_PROXY=$NO_PROXY_HOSTS no_proxy=$NO_PROXY_HOSTS
+EOF
+else
+  rm -f /etc/systemd/system/nix-daemon.service.d/devkit-proxy.conf
+fi
+systemctl daemon-reload
+systemctl try-restart nix-daemon.service 2>/dev/null || true
+{{- end}}
 
 # ---- sudo ----
 # Lima's host agent confirms boot by running three read-only commands with
@@ -340,48 +449,27 @@ fi
 {{- else}}
 mkdir -p "$HOME/{{.WorkspaceDir}}"
 {{- end}}
+{{- if eq .Config.Tools.Manager "mise"}}
+# Toolchain versions from devkit.yaml. The lockfile beside this file pins
+# what they resolved to; devkit keeps a copy on the host in .devkit/.
+install -d -m 700 "$HOME/.config/mise"
+cat > "$HOME/.config/mise/config.toml" <<'EOF'
+# Written by devkit from devkit.yaml on every boot. Edit devkit.yaml instead.
+[settings]
+lockfile = true
+
+[tools]
+{{- range $tool, $version := .Config.Tools.Versions}}
+{{$tool}} = "{{$version}}"
+{{- end}}
+EOF
+{{- end}}
 `
 
 // templateData wraps Params with the constants so templates can reference them.
 type templateData struct {
 	Params
-	NodeSourceKey                                                              string
 	EgressBinary, EgressLog, DropDir, ProxyListen, WorkspaceDir, EgressService string
+	MiseVersion, MiseArm64SHA, MiseAmd64SHA                                    string
+	NixVersion, NixArm64SHA, NixAmd64SHA                                       string
 }
-
-// nodeSourceKey is NodeSource's apt repository signing key, embedded so the
-// guest never fetches or runs anything unsigned to install Node.js.
-//
-// Fetched from https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key;
-// fingerprint 6F71 F525 2828 41EE DAF8 51B4 2F59 B5F9 9B1B E0B4 (key ID
-// 2F59B5F99B1BE0B4). Verify with: gpg --show-keys --with-fingerprint <file>
-const nodeSourceKey = `-----BEGIN PGP PUBLIC KEY BLOCK-----
-
-mQENBFdDN1ABCADaNd/I3j3tn40deQNgz7hB2NvT+syXe6k4ZmdiEcOfBvFrkS8B
-hNS67t93etHsxEy7E0qwsZH32bKazMqe9zDwoa3aVImryjh6SHC9lMtW27JPHFeM
-Srkt9YmH1WMwWcRO6eSY9B3PpazquhnvbammLuUojXRIxkDroy6Fw4UKmUNSRr32
-9Ej87jRoR1B2/57Kfp2Y4+vFGGzSvh3AFQpBHq51qsNHALU6+8PjLfIt+5TPvaWR
-TB+kAZnQZkaIQM2nr1n3oj6ak2RATY/+kjLizgFWzgEfbCrbsyq68UoY5FPBnu4Z
-E3iDZpaIqwKr0seUC7iA1xM5eHi5kty1oB7HABEBAAG0Ik5Tb2xpZCA8bnNvbGlk
-LWdwZ0Bub2Rlc291cmNlLmNvbT6JAU4EEwEKADgCGwMCHgECF4AWIQRvcfUlKChB
-7tr4UbQvWbX5mxvgtAUCaWfGnwULCQgHAgYVCgkICwIEFgIDAQAKCRAvWbX5mxvg
-tL0CB/0TTur63uXTPbq+JBQET6jnEVaDrNmpHI/z2RMuj163gmy9CtCwG060c+TI
-qzmzlPacbTkGc5C50teX2mhs+5JIthfhMibR6Dgy0zeSVuvt9WJ3TNWBpoW5Ezka
-17SA3Xv9UEJS2eyRd7ALf7TGGAj8DG+xRABXl6bJIXh1s7Hki7kwgVrpNxm/EqyX
-OrzExm0g2UjgdkbnZrnTyZMB6X8f8fZPo0QcByPvLee2DtkKeE+SZlFXyvnCzcw0
-94K45vlWkEdRzmiiWAG7guzZyZYGcCO5EoJ3LUP90qhrmQUfsbtczeoEW17EW1jM
-RohLo8BqVyYc1CAFlULIDNeS3aipuQENBFdDN1ABCACq02gutmss6jiD2u50vdAR
-x3JOGd92trWRf7qH9/MTToslhoU/LiXhaE0x5+UkKuRbcruCtytn226brvwD0BdO
-QGpY81ZAxjTFuKUpIDmrHcrI/N9XLrLKx19kWEttsIPNJOgvx8JoeReOX2hLjcbF
-fmz8e6D1K7eZ+hjMfOLxD94tfhQwYtKbfwf0JwxQV5ItQRryd+X+TcA3nyvFWiJ8
-Vz92Tf1iG7Z+XasaaZFf2JDuxoiZaSZY7va395ClCEMykFsRbGwgDyB6Fr+6x/UU
-sYA4rYV7RumIOUdWngWyWjzVy/cKSWASW4jI5ABWs+AfeRTqmZt6+6B7oIghrB19
-ABEBAAGJAR8EGAECAAkFAldDN1ACGwwACgkQL1m1+Zsb4LRPzgf9FTfPA0d2N37q
-su5av3bYZJ+w6pvWF3aK2Zdy9ednhCBfPNmhvBRN6mXWixo0DuKEoQMjVpkX0hrq
-B9FxEVwCPZ9K/JuJgzMROq7T+7R3rcv+TPMdwk8rjIMeRiw2hFLwbrJ0w/v7/3wT
-MESv3GfXbuT0huEedK7bLfqGMgtmqMeCNkoI7Rf3GO2xArGQ6Zc2rTd4L9+D5HHS
-IPEixwFZS+Debc7pg3os0bKXEsqMtitvocClOAuPnXpCy04PK450UTr6ZVdirWhJ
-Oq8SrSERQwqEJ4PMHybiDKwzSr6mcBURre3G71uTAp7h/DISLTpfVMadcB6eoLWr
-/4fBqejAWg==
-=wh5k
------END PGP PUBLIC KEY BLOCK-----`

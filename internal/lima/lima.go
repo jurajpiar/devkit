@@ -161,6 +161,12 @@ func CopyTo(ctx context.Context, name, src, dst string) error {
 	return err
 }
 
+// CopyFrom copies a file out of the VM onto the host.
+func CopyFrom(ctx context.Context, name, src, dst string) error {
+	_, err := run(ctx, "copy", name+":"+src, dst)
+	return err
+}
+
 // PipeTar streams a tar archive from the host into a directory in the VM.
 // The archive is produced by `tar -C srcDir -cf - .` with the given excludes.
 func PipeTar(ctx context.Context, name, srcDir, guestDir string, excludes []string) error {

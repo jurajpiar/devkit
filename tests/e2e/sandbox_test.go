@@ -100,6 +100,23 @@ func TestSandboxGuarantees(t *testing.T) {
 		}
 	})
 
+	t.Run("toolchain lockfile recorded and enforced", func(t *testing.T) {
+		lock, err := os.ReadFile(filepath.Join(dir, ".devkit", "mise.lock"))
+		if err != nil || !strings.Contains(string(lock), "[[tools.node]]") || !strings.Contains(string(lock), "checksum = \"sha256:") {
+			t.Fatalf("first up should record node's checksum in .devkit/mise.lock: %v\n%s", err, lock)
+		}
+		out := s.mustRun("up", "--no-sync", "--no-install")
+		if !strings.Contains(out, "pinned by .devkit/mise.lock") {
+			t.Fatalf("second up should install from the lockfile:\n%s", out)
+		}
+		// The sandbox user cannot loosen the manager's settings: they are
+		// root-owned, and plugin backends stay off.
+		out, _ = s.shell("mise settings get disable_backends; mise settings get paranoid; ls -l /etc/mise/config.toml")
+		if !strings.Contains(out, "asdf") || !strings.Contains(out, "true") || !strings.Contains(out, "root root") {
+			t.Fatalf("mise settings should be pinned by root: %s", out)
+		}
+	})
+
 	t.Run("no sudo", func(t *testing.T) {
 		out, err := s.shell("sudo -n true 2>&1; echo exit=$?")
 		if err != nil || !strings.Contains(out, "exit=1") {
@@ -186,6 +203,54 @@ func TestSandboxGuarantees(t *testing.T) {
 			t.Fatalf("DNS should fail when air-gapped: %s", out)
 		}
 	})
+}
+
+// TestNixToolchain builds a second VM with manager: nix. It downloads Nix
+// and a nodejs closure from cache.nixos.org, so it is gated separately.
+func TestNixToolchain(t *testing.T) {
+	if os.Getenv("DEVKIT_E2E_NIX") == "" {
+		t.Skip("set DEVKIT_E2E_NIX=1 to run (creates a real VM and installs Nix)")
+	}
+	if _, err := exec.LookPath("limactl"); err != nil {
+		t.Skip("limactl not installed")
+	}
+	devkit := buildDevkitBinary(t)
+	dir := t.TempDir()
+	name := fmt.Sprintf("e2enix-%d", time.Now().Unix()%100000)
+	s := &sandbox{t: t, devkit: devkit, dir: dir, name: name}
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"e2e","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}`)
+	writeFile(t, filepath.Join(dir, ".nvmrc"), "22\n")
+
+	s.mustRun("init", "--name", name, "--toolchain", "nix")
+	t.Cleanup(func() { _, _ = s.run("rm", "--force") })
+	if flake, err := os.ReadFile(filepath.Join(dir, "flake.nix")); err != nil || !strings.Contains(string(flake), "nodejs_22") {
+		t.Fatalf("init should write a flake with the detected node: %v\n%s", err, flake)
+	}
+
+	start := time.Now()
+	s.mustRun("up")
+	t.Logf("devkit up took %s", time.Since(start).Round(time.Second))
+
+	if _, err := os.Stat(filepath.Join(dir, "flake.lock")); err != nil {
+		t.Fatal("up should copy flake.lock back to the project")
+	}
+	out, err := s.shell("node --version && test -d node_modules/is-odd && echo deps-ok")
+	if err != nil || !strings.Contains(out, "v22.") || !strings.Contains(out, "deps-ok") {
+		t.Fatalf("node from the dev shell and deps expected: %v\n%s", err, out)
+	}
+	// Outside the dev shell there is no node: the toolchain lives in the store.
+	out, _ = s.run("shell", "bash", "-c", "'command -v node || echo no-node'")
+	if !strings.Contains(out, "node") {
+		t.Fatalf("unexpected: %s", out)
+	}
+	logs := s.mustRun("logs")
+	if !strings.Contains(logs, "cache.nixos.org") {
+		t.Fatalf("nix downloads should go through the audited proxy:\n%s", logs)
+	}
+	out, _ = s.shell("sudo -n true 2>&1; echo exit=$?")
+	if !strings.Contains(out, "exit=1") {
+		t.Fatalf("sudo should be unavailable: %s", out)
+	}
 }
 
 // setYAML replaces one line fragment in devkit.yaml in place.
