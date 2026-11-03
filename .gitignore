@@ -13,3 +13,6 @@ internal/embedded/bin/egressproxy-*
 # Go
 *.test
 *.out
+
+# Test and session logs never belong in the repo
+*.log

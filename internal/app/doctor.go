@@ -40,8 +40,7 @@ var doctorCmd = &cobra.Command{
 		_, err := egressProxyBinary(cmd.Context())
 		check(err == nil, "egress proxy binary available", "run 'make build' in the devkit checkout, or install Go")
 
-		home, _ := os.UserHomeDir()
-		switch _, keyErr := os.Stat(filepath.Join(home, ".lima", "_config", "user")); {
+		switch _, keyErr := os.Stat(filepath.Join(lima.Home(), "_config", "user")); {
 		case keyErr == nil:
 			check(true, "Lima SSH key present", "")
 		case os.IsNotExist(keyErr):
