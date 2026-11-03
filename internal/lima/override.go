@@ -19,11 +19,7 @@ var proxyVars = []string{"http_proxy", "https_proxy", "ftp_proxy", "no_proxy", "
 // win against it; a proxy there would land in Lima's /etc/environment block,
 // behind devkit's own settings, and change on every boot.
 func CheckOverride() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	return CheckOverrideFile(filepath.Join(home, ".lima", "_config", "override.yaml"))
+	return CheckOverrideFile(filepath.Join(Home(), "_config", "override.yaml"))
 }
 
 // CheckOverrideFile is CheckOverride for a given file; a missing file is fine.

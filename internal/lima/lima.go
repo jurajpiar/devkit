@@ -80,15 +80,25 @@ func Get(ctx context.Context, name string) (*Instance, error) {
 	return nil, nil
 }
 
-// Dir returns the instance directory (~/.lima/<name>).
+// Dir returns the instance directory under Lima's home.
 func Dir(name string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".lima", name)
+	return filepath.Join(Home(), name)
 }
 
-// ConfigPath returns the instance's lima.yaml.
+// Home is Lima's data directory, resolved the way limactl does it: LIMA_HOME
+// when set, otherwise ~/.lima. Every path devkit derives from it must agree
+// with limactl, or a check reads one file while Lima uses another.
+func Home() string {
+	if h := os.Getenv("LIMA_HOME"); h != "" {
+		return h
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".lima")
+}
+
+// ConfigPath is the instance's lima.yaml.
 func ConfigPath(name string) string {
-	return filepath.Join(Dir(name), "lima.yaml")
+	return filepath.Join(Home(), name, "lima.yaml")
 }
 
 // Create registers a new instance from a config file without starting it.

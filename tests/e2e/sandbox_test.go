@@ -252,11 +252,18 @@ func TestSandboxGuarantees(t *testing.T) {
 		// in /etc/environment, behind devkit's own settings, and the block
 		// would then differ on every boot. Reboot with one set and check
 		// that the file is byte-identical and the block carries no proxy.
+		// up alone would leave a running VM with an unchanged config as it
+		// is, so stop it first and prove the reboot happened by the boot id.
 		before, _ := s.shell("md5sum /etc/environment")
+		boot, _ := s.shell("cat /proc/sys/kernel/random/boot_id")
+		s.mustRun("down")
 		for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
 			t.Setenv(k, "http://host-proxy.invalid:3128")
 		}
 		s.mustRun("up", "--no-sync", "--no-install")
+		if b, _ := s.shell("cat /proc/sys/kernel/random/boot_id"); b == boot || strings.TrimSpace(b) == "" {
+			t.Fatalf("VM did not reboot (boot_id %q then %q)", strings.TrimSpace(boot), strings.TrimSpace(b))
+		}
 		after, _ := s.shell("md5sum /etc/environment")
 		if before != after || !strings.Contains(before, "/etc/environment") {
 			t.Fatalf("/etc/environment changed across a reboot with a host proxy set:\n%s\n%s", before, after)

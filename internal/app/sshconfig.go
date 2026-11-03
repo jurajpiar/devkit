@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jurajpiar/devkit/internal/lima"
 	"github.com/jurajpiar/devkit/internal/project"
 )
 
@@ -15,7 +16,6 @@ func sshConfigPath() string {
 }
 
 func sshBlock(cfg *project.Config) string {
-	home, _ := os.UserHomeDir()
 	return fmt.Sprintf(`# BEGIN devkit %[1]s (managed by devkit, do not edit)
 Host %[2]s
   HostName 127.0.0.1
@@ -30,7 +30,7 @@ Host %[2]s
 # Reset the scope so settings that follow in this file stay global.
 Host *
 # END devkit %[1]s
-`, cfg.Name, cfg.SSHHost(), cfg.SSHPort, hostUser(), filepath.Join(home, ".lima", "_config", "user"))
+`, cfg.Name, cfg.SSHHost(), cfg.SSHPort, hostUser(), filepath.Join(lima.Home(), "_config", "user"))
 }
 
 // writeSSHConfig adds or replaces the project's Host block in ~/.ssh/config.
