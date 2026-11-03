@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
+}
+
 func TestHomeFollowsLimaHome(t *testing.T) {
 	t.Setenv("LIMA_HOME", "/tmp/elsewhere")
 	if got := Home(); got != "/tmp/elsewhere" {
@@ -28,6 +37,12 @@ func TestHomeFollowsLimaHome(t *testing.T) {
 	t.Setenv("LIMA_HOME", filepath.Join(link, "_config", ".."))
 	if got := Home(); got != real {
 		t.Errorf("Home() through a symlink = %q, want %q", got, real)
+	}
+	// A relative LIMA_HOME is made absolute, so the path persisted in the
+	// SSH config does not depend on the directory devkit up ran in.
+	t.Setenv("LIMA_HOME", "rel/lima")
+	if got, want := Home(), filepath.Join(mustGetwd(t), "rel", "lima"); got != want {
+		t.Errorf("Home() with a relative LIMA_HOME = %q, want %q", got, want)
 	}
 	t.Setenv("LIMA_HOME", "")
 	if got := Home(); filepath.Base(got) != ".lima" {

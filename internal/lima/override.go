@@ -10,8 +10,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// proxyVars are the keys Lima copies into the guest's /etc/environment block.
+// proxyVars are the keys Lima itself derives from the host (limactl's
+// environment or the macOS proxy settings) and drops when set to "" in env.
 var proxyVars = []string{"http_proxy", "https_proxy", "ftp_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "NO_PROXY"}
+
+// overrideProxyVars adds the names Lima never generates but copies verbatim
+// from an override's env map. Setting them to "" in the template would not
+// drop them, it would write an empty assignment, so they are only refused.
+var overrideProxyVars = append([]string{"all_proxy", "ALL_PROXY"}, proxyVars...)
 
 // CheckOverride refuses to continue when ~/.lima/_config/override.yaml would
 // put a host proxy into the guest. That file takes precedence over the
@@ -42,7 +48,7 @@ func CheckOverrideFile(path string) error {
 	if doc.PropagateProxyEnv != nil && *doc.PropagateProxyEnv {
 		bad = append(bad, "propagateProxyEnv: true")
 	}
-	for _, k := range proxyVars {
+	for _, k := range overrideProxyVars {
 		if v, ok := doc.Env[k]; ok && v != "" {
 			bad = append(bad, "env."+k)
 		}
