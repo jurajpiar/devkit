@@ -31,11 +31,18 @@ home-directory mount is never created. `source: mount` is the explicit opt-in,
 read-only unless `mount_writable: true`.
 
 **Nothing comes back.** devkit copies files into the VM (`source: copy`, the
-proxy binary) and never out of it. There is no guest-to-host copy in the code,
-toolchain lockfiles stay in the VM, and the only guest output devkit prints
-on the host is stripped of control characters first. The end-to-end suite has
-a hostile workspace rewrite every file devkit might be tempted to bring back
-and checks that the project directory on the host is byte-for-byte unchanged.
+proxy binary) and never out of it. There is no guest-to-host copy in the code
+and toolchain lockfiles stay in the VM. The end-to-end suite has a hostile
+workspace rewrite every file devkit might be tempted to bring back and checks
+that the project directory on the host is byte-for-byte unchanged.
+
+**Guest output on your terminal.** The blocked-host summary that `devkit up`
+prints is built from hostnames the sandbox chose, so it is stripped of
+control characters first. Everything else devkit shows you is streamed raw:
+dependency and toolchain installs, `devkit shell`, `devkit logs`. A hostile
+install script can therefore write terminal control sequences at you, the
+same as any build you run on your Mac. Your terminal emulator is the defence
+there, not devkit.
 
 **No access to the host.** The guest can normally reach the host at
 `host.lima.internal`, which is also its gateway. The firewall rejects all
