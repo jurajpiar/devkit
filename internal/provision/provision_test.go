@@ -332,9 +332,11 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			frag := s[start : start+end+len("printf '%s\\n' \"$limablock\" >> /etc/environment\nfi\n")]
 			dir := t.TempDir()
 			env := filepath.Join(dir, "environment")
-			frag = strings.ReplaceAll(frag, "/etc/environment", env)
-			frag = strings.ReplaceAll(frag, "/etc/profile.d", dir)
-			frag = strings.ReplaceAll(frag, "/etc/apt/apt.conf.d", dir)
+			// Quoted: TMPDIR may hold spaces or shell metacharacters.
+			q := func(p string) string { return "'" + strings.ReplaceAll(p, "'", `'\''`) + "'" }
+			frag = strings.ReplaceAll(frag, "/etc/environment", q(env))
+			frag = strings.ReplaceAll(frag, "/etc/profile.d", q(dir))
+			frag = strings.ReplaceAll(frag, "/etc/apt/apt.conf.d", q(dir))
 			frag = strings.ReplaceAll(frag, "sed -i", sed+" -i")
 			frag = strings.ReplaceAll(frag, "id devkit-proxy >/dev/null 2>&1 || useradd", "true || useradd")
 			script := "set -eu\nMODE=" + mode + "\n" + frag
