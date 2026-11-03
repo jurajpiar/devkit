@@ -60,6 +60,7 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"DNS=proxy\n",
 		`DNS="proxy"`,
 		"DNSStubListener=no",
+		"rm -f /etc/systemd/resolved.conf.d/devkit.conf",
 		"Suites: ${VERSION_CODENAME}-security",
 		"$SECAPT full-upgrade -y -q",
 		"kernel.io_uring_disabled = 2",
@@ -435,5 +436,17 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 				t.Errorf("devkit proxy line missing:\n%s", first)
 			}
 		})
+	}
+}
+
+func TestStubIsDisabledAfterDownloadsAndBeforeFirewall(t *testing.T) {
+	s, _ := System(params(nil))
+	on := strings.Index(s, "rm -f /etc/systemd/resolved.conf.d/devkit.conf")
+	refresh := strings.Index(s, "--only-upgrade ca-certificates")
+	sec := strings.Index(s, "full-upgrade -y -q")
+	off := strings.Index(s, "DNSStubListener=no")
+	fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
+	if !(on < sec && sec < refresh && refresh < off && off < fw) {
+		t.Errorf("stub must be restored before root's downloads and disabled after them, before the firewall: on=%d sec=%d refresh=%d off=%d fw=%d", on, sec, refresh, off, fw)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +30,8 @@ type ProxyConfig struct {
 type Proxy struct {
 	dialOnce sync.Once
 	dial     *net.Dialer
+	tr       *http.Transport
+	next     uint32 // round-robin index over the upstream resolvers
 	config   ProxyConfig
 	filter   *Filter
 	audit    *AuditLogger
@@ -195,7 +198,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Forward the request
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{DialContext: p.dialer().DialContext, Proxy: nil},
+		Transport: p.transport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Check if redirect target is allowed
 			target := withDefaultPort(req.URL.Host, schemePort(req.URL.Scheme))
@@ -285,22 +288,36 @@ func (p *Proxy) dialer() *net.Dialer {
 		if len(servers) == 0 {
 			return
 		}
+		// Go's resolver retries a query that gets no answer, calling Dial
+		// again each time. UDP "dials" never fail, so the only way a dead
+		// upstream is skipped is to hand each attempt the next server.
 		p.dial.Resolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				var last error
-				for _, s := range servers {
-					c, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, net.JoinHostPort(s, "53"))
-					if err == nil {
-						return c, nil
-					}
-					last = err
-				}
-				return nil, last
+				i := atomic.AddUint32(&p.next, 1) - 1
+				s := servers[int(i)%len(servers)]
+				return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, net.JoinHostPort(s, "53"))
 			},
 		}
 	})
 	return p.dial
+}
+
+// transport is the one http.Transport for forwarded plain-HTTP requests:
+// bounded idle connections with a timeout, rather than a new Transport per
+// request whose keep-alive sockets would never be closed.
+func (p *Proxy) transport() *http.Transport {
+	p.dialer()
+	if p.tr == nil {
+		p.tr = &http.Transport{
+			Proxy:               nil,
+			DialContext:         p.dial.DialContext,
+			MaxIdleConns:        32,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     30 * time.Second,
+		}
+	}
+	return p.tr
 }
 
 // upstreamResolvers reads the nameserver lines of a resolv.conf, skipping

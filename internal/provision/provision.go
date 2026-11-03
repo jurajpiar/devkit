@@ -143,6 +143,15 @@ fi
 # now that logind answers; it is idempotent and starts the user manager.
 loginctl enable-linger "$DEVKIT_USER" || true
 
+# ---- DNS for this boot's downloads ----
+# The stub may have been switched off at the end of the previous boot (see
+# the DNS stub block below). Root's apt and archive fetches here need it, and
+# the firewall is not up yet, so put it back for the duration of provisioning.
+if [ -f /etc/systemd/resolved.conf.d/devkit.conf ]; then
+  rm -f /etc/systemd/resolved.conf.d/devkit.conf
+  systemctl restart systemd-resolved || true
+fi
+
 # ---- policy files, regenerated from devkit.yaml on every boot ----
 # Quoted heredocs: values come from the template, never from shell expansion.
 cat > /etc/devkit/network.conf <<'EOF'
@@ -332,19 +341,6 @@ EOF
 fi
 {{- end}}
 
-# ---- DNS stub: off when only the proxy may resolve, so lookups fail fast ----
-# With DNS=proxy the firewall stops systemd-resolved forwarding anything, and
-# a lookup through its stub would wait out its retries. Without the stub,
-# /etc/resolv.conf points at a closed port and fails at once. resolved keeps
-# writing the upstream list the proxy reads.
-mkdir -p /etc/systemd/resolved.conf.d
-if [ "$MODE" = "none" ] || [ "${DNS:-proxy}" = "proxy" ]; then
-  printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/devkit.conf
-else
-  rm -f /etc/systemd/resolved.conf.d/devkit.conf
-fi
-systemctl restart systemd-resolved || true
-
 # ---- trust store: the distro's current bundle, minus network.distrust ----
 # ca-certificates is the source of truth and is refreshed on every boot, so a
 # VM created before a CA was removed upstream catches up on its next start.
@@ -474,6 +470,19 @@ EOF
 {{- end}}
 chmod 440 /etc/sudoers.d/devkit
 visudo -cf /etc/sudoers.d/devkit >/dev/null
+
+# ---- DNS stub: off when only the proxy may resolve, so lookups fail fast ----
+# Last among root's network work: everything above (apt, the manager
+# archives, the trust refresh) resolves through the stub. With DNS=proxy the
+# firewall below stops systemd-resolved forwarding anything, and a lookup
+# through its stub would wait out its retries; without the stub,
+# /etc/resolv.conf points at a closed port and fails at once. resolved keeps
+# writing the upstream list the proxy reads.
+mkdir -p /etc/systemd/resolved.conf.d
+if [ "$MODE" = "none" ] || [ "${DNS:-proxy}" = "proxy" ]; then
+  printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/devkit.conf
+  systemctl restart systemd-resolved || true
+fi
 
 # ---- firewall ----
 cat > /usr/local/sbin/devkit-firewall <<'EOF'

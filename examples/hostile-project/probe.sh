@@ -130,10 +130,18 @@ else
   held "DNS does not resolve for the sandbox user (only the proxy resolves)"
 fi
 # A tunnel to a non-web port of an allowed host is not a web request.
+# network.allow may list github.com:22 (or a wildcard with :22) on purpose;
+# the applied list is readable in /etc/devkit/egress.conf.
+allowed_22=0
+case ",$(sed -n 's/^EXTRA_ARGS=-allowed=//p' /etc/devkit/egress.conf 2>/dev/null)," in
+  *",github.com:22,"*|*",*.github.com:22,"*|*",**.github.com:22,"*) allowed_22=1 ;;
+esac
 code="$(curl -s -m 8 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%{http_connect}' https://github.com:22/ 2>/dev/null)"
 case "$code" in
   403) held "proxy refuses a tunnel to github.com:22 (403); allowed hosts are web ports only" ;;
-  200) leaked "proxy opened a tunnel to github.com:22" ;;
+  200) if [ "$allowed_22" = 1 ]; then note "proxy opened a tunnel to github.com:22 (network.allow lists it)"
+       elif [ "$MODE" = open ]; then leaked "proxy opened a tunnel to github.com:22 in open mode (web ports only expected)"
+       else leaked "proxy opened a tunnel to github.com:22"; fi ;;
   000) if [ "$MODE" = none ]; then held "proxy is off (none mode)"; else held "no tunnel to github.com:22"; fi ;;
   *)   held "tunnel to github.com:22 not established ($code)" ;;
 esac

@@ -114,8 +114,14 @@ func TestSandboxGuarantees(t *testing.T) {
 	hostDirect := fmt.Sprintf("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/%d && head -c 20 <&3' 2>&1; echo exit=$?", hostPort)
 
 	start := time.Now()
-	s.mustRun("up")
+	upOut := s.mustRun("up")
 	t.Logf("devkit up took %s", time.Since(start).Round(time.Second))
+	// Steps that fail soft say so on stderr; none may, or a green run proves
+	// less than it claims (a DNS stub switched off too early once hid a
+	// failed ca-certificates refresh this way).
+	if strings.Contains(upOut, "devkit: could not") {
+		t.Fatalf("devkit up reported a failed step:\n%s", upOut)
+	}
 
 	t.Run("workspace copied and deps installed", func(t *testing.T) {
 		out, err := s.shell("cat secret.txt && test -d node_modules/is-odd && node --version")
@@ -429,8 +435,14 @@ func TestNixToolchain(t *testing.T) {
 	}
 
 	start := time.Now()
-	s.mustRun("up")
+	upOut := s.mustRun("up")
 	t.Logf("devkit up took %s", time.Since(start).Round(time.Second))
+	// Steps that fail soft say so on stderr; none may, or a green run proves
+	// less than it claims (a DNS stub switched off too early once hid a
+	// failed ca-certificates refresh this way).
+	if strings.Contains(upOut, "devkit: could not") {
+		t.Fatalf("devkit up reported a failed step:\n%s", upOut)
+	}
 
 	if _, err := os.Stat(filepath.Join(dir, "flake.lock")); err == nil {
 		t.Fatal("nothing from the VM may land on the host, not even flake.lock")
