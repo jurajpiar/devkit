@@ -127,6 +127,11 @@ cat > /etc/devkit/network.conf <<'EOF'
 MODE={{.Config.Network.Mode}}
 ALLOW_HOST={{bool .Config.Network.AllowHost}}
 EOF
+# What the sandbox may see of the host: nothing, or one mount at one path.
+cat > /etc/devkit/source.conf <<'EOF'
+SOURCE={{.Config.Source}}
+MOUNT_POINT={{if eq .Config.Source "mount"}}{{.MountPath}}{{end}}
+EOF
 cat > /etc/devkit/egress.conf <<'EOF'
 EXTRA_ARGS=-allowed={{if eq .Config.Network.Mode "open"}}*{{else}}{{join .Config.Network.Allow ","}}{{end}}
 EOF
@@ -276,9 +281,14 @@ fi
 : > /var/lib/devkit/.distrust
 {{- range .Config.Network.Distrust}}
 n="{{.}}"; f="${n// /_}"; f="${f//./\\.}"
-if grep -q "^!\?mozilla/$f\.crt\$" "$CACONF"; then
+# Record only roots this boot actually disables, so removing the entry later
+# restores the distro's setting rather than re-enabling a root the distro
+# itself had disabled.
+if grep -q "^mozilla/$f\.crt\$" "$CACONF"; then
   sed -i "s|^mozilla/$f\.crt\$|!mozilla/$f.crt|" "$CACONF"
   echo "${n// /_}" >> /var/lib/devkit/.distrust
+elif grep -q "^!mozilla/$f\.crt\$" "$CACONF"; then
+  echo "devkit: network.distrust: '$n' is already disabled by the distro" >&2
 else
   echo "devkit: network.distrust: no root named '$n' in the system bundle" >&2
 fi
@@ -291,6 +301,18 @@ export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/ce
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt PIP_CERT=/etc/ssl/certs/ca-certificates.crt
 export NODE_OPTIONS="--use-openssl-ca${NODE_OPTIONS:+ $NODE_OPTIONS}"
+EOF
+# profile.d only reaches login shells. Non-login SSH commands (an IDE's
+# remote server, ssh vm 'node ...') read /etc/environment through PAM, so the
+# same settings go there, outside Lima's block, replaced on every boot.
+sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(SSL_CERT_FILE\|SSL_CERT_DIR\|CURL_CA_BUNDLE\|REQUESTS_CA_BUNDLE\|PIP_CERT\|NODE_OPTIONS\)=/d}' /etc/environment
+cat >> /etc/environment <<'EOF'
+SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+SSL_CERT_DIR=/etc/ssl/certs
+CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+NODE_OPTIONS=--use-openssl-ca
 EOF
 cat > /usr/local/bin/devkit-audit <<'PYEOF'
 {{.AuditScript}}

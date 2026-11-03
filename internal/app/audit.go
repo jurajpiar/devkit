@@ -1,7 +1,9 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 
 	"github.com/jurajpiar/devkit/internal/lima"
 	"github.com/spf13/cobra"
@@ -36,11 +38,31 @@ Exit status is 1 when something stale was found.`,
 		if deep, _ := cmd.Flags().GetBool("deep"); deep {
 			script += " --deep"
 		}
-		if err := lima.ExecStream(cmd.Context(), cfg.VMName(), script); err != nil {
+		// Through shellScript so a Nix dev shell's node and keytool are on PATH.
+		err = lima.ExecStream(cmd.Context(), cfg.VMName(), shellScript(cfg, []string{script}))
+		switch auditExit(err) {
+		case 0:
+			return nil
+		case 1:
 			return fmt.Errorf("stale trust found")
+		default:
+			return fmt.Errorf("audit did not complete: %w", err)
 		}
-		return nil
 	},
+}
+
+// auditExit maps an ExecStream error to the audit's verdict: 0 clean, 1
+// stale trust found, anything else means the audit itself failed (ssh, a
+// missing script, a crash) and must not be read as a finding.
+func auditExit(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 func init() {
