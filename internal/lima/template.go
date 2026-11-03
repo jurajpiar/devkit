@@ -77,6 +77,15 @@ env:
   HTTPS_PROXY: ""
   FTP_PROXY: ""
   NO_PROXY: ""
+  # The trust settings for non-login sessions live here, in Lima's own block
+  # of /etc/environment, so a ~/.lima/_config/default.yaml entry of the same
+  # name cannot shadow them (override.yaml entries are refused outright).
+  SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+  SSL_CERT_DIR: /etc/ssl/certs
+  CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+  REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+  PIP_CERT: /etc/ssl/certs/ca-certificates.crt
+  NODE_OPTIONS: --use-openssl-ca
 
 # Rootless containers inside the VM are opt-in.
 containerd:

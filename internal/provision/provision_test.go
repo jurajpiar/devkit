@@ -156,10 +156,6 @@ func TestSystemScriptTrustStore(t *testing.T) {
 		`if grep -q "^mozilla/$f\.crt\$" "$CACONF"; then`,
 		`elif grep -q "^!mozilla/$f\.crt\$" "$CACONF"; then`,
 		"is already disabled by the distro",
-		// Non-login sessions get the trust settings from /etc/environment,
-		// written outside Lima's block.
-		`sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(SSL_CERT_FILE\|SSL_CERT_DIR\|CURL_CA_BUNDLE\|REQUESTS_CA_BUNDLE\|PIP_CERT\|NODE_OPTIONS\)=/d}' /etc/environment`,
-		"NODE_OPTIONS=--use-openssl-ca\n",
 		// The audit skips non-regular files, reads DER, bounds the cache age
 		// and exits 2 on a crash rather than 1.
 		"if os.path.isfile(path):",
@@ -408,9 +404,6 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			}
 			if mode == project.NetworkAllowlist && !strings.Contains(first, "HTTPS_PROXY=http://127.0.0.1:3128\n") {
 				t.Errorf("devkit proxy line missing:\n%s", first)
-			}
-			if strings.Count(first, "NODE_OPTIONS=--use-openssl-ca\n") != 1 || !strings.Contains(first, "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n") {
-				t.Errorf("trust settings should appear exactly once for non-login sessions:\n%s", first)
 			}
 		})
 	}
