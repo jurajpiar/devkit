@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -141,10 +142,12 @@ func hardeningAttempts(t *testing.T, s *sandbox, dir string) {
 		// A frozen image gets weaker every week. The guest must have no
 		// pending updates from the security pocket once provisioning is
 		// done. (A new kernel on disk needs the next restart to run.)
-		// Not vacuous: the package lists must exist and be recent.
-		age, _ := s.shell("find /var/lib/apt/lists -name '*Packages' -mmin -120 | wc -l")
-		if strings.TrimSpace(age) == "0" {
-			t.Errorf("apt package lists are missing or older than two hours, so 'nothing pending' would mean nothing")
+		// Not vacuous: root records when the pocket was last applied
+		// successfully (the index files carry the repository's own
+		// timestamps, which say nothing about this boot).
+		stamp, _ := s.shell("cat /var/lib/devkit/.security-updated 2>/dev/null; echo")
+		if sec, err := strconv.ParseInt(strings.TrimSpace(stamp), 10, 64); err != nil || time.Since(time.Unix(sec, 0)) > 2*time.Hour {
+			t.Errorf("no successful security-pocket refresh recorded for this boot (stamp %q): 'nothing pending' would mean nothing", strings.TrimSpace(stamp))
 		}
 		out, _ := s.shell("apt list --upgradable 2>/dev/null | grep -c -- '-security'; true")
 		if strings.TrimSpace(out) != "0" {

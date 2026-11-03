@@ -337,6 +337,9 @@ EOF
   if $SECAPT -o APT::Update::Error-Mode=any update -q >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive $SECAPT full-upgrade -y -q >/dev/null 2>&1; then
     after="$(ls /boot/vmlinuz-* 2>/dev/null | sort | tail -n1)"
     [ "$before" != "$after" ] && echo "devkit: a kernel security update was installed; it runs from the next devkit up" >&2
+    # When the pocket was last applied successfully. apt keeps the index
+    # files' upstream timestamps, so they say nothing about this boot.
+    date -u +%s > /var/lib/devkit/.security-updated && chmod 644 /var/lib/devkit/.security-updated
   else
     echo "devkit: could not apply security updates; continuing with the installed versions" >&2
   fi

@@ -110,6 +110,12 @@ func TestSandboxGuarantees(t *testing.T) {
 	}()
 	// --noproxy '' so NO_PROXY (which lists the host under allow_host) cannot
 	// turn the tunnel check into a bypass.
+	// The listener's port is allowed by policy for host.lima.internal, so a
+	// CONNECT to it gets past the proxy's allowlist and port policy and the
+	// firewall alone decides: 502 when the host is denied, 200 under
+	// allow_host, where the live listener proves the verdict was the
+	// firewall and not a closed port.
+	setYAML(t, filepath.Join(dir, "devkit.yaml"), "  allow:\n", fmt.Sprintf("  allow:\n    - \"host.lima.internal:%d\"\n", hostPort))
 	hostTunnel := fmt.Sprintf("curl -s -m 10 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%%{http_connect}' https://host.lima.internal:%d/ ; echo", hostPort)
 	hostDirect := fmt.Sprintf("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/%d && head -c 20 <&3' 2>&1; echo exit=$?", hostPort)
 
@@ -277,8 +283,10 @@ func TestSandboxGuarantees(t *testing.T) {
 		if out, _ = s.shell(hostDirect); strings.Contains(out, "devkit-host-listener") {
 			t.Fatalf("direct dial reached the host listener: %s", out)
 		}
-		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "403" {
-			t.Fatalf("CONNECT to the host should be refused by policy (403): %s", out)
+		// The policy permits this tunnel, so the 502 is the firewall rejecting
+		// the proxy's own dial; the allow_host subtest shows the port is live.
+		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "502" {
+			t.Fatalf("CONNECT to the host on an allowed port should be stopped by the firewall (502): %s", out)
 		}
 	})
 
@@ -351,14 +359,12 @@ func TestSandboxGuarantees(t *testing.T) {
 		// 502 before any tunnel exists, never 200. A plain-HTTP 502 would not
 		// do, since the proxy also sends one after reaching a non-HTTP
 		// listener and failing to parse its reply.
-		// On the listener's port the port policy answers first: 403, since
-		// open mode still means web ports only. On 443 the policy allows the
-		// dial and the firewall must reject it: 502, never 200.
+		// Open mode ignores the allow list, so the listener's port is a
+		// non-web port here and the port policy answers first: 403. The
+		// firewall's verdict on a permitted dial is covered in allowlist
+		// mode, where the port is allowed and the answer must be 502.
 		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "403" {
 			t.Fatalf("open mode: CONNECT to a non-web port must be refused by policy (403), got: %s", out)
-		}
-		if out, _ = s.shell("curl -s -m 10 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%{http_connect}' https://host.lima.internal:443/ ; echo"); strings.TrimSpace(out) != "502" {
-			t.Fatalf("open mode must not let the proxy tunnel to the host on 443; want 502, got: %s", out)
 		}
 		if out, _ = s.shell(hostDirect); strings.Contains(out, "devkit-host-listener") {
 			t.Fatalf("open mode: direct dial reached the host listener: %s", out)
@@ -389,9 +395,12 @@ func TestSandboxGuarantees(t *testing.T) {
 		if out, _ = s.shell(hostDirect); !strings.Contains(out, "devkit-host-listener") {
 			t.Fatalf("allow_host should reach the host listener: %s", out)
 		}
-		// Forced through the proxy, the allowlist still refuses the host.
-		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "403" {
-			t.Fatalf("CONNECT to the host via the proxy should still be 403 under allow_host: %s", out)
+		// Forced through the proxy, the same tunnel now completes: policy
+		// permitted it all along, and with the host allowed the firewall lets
+		// the proxy's dial through to the live listener. This is what makes
+		// the 502 in "host unreachable" a firewall verdict.
+		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "200" {
+			t.Fatalf("CONNECT to the host's allowed port should complete under allow_host (200): %s", out)
 		}
 		out, _ = s.shell("echo $NO_PROXY")
 		if !strings.Contains(out, "host.lima.internal") {

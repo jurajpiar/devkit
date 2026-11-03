@@ -30,6 +30,7 @@ type ProxyConfig struct {
 type Proxy struct {
 	dialOnce sync.Once
 	dial     *net.Dialer
+	trOnce   sync.Once
 	tr       *http.Transport
 	next     uint32 // round-robin index over the upstream resolvers
 	config   ProxyConfig
@@ -307,16 +308,15 @@ func (p *Proxy) dialer() *net.Dialer {
 // bounded idle connections with a timeout, rather than a new Transport per
 // request whose keep-alive sockets would never be closed.
 func (p *Proxy) transport() *http.Transport {
-	p.dialer()
-	if p.tr == nil {
+	p.trOnce.Do(func() {
 		p.tr = &http.Transport{
 			Proxy:               nil,
-			DialContext:         p.dial.DialContext,
+			DialContext:         p.dialer().DialContext,
 			MaxIdleConns:        32,
 			MaxIdleConnsPerHost: 4,
 			IdleConnTimeout:     30 * time.Second,
 		}
-	}
+	})
 	return p.tr
 }
 
