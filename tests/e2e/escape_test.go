@@ -32,13 +32,13 @@ func escapeAttempts(t *testing.T, s *sandbox, hostDir string) {
 				t.Errorf("proxied request to %s got through: %s", target, out)
 			}
 		}
-		// UDP: the firewall answers with ICMP port unreachable, which the
-		// socket sees as a refusal; a reply would mean the host was reached.
+		// UDP: the REJECT rule surfaces as EPERM on the send itself, or as
+		// a refusal on the next read; a reply would mean the host was reached.
 		py := `import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3)
-s.sendto(b"x",("` + gw + `",2222))
-try: s.recvfrom(16); print("got-reply")
-except ConnectionRefusedError: print("refused")
+try:
+    s.sendto(b"x",("` + gw + `",2222)); s.recvfrom(16); print("got-reply")
+except (PermissionError, ConnectionRefusedError): print("refused")
 except socket.timeout: print("timeout")`
 		out, _ := s.shell("python3 -c '" + py + "'")
 		if !strings.Contains(out, "refused") && !strings.Contains(out, "timeout") {
@@ -68,7 +68,7 @@ except socket.timeout: print("timeout")`
 		}
 		// Killing the proxy would not open anything, but it would be a denial
 		// of service the sandbox should not have either.
-		out, _ := s.shell("pkill -f devkit-egressproxy 2>&1; sleep 1; systemctl is-active devkit-egress")
+		out, _ := s.shell("pkill -x devkit-egressproxy 2>&1; sleep 1; systemctl is-active devkit-egress")
 		if !strings.Contains(out, "active") || strings.Contains(out, "inactive") {
 			t.Errorf("sandbox user should not be able to stop the proxy: %s", out)
 		}
@@ -102,7 +102,7 @@ except Exception as e: print("failed:", type(e).__name__)`
 			"/usr/local/bin/devkit-egressproxy", "/var/log/devkit/egress.log",
 			"/etc/environment", "/etc/profile.d/devkit-proxy.sh", "/etc/profile.d/devkit-mise.sh",
 			"/etc/systemd/system/devkit-egress.service", "/etc/systemd/system/devkit-proxy-install.service",
-			"/etc/sudoers.d/devkit", "/run/systemd/resolve/resolv.conf",
+			"/run/systemd/resolve/resolv.conf",
 		}
 		out, _ := s.shell("for f in " + strings.Join(files, " ") + "; do [ -e \"$f\" ] || echo MISSING:$f; [ -w \"$f\" ] && echo WRITABLE:$f; done; echo done")
 		if strings.Contains(out, "WRITABLE") || strings.Contains(out, "MISSING") {

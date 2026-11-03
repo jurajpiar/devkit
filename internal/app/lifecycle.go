@@ -15,13 +15,15 @@ import (
 )
 
 var downCmd = &cobra.Command{
-	Use:   "down",
-	Short: "Stop the sandbox VM (keeps its disk)",
+	Use:               "down [name]",
+	Short:             "Stop the sandbox VM (keeps its disk)",
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeVMs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireLima(); err != nil {
 			return err
 		}
-		cfg, err := loadConfig(cmd)
+		cfg, err := targetConfig(cmd, args)
 		if err != nil {
 			return err
 		}
@@ -38,14 +40,17 @@ var downCmd = &cobra.Command{
 }
 
 var rmCmd = &cobra.Command{
-	Use:     "rm",
-	Aliases: []string{"remove", "destroy"},
-	Short:   "Delete the sandbox VM and everything inside it",
+	Use:               "rm [name]",
+	Aliases:           []string{"remove", "destroy"},
+	Short:             "Delete the sandbox VM and everything inside it",
+	Long:              "Delete the sandbox VM and everything inside it.\n\nWithout a name, the VM for the devkit.yaml in the current directory. With one, any devkit VM, which lets you clean up after a project directory is gone.",
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeVMs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireLima(); err != nil {
 			return err
 		}
-		cfg, err := loadConfig(cmd)
+		cfg, err := targetConfig(cmd, args)
 		if err != nil {
 			return err
 		}
@@ -191,6 +196,38 @@ func shellScript(cfg *project.Config, args []string) string {
 			ws, shellQuote(inner), inner)
 	}
 	return fmt.Sprintf("cd %s 2>/dev/null; %s", ws, inner)
+}
+
+// targetConfig resolves which VM a command acts on: the named one, or the
+// one described by devkit.yaml in the current directory.
+func targetConfig(cmd *cobra.Command, args []string) (*project.Config, error) {
+	if len(args) == 0 {
+		return loadConfig(cmd)
+	}
+	c := project.Default()
+	c.Name = strings.TrimPrefix(args[0], "devkit-")
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("%q is not a devkit VM name", args[0])
+	}
+	return c, nil
+}
+
+// completeVMs offers the names of existing devkit VMs.
+func completeVMs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	list, err := lima.List(cmd.Context())
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, i := range list {
+		if strings.HasPrefix(i.Name, "devkit-") {
+			names = append(names, i.Name+"\t"+i.Status)
+		}
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
 func mustBeRunning(cmd *cobra.Command, cfg *project.Config) error {
