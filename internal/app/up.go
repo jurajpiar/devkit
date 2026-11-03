@@ -90,6 +90,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// A global Lima override outranks the rendered config and could reinsert
+	// a host proxy into the guest's environment block.
+	if err := lima.CheckOverride(); err != nil {
+		return err
+	}
 	name := cfg.VMName()
 	inst, err := instance(ctx, cfg)
 	if err != nil {
