@@ -20,7 +20,15 @@ WORKSPACE = os.path.join(HOME, "workspace")
 PRUNE = {".git", "node_modules", "target", ".venv", "venv", "vendor", "dist", "build", ".cache", "__pycache__", ".next"}
 CERTDATA_URL = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/security/nss/lib/ckfw/builtins/certdata.txt"
 CACHE = os.path.join(HOME, ".cache", "devkit", "certdata.txt")
+CACHE_FRESH, CACHE_MAX = 86400, 7 * 86400
 stale = 0
+ref_note = ""
+
+def _crash(t, v, tb):
+    # A crash is not a finding: exit 1 means stale trust, 2 means no verdict.
+    print(f"audit failed: {t.__name__}: {v}", flush=True)
+    os._exit(2)
+sys.excepthook = _crash
 
 def say(line):
     print(line, flush=True)
@@ -63,18 +71,26 @@ def self_signed(pem):
 def mozilla_store():
     """Returns (trusted_for_tls, distrusted_for_tls) as {fingerprint: label},
     or (None, None) if certdata.txt could not be fetched or read."""
+    global ref_note
     text = None
-    try:
-        if os.path.exists(CACHE) and time.time() - os.path.getmtime(CACHE) < 86400:
-            text = open(CACHE, encoding="utf-8", errors="replace").read()
-        else:
+    age = time.time() - os.path.getmtime(CACHE) if os.path.exists(CACHE) else None
+    if age is not None and age < CACHE_FRESH:
+        text = open(CACHE, encoding="utf-8", errors="replace").read()
+    else:
+        try:
             with urllib.request.urlopen(CERTDATA_URL, timeout=20) as r:
                 text = r.read().decode("utf-8", "replace")
             os.makedirs(os.path.dirname(CACHE), exist_ok=True)
             open(CACHE, "w").write(text)
-    except Exception:
-        if os.path.exists(CACHE):
-            text = open(CACHE, encoding="utf-8", errors="replace").read()
+        except Exception as e:
+            # A stale reference would keep trusting a root Mozilla has since
+            # pulled, so an old cache is not reused for long: past CACHE_MAX
+            # the system bundle, refreshed every boot, is the better reference.
+            if age is not None and age < CACHE_MAX:
+                text = open(CACHE, encoding="utf-8", errors="replace").read()
+                ref_note = f" (refresh failed, cached {age / 86400:.1f} days ago)"
+            else:
+                ref_note = f" (refresh failed: {e}" + (f"; cache is {age / 86400:.0f} days old)" if age is not None else ")")
     if not text:
         return None, None
     certs, trust = {}, {}
@@ -135,12 +151,12 @@ def report_set(name, pairs, reference, counts=True):
 say("Trust audit" + (" (deep)" if DEEP else ""))
 trusted, distrusted = mozilla_store()
 if trusted:
-    say(f"  reference: Mozilla root store, {len(trusted)} roots trusted for TLS, {len(distrusted)} distrusted")
+    say(f"  reference: Mozilla root store, {len(trusted)} roots trusted for TLS, {len(distrusted)} distrusted{ref_note}")
 sys_pem = open("/etc/ssl/certs/ca-certificates.crt", encoding="utf-8", errors="replace").read()
 system = fingerprints(sys_pem)
 system_set = {fp for fp, _ in system}
 if not trusted:
-    say("  reference: the system bundle (Mozilla's store could not be fetched)")
+    say("  reference: the system bundle, Mozilla's store is unavailable" + ref_note)
     trusted, distrusted = system_set, {}
 try:
     ver = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "ca-certificates"], capture_output=True, text=True).stdout.strip()
@@ -178,7 +194,11 @@ def walk(root, prune):
         if prune:
             dirnames[:] = [d for d in dirnames if d not in PRUNE or d in (".venv", "venv")]
         for f in filenames:
-            yield os.path.join(dirpath, f)
+            path = os.path.join(dirpath, f)
+            # Regular files only: a FIFO or a device named root.crt would
+            # block the read, and with it devkit up.
+            if os.path.isfile(path):
+                yield path
 
 bundles, pems = [], []
 roots = [WORKSPACE, os.path.join(HOME, ".local", "share", "mise", "installs")]
@@ -203,7 +223,13 @@ for path in pems:
     try:
         if os.path.getsize(path) > 1_000_000:
             continue
-        pairs = fingerprints(open(path, encoding="utf-8", errors="replace").read())
+        data = open(path, "rb").read()
+        if b"-----BEGIN" not in data:
+            # .cer and .crt are often DER; convert so a stale root is seen.
+            r = subprocess.run(["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+                               input=data, capture_output=True, timeout=5)
+            data = r.stdout if r.returncode == 0 else b""
+        pairs = fingerprints(data.decode("utf-8", "replace"))
     except Exception:
         continue
     for fp, pem in pairs:

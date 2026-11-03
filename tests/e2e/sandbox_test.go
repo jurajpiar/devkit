@@ -7,6 +7,7 @@ package e2e
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,27 @@ func TestSandboxGuarantees(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = s.run("rm", "--force")
 	})
+	// A listener on the Mac that the VM can only reach when the policy says
+	// so: the positive control for every "host unreachable" assertion below.
+	// Lima routes host.lima.internal to the host's loopback.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	hostPort := ln.Addr().(*net.TCPAddr).Port
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("devkit-host-listener\n"))
+			c.Close()
+		}
+	}()
+	hostTunnel := fmt.Sprintf("curl -s -m 10 -p -x http://127.0.0.1:3128 -o /dev/null -w '%%{http_connect}' https://host.lima.internal:%d/ ; echo", hostPort)
+	hostDirect := fmt.Sprintf("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/%d && head -c 20 <&3' 2>&1; echo exit=$?", hostPort)
 
 	start := time.Now()
 	s.mustRun("up")
@@ -180,6 +202,17 @@ func TestSandboxGuarantees(t *testing.T) {
 		}
 	})
 
+	t.Run("trust settings reach non-login sessions", func(t *testing.T) {
+		// Not through devkit shell (bash -l): a bare ssh command, as an IDE's
+		// remote server or `ssh vm node ...` would run, gets them from
+		// /etc/environment via PAM.
+		cmd := exec.Command("limactl", "shell", "devkit-"+name, "--", "sh", "-c", "echo SSL=$SSL_CERT_FILE NODE=$NODE_OPTIONS")
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "SSL=/etc/ssl/certs/ca-certificates.crt NODE=--use-openssl-ca") {
+			t.Fatalf("non-login session should carry the trust settings: %v\n%s", err, out)
+		}
+	})
+
 	t.Run("distrusted root is rejected by curl and node", func(t *testing.T) {
 		// objects.githubusercontent.com is on the allowlist and chains to
 		// Let's Encrypt. Distrust both ISRG roots and the TLS handshake must
@@ -190,9 +223,13 @@ func TestSandboxGuarantees(t *testing.T) {
 		if !strings.Contains(out, "certificate") || strings.Contains(out, "exit=0") {
 			t.Fatalf("curl should fail certificate verification under distrust: %s", out)
 		}
-		out, _ = s.shell(`node -e "fetch('https://objects.githubusercontent.com/').then(r=>console.log('reached '+r.status)).catch(e=>console.log('failed: '+(e.cause&&e.cause.code)))"`)
-		if !strings.Contains(out, "failed:") {
-			t.Fatalf("node should use the system store and fail under distrust: %s", out)
+		// Node through the proxy as a CONNECT tunnel, so the only way to fail
+		// is certificate verification: a direct fetch would be rejected by the
+		// firewall and prove nothing about Node's trust store.
+		s.mustRun("shell", "cat > ~/tlsprobe.js <<'EOF'\n"+nodeTLSProbe+"\nEOF")
+		out, _ = s.shell("node ~/tlsprobe.js")
+		if !strings.Contains(out, "failed: UNABLE_TO_GET_ISSUER_CERT_LOCALLY") && !strings.Contains(out, "failed: SELF_SIGNED_CERT_IN_CHAIN") {
+			t.Fatalf("node should fail certificate verification under distrust: %s", out)
 		}
 		out, _ = s.shell("grep -c '^!mozilla/ISRG' /etc/ca-certificates.conf; devkit-audit | grep -c 'distrusted by devkit.yaml'")
 		if !strings.HasPrefix(strings.TrimSpace(out), "2") {
@@ -203,6 +240,9 @@ func TestSandboxGuarantees(t *testing.T) {
 		out, _ = s.shell("curl -s -m 15 -o /dev/null -w '%{http_code}' https://objects.githubusercontent.com/; echo; grep -c '^!mozilla/ISRG' /etc/ca-certificates.conf; true")
 		if strings.Contains(out, "000") || !strings.Contains(out, "\n0\n") {
 			t.Fatalf("removing the distrust entries should restore trust and clear the conf: %s", out)
+		}
+		if out, _ = s.shell("node ~/tlsprobe.js"); !strings.Contains(out, "ok authorized=true") {
+			t.Fatalf("node should verify again once trust is restored: %s", out)
 		}
 	})
 
@@ -222,6 +262,14 @@ func TestSandboxGuarantees(t *testing.T) {
 		out, _ = s.shell("curl -s -m 5 -o /dev/null -w '%{http_code}' http://host.lima.internal:2222/ ; echo exit=$?")
 		if !strings.Contains(out, "403") {
 			t.Fatalf("proxied connection to host should be blocked: %s", out)
+		}
+		// The listener is really there (allow_host proves that below), yet
+		// neither a direct dial nor a CONNECT tunnel through the proxy gets it.
+		if out, _ = s.shell(hostDirect); strings.Contains(out, "devkit-host-listener") {
+			t.Fatalf("direct dial reached the host listener: %s", out)
+		}
+		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "403" {
+			t.Fatalf("CONNECT to the host should be refused by policy (403): %s", out)
 		}
 	})
 
@@ -290,11 +338,15 @@ func TestSandboxGuarantees(t *testing.T) {
 			t.Fatalf("open mode must reject connections that bypass the proxy: %s", out)
 		}
 		// The proxy allows every host in open mode, so it will try the Mac
-		// itself. The firewall must reject the proxy's connection too: a 502
-		// from the proxy, never a response from the host.
-		out, _ = s.shell("curl -s -m 10 -o /dev/null -w '%{http_code}' http://host.lima.internal:2222/ ; echo exit=$?")
-		if !strings.Contains(out, "502exit=0") {
-			t.Fatalf("open mode must not let the proxy reach the host; want 502, got: %s", out)
+		// itself. The firewall must reject the proxy's dial: CONNECT answers
+		// 502 before any tunnel exists, never 200. A plain-HTTP 502 would not
+		// do, since the proxy also sends one after reaching a non-HTTP
+		// listener and failing to parse its reply.
+		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "502" {
+			t.Fatalf("open mode must not let the proxy tunnel to the host; want 502, got: %s", out)
+		}
+		if out, _ = s.shell(hostDirect); strings.Contains(out, "devkit-host-listener") {
+			t.Fatalf("open mode: direct dial reached the host listener: %s", out)
 		}
 		// Port 53 is not a loophole: only the resolvers accept it.
 		out, _ = s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' 2>&1; echo exit=$?")
@@ -312,6 +364,11 @@ func TestSandboxGuarantees(t *testing.T) {
 		out, _ := s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/2222' 2>&1; echo exit=$?")
 		if !strings.Contains(out, "exit=0") {
 			t.Fatalf("host should be reachable with allow_host: %s", out)
+		}
+		// Positive control: the listener the earlier subtests could not
+		// reach answers now, so their failures were the policy, not a dead port.
+		if out, _ = s.shell(hostDirect); !strings.Contains(out, "devkit-host-listener") {
+			t.Fatalf("allow_host should reach the host listener: %s", out)
 		}
 		out, _ = s.shell("echo $NO_PROXY")
 		if !strings.Contains(out, "host.lima.internal") {
@@ -416,6 +473,17 @@ func TestNixToolchain(t *testing.T) {
 		}
 	})
 }
+
+// nodeTLSProbe opens a CONNECT tunnel through the egress proxy and runs a TLS
+// handshake over it with Node's own verifier, printing the error code.
+const nodeTLSProbe = `const net = require('net'), tls = require('tls');
+const host = 'objects.githubusercontent.com';
+const s = net.connect(3128, '127.0.0.1', () => s.write('CONNECT ' + host + ':443 HTTP/1.1\r\nHost: ' + host + ':443\r\n\r\n'));
+s.once('data', d => {
+  if (!/ 200 /.test(d.toString())) { console.log('tunnel: ' + d.toString().split('\r\n')[0]); process.exit(); }
+  const t = tls.connect({ socket: s, servername: host }, () => { console.log('ok authorized=' + t.authorized); process.exit(); });
+  t.on('error', e => { console.log('failed: ' + e.code); process.exit(); });
+});`
 
 // setYAML replaces one line fragment in devkit.yaml in place.
 func setYAML(t *testing.T, path, from, to string) {

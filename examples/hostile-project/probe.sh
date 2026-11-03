@@ -24,9 +24,10 @@ note()   { printf '  \033[33m[note]\033[0m    %s\n' "$1"; }
 section(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # The policy, as root applied it. Readable, not writable.
-MODE=allowlist ALLOW_HOST=0
+MODE=allowlist ALLOW_HOST=0 SOURCE=copy MOUNT_POINT=
 if [ -r /etc/devkit/network.conf ]; then . /etc/devkit/network.conf; fi
-printf 'Policy: network.mode=%s allow_host=%s\n' "$MODE" "$ALLOW_HOST"
+if [ -r /etc/devkit/source.conf ]; then . /etc/devkit/source.conf; fi
+printf 'Policy: network.mode=%s allow_host=%s source=%s%s\n' "$MODE" "$ALLOW_HOST" "$SOURCE" "${MOUNT_POINT:+ at $MOUNT_POINT}"
 
 # tcp HOST PORT: true if a TCP connection opens within 4 seconds.
 tcp() { timeout 4 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }
@@ -74,19 +75,21 @@ for addr in host.lima.internal "${HOST_IP:-}" "${GW:-}"; do
     fi
   done
 done
-# Through the proxy. In allowlist mode it refuses the host by policy before
-# connecting (403). In open mode it tries, and the firewall rejects even the
-# proxy's own connection to the host, which the proxy reports as 502.
-code="$(curl -s -m 8 -o /dev/null -w '%{http_code}' http://host.lima.internal:2222/ 2>/dev/null)"
+# Through the proxy, as a CONNECT tunnel: the answer to CONNECT is decided
+# before any bytes flow, so it is unambiguous. 403 is the allowlist refusing
+# the host by policy; 502 means the proxy dialled and the firewall rejected
+# it; 200 means a TCP tunnel to your Mac is open. (A plain-HTTP request would
+# be ambiguous: the proxy also answers 502 after connecting to a non-HTTP
+# listener such as sshd and failing to parse its reply.)
+code="$(curl -s -m 8 -p -x http://127.0.0.1:3128 -o /dev/null -w '%{http_connect}' https://host.lima.internal:2222/ 2>/dev/null)"
 case "$code" in
-  403) held "proxy refuses to connect to your Mac (403)" ;;
-  502) if [ "$ALLOW_HOST" = 1 ]; then note "proxy could not connect to :2222 on your Mac (nothing listening)"
-       else held "proxy tried your Mac and the firewall rejected it (502)"; fi ;;
+  403) held "proxy refuses a tunnel to your Mac (403)" ;;
+  502) held "proxy tried to dial your Mac and the firewall rejected it (502)" ;;
+  200) if [ "$ALLOW_HOST" = 1 ]; then note "proxy opened a tunnel to your Mac :2222 (allow_host: true)"
+       else leaked "proxy opened a TCP tunnel to your Mac :2222"; fi ;;
   000) if [ "$MODE" = none ]; then held "proxy is off (none mode)"
-       elif [ "$ALLOW_HOST" = 1 ]; then note "host bypasses the proxy (allow_host: true); nothing listening on :2222"
        else held "no response from the proxy for your Mac"; fi ;;
-  *)   if [ "$ALLOW_HOST" = 1 ]; then note "reached your Mac on :2222, HTTP $code (allow_host: true)"
-       else leaked "reached your Mac through the proxy, HTTP $code"; fi ;;
+  *)   leaked "unexpected CONNECT answer $code for your Mac" ;;
 esac
 
 section "Reaching the open internet"
@@ -120,14 +123,25 @@ else
 fi
 
 section "Reading your files and the VM's secrets"
-# The host filesystem is never mounted, so these exist only on your Mac.
+# The host filesystem is never mounted unless devkit.yaml says source: mount,
+# and then exactly one directory, at the path root recorded in source.conf.
 for p in /Users "$HOME/.aws/credentials" "$HOME/.config/gcloud"; do
-  if ls -d "$p" >/dev/null 2>&1; then leaked "reached $p"; else held "$p not present in the VM"; fi
+  if ls -d "$p" >/dev/null 2>&1; then
+    case "$SOURCE:$MOUNT_POINT" in
+      mount:"$p"/*|mount:"$p") note "$p exists as the parent of the project mount (source: mount)" ;;
+      *) leaked "reached $p" ;;
+    esac
+  else held "$p not present in the VM"; fi
 done
-if findmnt -t virtiofs -n 2>/dev/null | grep -q .; then
-  note "a host directory is mounted (source: mount): $(findmnt -t virtiofs -n -o TARGET | head -n1)"
+mounts="$(findmnt -t virtiofs -n -o TARGET 2>/dev/null)"
+if [ -z "$mounts" ]; then
+  if [ "$SOURCE" = mount ]; then leaked "source: mount is configured but nothing is mounted at $MOUNT_POINT"
+  else held "no host directory mounted"; fi
 else
-  held "no host directory mounted"
+  for m in $mounts; do
+    if [ "$SOURCE" = mount ] && [ "$m" = "$MOUNT_POINT" ]; then note "project directory mounted at $m (source: mount, as configured)"
+    else leaked "host directory mounted at $m, which devkit.yaml does not ask for"; fi
+  done
 fi
 # The guest user has its own ~/.ssh with an authorized_keys holding your
 # public key, which is how SSH in works. What must never appear is a private

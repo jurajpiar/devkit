@@ -150,6 +150,26 @@ func TestSystemScriptTrustStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
+		// Distrust is recorded only when this boot flips a root from enabled
+		// to disabled, so a distro-disabled root is left to the distro.
+		`if grep -q "^mozilla/$f\.crt\$" "$CACONF"; then`,
+		`elif grep -q "^!mozilla/$f\.crt\$" "$CACONF"; then`,
+		"is already disabled by the distro",
+		// Non-login sessions get the trust settings from /etc/environment,
+		// written outside Lima's block.
+		`sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(SSL_CERT_FILE\|SSL_CERT_DIR\|CURL_CA_BUNDLE\|REQUESTS_CA_BUNDLE\|PIP_CERT\|NODE_OPTIONS\)=/d}' /etc/environment`,
+		"NODE_OPTIONS=--use-openssl-ca\n",
+		// The audit skips non-regular files, reads DER, bounds the cache age
+		// and exits 2 on a crash rather than 1.
+		"if os.path.isfile(path):",
+		`["openssl", "x509", "-inform", "DER", "-outform", "PEM"]`,
+		"CACHE_FRESH, CACHE_MAX = 86400, 7 * 86400",
+		"os._exit(2)",
+		// What the sandbox may see of the host, for the probe to judge mounts.
+		"cat > /etc/devkit/source.conf <<'EOF'",
+		"SOURCE=copy",
+		"MOUNT_POINT=\n",
+
 		"$APT install -y -q --only-upgrade ca-certificates",
 		"systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service",
 		"systemctl mask apt-daily.service apt-daily-upgrade.service",
@@ -248,6 +268,10 @@ func TestUserScript(t *testing.T) {
 	if !strings.Contains(s, `ln -s "/Users/alice/proj" "$HOME/workspace"`) {
 		t.Errorf("mount mode should symlink the mount: %s", s)
 	}
+	sys, _ := System(params(func(c *project.Config) { c.Source = project.SourceMount }))
+	if !strings.Contains(sys, "SOURCE=mount\nMOUNT_POINT=/Users/alice/proj\n") {
+		t.Errorf("mount mode should record the mount point for the probe: %s", sys)
+	}
 }
 
 // Adversarial: a hostile devkit.yaml tries to reach root through the
@@ -324,7 +348,7 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			start := strings.Index(s, "# ---- proxy account and proxy environment ----")
+			start := strings.Index(s, "# Runtimes that carry their own root list")
 			end := strings.Index(s[start:], "printf '%s\\n' \"$limablock\" >> /etc/environment\nfi\n")
 			if start < 0 || end < 0 {
 				t.Fatal("environment fragment not found")
@@ -337,6 +361,7 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			frag = strings.ReplaceAll(frag, "/etc/environment", q(env))
 			frag = strings.ReplaceAll(frag, "/etc/profile.d", q(dir))
 			frag = strings.ReplaceAll(frag, "/etc/apt/apt.conf.d", q(dir))
+			frag = strings.ReplaceAll(frag, "/usr/local/bin", q(dir))
 			frag = strings.ReplaceAll(frag, "sed -i", sed+" -i")
 			frag = strings.ReplaceAll(frag, "id devkit-proxy >/dev/null 2>&1 || useradd", "true || useradd")
 			script := "set -eu\nMODE=" + mode + "\n" + frag
@@ -367,6 +392,9 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			}
 			if mode == project.NetworkAllowlist && !strings.Contains(first, "HTTPS_PROXY=http://127.0.0.1:3128\n") {
 				t.Errorf("devkit proxy line missing:\n%s", first)
+			}
+			if strings.Count(first, "NODE_OPTIONS=--use-openssl-ca\n") != 1 || !strings.Contains(first, "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n") {
+				t.Errorf("trust settings should appear exactly once for non-login sessions:\n%s", first)
 			}
 		})
 	}

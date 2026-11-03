@@ -182,8 +182,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Stale trust is worth a few seconds on every up: a bundled root list in
 	// a runtime or a vendored bundle in the repo does not update itself.
 	fmt.Println()
-	if err := lima.ExecStream(ctx, name, "devkit-audit"); err != nil {
+	switch err := lima.ExecStream(ctx, name, shellScript(cfg, []string{"devkit-audit"})); auditExit(err) {
+	case 0:
+	case 1:
 		fmt.Println("Run 'devkit audit --deep' for the full scan.")
+	default:
+		fmt.Printf("Warning: the trust audit did not complete: %v\n", err)
 	}
 
 	fmt.Println()
