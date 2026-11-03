@@ -35,17 +35,17 @@ func escapeAttempts(t *testing.T, s *sandbox, hostDir string) {
 				t.Errorf("proxied request to %s should be denied by the proxy with 403: %s", target, out)
 			}
 		}
-		// UDP: the REJECT rule surfaces as EPERM on the send itself, or as
-		// a refusal on the next read; a reply would mean the host was reached.
+		// UDP: the REJECT rule surfaces as EPERM on the send itself. Only
+		// that counts: a timeout would be ambiguous, because the packet may
+		// have reached a host that simply did not answer.
 		py := `import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3)
 try:
-    s.sendto(b"x",("` + gw + `",2222)); s.recvfrom(16); print("got-reply")
-except (PermissionError, ConnectionRefusedError): print("refused")
-except socket.timeout: print("timeout")`
+    s.sendto(b"x",("` + gw + `",2222)); print("sent")
+except PermissionError: print("rejected-on-send")`
 		out, _ := s.shell("python3 -c '" + py + "'")
-		if !strings.Contains(out, "refused") && !strings.Contains(out, "timeout") {
-			t.Errorf("UDP to the host should be rejected: %s", out)
+		if !strings.Contains(out, "rejected-on-send") {
+			t.Errorf("UDP to the host should be rejected by the firewall at send time: %s", out)
 		}
 		// IPv6: the OUTPUT chain rejects it too.
 		out, _ = s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/2606:4700:4700::1111/443' 2>&1; echo exit=$?")
@@ -70,9 +70,11 @@ except socket.timeout: print("timeout")`
 			}
 		}
 		// Killing the proxy would not open anything, but it would be a denial
-		// of service the sandbox should not have either.
-		out, _ := s.shell("pkill -x devkit-egressproxy 2>&1; sleep 1; systemctl is-active devkit-egress")
-		if !strings.Contains(out, "active") || strings.Contains(out, "inactive") {
+		// of service the sandbox should not have either. Signal the service's
+		// real PID: process names are truncated to 15 characters, so a name
+		// match would silently target nothing.
+		out, _ := s.shell("pid=$(systemctl show -p MainPID --value devkit-egress); echo pid=$pid; kill \"$pid\" 2>&1; sleep 1; systemctl is-active devkit-egress")
+		if !strings.Contains(out, "Operation not permitted") || !strings.Contains(out, "\nactive") || strings.Contains(out, "pid=0") {
 			t.Errorf("sandbox user should not be able to stop the proxy: %s", out)
 		}
 		out, _ = s.shell("curl -s -m 10 -o /dev/null -w '%{http_code}' https://registry.npmjs.org/ ; echo exit=$?")
