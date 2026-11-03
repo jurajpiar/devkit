@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -88,14 +89,39 @@ type VM struct {
 	CPUs     int `yaml:"cpus"`
 	MemoryGB int `yaml:"memory_gb"`
 	DiskGB   int `yaml:"disk_gb"`
+	// SecurityUpdates applies Ubuntu's security pocket at every boot, before
+	// the firewall comes up. On by default: a frozen image is the one part
+	// of the sandbox that gets weaker every week. nil means on.
+	SecurityUpdates *bool `yaml:"security_updates,omitempty"`
 }
+
+// SecurityUpdatesOn is VM.SecurityUpdates with its default applied.
+func (v VM) SecurityUpdatesOn() bool { return v.SecurityUpdates == nil || *v.SecurityUpdates }
+
+// Values of Network.DNS.
+const (
+	DNSProxy     = "proxy"
+	DNSResolvers = "resolvers"
+)
 
 // Network controls outbound traffic from the VM.
 type Network struct {
 	Mode string `yaml:"mode"`
 	// Allow lists host patterns reachable in allowlist mode. Patterns:
-	// "example.com", "*.example.com" (one level), "**.example.com" (any depth).
+	// "example.com", "*.example.com" (one level), "**.example.com" (any depth),
+	// each reachable on the web ports 80 and 443 only, or "host:port" for
+	// exactly one other port.
 	Allow []string `yaml:"allow,omitempty"`
+	// DNS says who may resolve names. "proxy" (default): only the egress
+	// proxy, which resolves allowed hosts itself; the sandbox cannot query a
+	// resolver at all, so names cannot carry data out. "resolvers": the
+	// whole VM may query the configured resolvers, for tools that insist on
+	// resolving a name before they use the proxy.
+	DNS string `yaml:"dns,omitempty"`
+	// Forward lists guest ports to expose on the Mac at 127.0.0.1. Nothing
+	// is forwarded otherwise: a page the sandbox serves, opened in a
+	// browser, runs with the browser's unrestricted network.
+	Forward []int `yaml:"forward,omitempty"`
 	// AllowHost lets the VM reach services on the macOS host. Off by default.
 	AllowHost bool `yaml:"allow_host"`
 	// Distrust names root CAs, as in the system bundle ("AAA Certificate
@@ -229,7 +255,7 @@ var (
 	// hostRe is the allowlist grammar: an optional "*." or "**." prefix and
 	// then DNS labels. Nothing else, because entries end up in a root-owned
 	// file written by the provisioning script.
-	hostRe = regexp.MustCompile(`^(\*\*?\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	hostRe = regexp.MustCompile(`^(\*\*?\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?$`)
 	// repoRe and branchRe cover git URLs and ref names without shell
 	// metacharacters; both are interpolated into a command run in the VM.
 	repoRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~:/@%+-]*$`)
@@ -308,9 +334,24 @@ func (c *Config) Validate() error {
 	for i, h := range c.Network.Allow {
 		h = strings.ToLower(h)
 		if !hostRe.MatchString(h) {
-			return fmt.Errorf("network.allow entry %q must be a hostname, *.host or **.host (use mode: open to allow everything)", c.Network.Allow[i])
+			return fmt.Errorf("network.allow entry %q must be a hostname, *.host or **.host, optionally :port (use mode: open to allow everything)", c.Network.Allow[i])
+		}
+		if j := strings.LastIndex(h, ":"); j > 0 {
+			if port, _ := strconv.Atoi(h[j+1:]); port < 1 || port > 65535 {
+				return fmt.Errorf("network.allow entry %q has a port outside 1-65535", c.Network.Allow[i])
+			}
 		}
 		c.Network.Allow[i] = h
+	}
+	switch c.Network.DNS {
+	case "", DNSProxy, DNSResolvers:
+	default:
+		return fmt.Errorf("network.dns must be %q or %q", DNSProxy, DNSResolvers)
+	}
+	for _, p := range c.Network.Forward {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("network.forward port %d is outside 1-65535", p)
+		}
 	}
 	return nil
 }

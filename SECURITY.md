@@ -13,7 +13,9 @@ everything it tried.
 | Read or write host files | Blocked | Blocked | Blocked |
 | Reach services on the host (databases, agents, IDE) | Blocked | Blocked | Blocked |
 | Reach the internet | Allowed hosts only, logged | Anything, logged | Blocked |
-| Exfiltrate data over DNS (through the resolver) | Possible | Possible | Blocked |
+| Exfiltrate data over DNS (through the resolver) | Blocked (`dns: resolvers` reopens it) | Blocked (same) | Blocked |
+| Tunnel to a non-web port of an allowed host | Blocked unless `host:port` is listed | Blocked unless listed | Blocked |
+| Expose a listener to the Mac | Only ports in `forward` | Only ports in `forward` | Only ports in `forward` |
 | Change its own network policy | Blocked | Blocked | Blocked |
 | Escape the VM | Hypervisor boundary | Hypervisor boundary | Hypervisor boundary |
 
@@ -46,20 +48,45 @@ there, not devkit.
 
 **No access to the host.** The guest can normally reach the host at
 `host.lima.internal`, which is also its gateway. The firewall rejects all
-traffic to that address except DNS to the configured resolvers unless
-`network.allow_host: true`, in which case the host is reachable directly and
-is listed in `NO_PROXY`, so that traffic is not audited. In `none` mode DNS is
-rejected too, unless `allow_host: true`, which keeps the host reachable and,
-with it, any resolver running there.
+traffic to that address except the proxy's DNS to the configured resolvers,
+unless `network.allow_host: true`, in which case the host is reachable
+directly and is listed in `NO_PROXY`, so that traffic is not audited. In
+`none` mode DNS is rejected too, unless `allow_host: true`, which keeps the
+host reachable and, with it, any resolver running there.
+
+**Nothing listens towards the Mac.** Lima would forward every port the guest
+listens on to `127.0.0.1` on the host. devkit tells it to forward only the
+ports in `network.forward`. The reason is not the listener itself but what
+you might do with it: a page served by the sandbox, opened in your browser,
+runs with the browser's network, which the firewall never sees. The same goes
+for an IDE's remote session, whose local client acts on what the extension
+host in the guest asks of it. Treat anything you open from the sandbox as a
+bridge you chose to build.
 
 **Egress allowlist.** In `allowlist` and `open` modes an iptables `OUTPUT`
-chain accepts loopback, established connections, DNS to the resolvers in
-`/run/systemd/resolve/resolv.conf`, and packets owned by the proxy's service
-account. Everything else is rejected, so port 53 cannot be used to reach
-arbitrary endpoints. The proxy is an HTTP/CONNECT proxy; in `allowlist` mode
-it enforces `network.allow`, in `open` mode it allows every host. It is the
-only process that can open outbound TCP connections. Tools pick it up from
+chain accepts loopback, established connections, and packets owned by the
+proxy's service account, including that account's DNS to the resolvers in
+`/run/systemd/resolve/resolv.conf`. Everything else is rejected, so port 53
+cannot be used to reach arbitrary endpoints, and by default no other account
+can query a resolver at all: the proxy resolves allowed hosts itself, against
+the upstream resolvers rather than the local stub, so a query name cannot
+carry data out of the sandbox. `network.dns: resolvers` reopens DNS to the
+VM for tools that resolve before they use the proxy. The proxy is an
+HTTP/CONNECT proxy; in `allowlist` mode it enforces `network.allow`, in
+`open` mode it allows every host. An allowed host is reachable on ports 80
+and 443 only, unless the entry names another port, so allowing GitHub is not
+a tunnel to its SSH port or to anything else it listens on. It is the only
+process that can open outbound TCP connections. Tools pick it up from
 `HTTP_PROXY`/`HTTPS_PROXY`, set system-wide, and apt is configured separately.
+
+**The guest is patched.** Root applies Ubuntu's security pocket on every
+boot, before the firewall comes up, so the sandbox does not sit at the pinned
+image's patch level while the image ages. That matters more than anything
+else on this page once an attacker is inside: a local privilege escalation
+turns the sandbox user into root, and root can drop the firewall and reach
+your Mac's loopback services through Lima's gateway. A kernel update installed
+this way runs from the next `devkit up`. `vm.security_updates: false` turns
+the step off.
 Software that ignores proxy settings is simply blocked by the firewall.
 
 **Config values cannot inject into the policy.** `network.allow`, `repo`,
@@ -142,10 +169,16 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
 
 ## Accepted risks
 
-- **DNS exfiltration.** In `allowlist` and `open` modes DNS to the configured
-  resolvers is allowed so the proxy can resolve names. A determined attacker
-  can tunnel data through DNS queries to a domain they control. Use `none`
-  when that matters.
+- **DNS exfiltration with `dns: resolvers`.** With the default `dns: proxy`
+  the sandbox cannot send a query. If you switch to `resolvers`, DNS to the
+  configured resolvers is open to every account, and a determined attacker
+  can tunnel data through query names to a domain they control.
+- **Root in the guest.** The firewall and the uid separation are what keep
+  the host's loopback and the open internet out of reach. A privilege
+  escalation in the guest removes both; the VM boundary still protects your
+  files. The security-pocket updates at boot are the mitigation, together
+  with Ubuntu's own restrictions on unprivileged user namespaces, io_uring,
+  BPF and perf, which the test suite asserts.
 - **Allowed hosts are trusted.** If you allow `**.github.com`, code can push to
   any GitHub repository it has credentials for. Keep the list tight and read
   the log.

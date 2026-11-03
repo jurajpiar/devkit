@@ -39,35 +39,49 @@ func (f *Filter) GetAllowedHosts() []string {
 	return result
 }
 
-// IsAllowed checks if a host is allowed based on the configured patterns
+// IsAllowed reports whether host, given as "host" or "host:port", may be
+// reached. A pattern without a port allows the web ports only, 80 and 443;
+// a pattern written "host:port" allows exactly that port. A host with no
+// port is taken as a web-port request.
 func (f *Filter) IsAllowed(host string) bool {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	return f.CheckWithDetails(host).Allowed
+}
 
-	// Empty allowlist means nothing is allowed
-	if len(f.allowedPatterns) == 0 {
-		return false
+// webPorts are what an allow entry permits when it names no port. Anything
+// else on an allowed host (SSH, a database, an arbitrary TCP service) is a
+// tunnel, not a web request, and needs an explicit "host:port" entry.
+var webPorts = map[string]bool{"80": true, "443": true}
+
+// splitPattern separates an allow entry into its host pattern and the port
+// it names, "" when it names none.
+func splitPattern(pattern string) (string, string) {
+	if i := strings.LastIndex(pattern, ":"); i > 0 && !strings.Contains(pattern[i+1:], "]") {
+		return strings.ToLower(pattern[:i]), pattern[i+1:]
 	}
+	return strings.ToLower(pattern), ""
+}
 
-	// Normalize host (remove port if present)
-	host = normalizeHost(host)
-
-	for _, pattern := range f.allowedPatterns {
-		if matchPattern(pattern, host) {
-			return true
-		}
+// portAllowed applies the port policy for one matched pattern.
+func portAllowed(patternPort, port string) bool {
+	if patternPort != "" {
+		return port == patternPort
 	}
-
-	return false
+	return port == "" || webPorts[port]
 }
 
 // normalizeHost removes port from host if present and lowercases it
 func normalizeHost(host string) string {
-	// Remove port if present
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+	h, _ := splitHostPort(host)
+	return h
+}
+
+// splitHostPort returns the lowercased host and the port ("" when absent)
+// of "host", "host:port", "[v6]" or "[v6]:port".
+func splitHostPort(hostport string) (string, string) {
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		return strings.ToLower(h), p
 	}
-	return strings.ToLower(host)
+	return strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]")), ""
 }
 
 // matchPattern checks if a host matches a pattern
@@ -138,10 +152,11 @@ func (f *Filter) CheckWithDetails(host string) FilterResult {
 		return result
 	}
 
-	host = normalizeHost(host)
+	h, port := splitHostPort(host)
 
 	for _, pattern := range f.allowedPatterns {
-		if matchPattern(pattern, host) {
+		ph, pport := splitPattern(pattern)
+		if matchPattern(ph, h) && portAllowed(pport, port) {
 			result.Allowed = true
 			result.Pattern = pattern
 			return result

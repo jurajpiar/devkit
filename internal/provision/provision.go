@@ -115,6 +115,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 DEVKIT_USER="{{.User}}"
 MODE="{{.Config.Network.Mode}}"
+DNS="{{if .Config.Network.DNS}}{{.Config.Network.DNS}}{{else}}proxy{{end}}"
 
 mkdir -p /etc/devkit /var/log/devkit /var/lib/devkit {{.DropDir}}
 chmod 755 /var/log/devkit
@@ -147,6 +148,7 @@ loginctl enable-linger "$DEVKIT_USER" || true
 cat > /etc/devkit/network.conf <<'EOF'
 MODE={{.Config.Network.Mode}}
 ALLOW_HOST={{bool .Config.Network.AllowHost}}
+DNS={{if .Config.Network.DNS}}{{.Config.Network.DNS}}{{else}}proxy{{end}}
 EOF
 # What the sandbox may see of the host: nothing, or one mount at one path.
 cat > /etc/devkit/source.conf <<'EOF'
@@ -282,6 +284,66 @@ if [ -n "$WANT_PKGS" ] && [ "$(cat /var/lib/devkit/.packages 2>/dev/null || true
   $APT install -y --no-install-recommends $WANT_PKGS
   echo "$WANT_PKGS" > /var/lib/devkit/.packages
 fi
+
+# ---- kernel attack surface for unprivileged code ----
+# A local privilege escalation is what turns the sandbox user into root, and
+# root can drop the firewall. These close the interfaces most kernel exploits
+# of recent years needed from an unprivileged process; Ubuntu already
+# restricts unprivileged user namespaces, BPF and perf, and this pins the rest.
+cat > /etc/sysctl.d/90-devkit.conf <<'EOF'
+kernel.io_uring_disabled = 2
+kernel.unprivileged_bpf_disabled = 1
+kernel.perf_event_paranoid = 3
+vm.unprivileged_userfaultfd = 0
+kernel.yama.ptrace_scope = 1
+kernel.kptr_restrict = 1
+kernel.dmesg_restrict = 1
+kernel.apparmor_restrict_unprivileged_userns = 1
+kernel.sysrq = 0
+EOF
+sysctl -q -p /etc/sysctl.d/90-devkit.conf || true
+
+# ---- security updates: Ubuntu's security pocket, before the firewall ----
+# A pinned image gets weaker every week. Only the security pocket is
+# applied, so the rest of the system stays at the image's versions. A new
+# kernel on disk runs from the next restart.
+{{- if and .Config.VM.SecurityUpdatesOn (ne .Config.Network.Mode "none")}}
+SEC_SOURCES=/var/lib/devkit/security.sources
+if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+  . /etc/os-release
+  uris="$(awk '/^URIs:/{print $2; exit}' /etc/apt/sources.list.d/ubuntu.sources)"
+  cat > "$SEC_SOURCES" <<EOF
+Types: deb
+URIs: $uris
+Suites: ${VERSION_CODENAME}-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+  SECAPT="$APT -o Dir::Etc::SourceList=$SEC_SOURCES -o Dir::Etc::SourceParts=/dev/null"
+  before="$(ls /boot/vmlinuz-* 2>/dev/null | sort | tail -n1)"
+  # full-upgrade, not upgrade: a kernel security update arrives as a new
+  # package that upgrade would hold back.
+  if $SECAPT update -q >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive $SECAPT full-upgrade -y -q >/dev/null 2>&1; then
+    after="$(ls /boot/vmlinuz-* 2>/dev/null | sort | tail -n1)"
+    [ "$before" != "$after" ] && echo "devkit: a kernel security update was installed; it runs from the next devkit up" >&2
+  else
+    echo "devkit: could not apply security updates; continuing with the installed versions" >&2
+  fi
+fi
+{{- end}}
+
+# ---- DNS stub: off when only the proxy may resolve, so lookups fail fast ----
+# With DNS=proxy the firewall stops systemd-resolved forwarding anything, and
+# a lookup through its stub would wait out its retries. Without the stub,
+# /etc/resolv.conf points at a closed port and fails at once. resolved keeps
+# writing the upstream list the proxy reads.
+mkdir -p /etc/systemd/resolved.conf.d
+if [ "$MODE" = "none" ] || [ "${DNS:-proxy}" = "proxy" ]; then
+  printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/devkit.conf
+else
+  rm -f /etc/systemd/resolved.conf.d/devkit.conf
+fi
+systemctl restart systemd-resolved || true
 
 # ---- trust store: the distro's current bundle, minus network.distrust ----
 # ca-certificates is the source of truth and is refreshed on every boot, so a
@@ -438,11 +500,15 @@ iptables -A OUTPUT -d "$HOST_IP" -p tcp --sport 22 -j ACCEPT
 ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
 ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
 # DNS only to the configured resolvers, never to arbitrary port-53 endpoints,
-# and not at all when air-gapped.
+# and not at all when air-gapped. By default (DNS=proxy) only the proxy's
+# account may query them: it resolves allowed hosts itself, and nothing the
+# sandbox runs can put data into a query name. systemd-resolved's stub is
+# switched off in that mode, so lookups fail closed and at once.
 if [ "${MODE:-allowlist}" != "none" ]; then
+  if [ "${DNS:-proxy}" = "resolvers" ]; then DNS_OWNER=""; else DNS_OWNER="-m owner --uid-owner devkit-proxy"; fi
   for ip in $DNS_IPS; do
-    iptables -A OUTPUT -d "$ip" -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -d "$ip" -p tcp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -d "$ip" -p udp --dport 53 $DNS_OWNER -j ACCEPT
+    iptables -A OUTPUT -d "$ip" -p tcp --dport 53 $DNS_OWNER -j ACCEPT
   done
 fi
 # The host is also the gateway. Decide about it before any other rule so

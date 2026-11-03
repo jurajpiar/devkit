@@ -35,17 +35,19 @@ devkit logs               # the proxy's view: every host it allowed or blocked
 | Send packets to your Mac | held | held | held |
 | Fetch an off-allowlist host | held (proxy 403) | note (fetched, logged) | held (no route) |
 | Bypass the proxy directly | held | held | held |
-| Resolve a DNS name | note (possible) | note (possible) | held |
+| Resolve a DNS name | held (`dns: resolvers` makes it a note) | held (same) | held |
+| Tunnel to github.com:22 through the proxy | held | held | held |
 | Read host files or Lima secrets | held | held | held |
 | sudo, edit the firewall, kill the proxy | held | held | held |
 
-Two of these are `note`, not `held`, on purpose, so the example teaches the
+One of these is `note`, not `held`, on purpose, so the example teaches the
 real boundary rather than pretending there is none:
 
-- **DNS.** In `allowlist` and `open` modes the VM may query its resolvers, so a
-  determined program can tunnel data out through query names. `network.mode:
-  none` closes it. This is listed as an accepted risk in
-  [SECURITY.md](../../SECURITY.md).
+- **DNS, only if you ask for it.** By default only the proxy resolves names
+  and the sandbox cannot send a query, so this row is `held`. With
+  `network.dns: resolvers` the VM may query its resolvers, a determined
+  program can tunnel data out through query names, and the row becomes a
+  `note`. See [SECURITY.md](../../SECURITY.md).
 - **Off-allowlist hosts in `open` mode.** `open` means any host, still through
   the audited proxy and still in `devkit logs`; the firewall keeps rejecting
   anything that skips the proxy.

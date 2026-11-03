@@ -55,7 +55,16 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"/usr/bin/diff -q /run/lima-ssh-ready /mnt/lima-cidata/meta-data",
 		"/usr/bin/cat /mnt/lima-cidata/param.env",
 		`gpasswd -d "$DEVKIT_USER" sudo`,
-		`-d "$ip" -p udp --dport 53 -j ACCEPT`,
+		`-d "$ip" -p udp --dport 53 $DNS_OWNER -j ACCEPT`,
+		`DNS_OWNER="-m owner --uid-owner devkit-proxy"`,
+		"DNS=proxy\n",
+		`DNS="proxy"`,
+		"DNSStubListener=no",
+		"Suites: ${VERSION_CODENAME}-security",
+		"$SECAPT full-upgrade -y -q",
+		"kernel.io_uring_disabled = 2",
+		"sysctl -q -p /etc/sysctl.d/90-devkit.conf",
+		"-o Dir::Etc::SourceParts=/dev/null",
 		`iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT`,
 		`NO_PROXY_HOSTS="localhost,127.0.0.1"`,
 		`tmp="$(mktemp /var/lib/devkit/egressproxy.XXXXXX)"`,
@@ -81,8 +90,26 @@ func TestSystemScriptAllowlist(t *testing.T) {
 	if strings.Contains(s, "-p udp --dport 53 -j ACCEPT\n") && !strings.Contains(s, `-d "$ip" -p udp --dport 53`) {
 		t.Error("DNS rule must be scoped to resolver addresses")
 	}
-	if strings.Count(s, "--dport 53 -j ACCEPT") != 2 {
-		t.Errorf("expected exactly two scoped DNS rules, got %d", strings.Count(s, "--dport 53 -j ACCEPT"))
+	if strings.Count(s, "--dport 53 $DNS_OWNER -j ACCEPT") != 2 {
+		t.Errorf("expected exactly two scoped DNS rules, got %d", strings.Count(s, "--dport 53 $DNS_OWNER -j ACCEPT"))
+	}
+}
+
+func TestSystemScriptNetworkOptions(t *testing.T) {
+	// dns: resolvers reopens DNS to every account; security updates can be
+	// switched off; none mode never applies them (no network before the
+	// firewall either way, but no pocket to fetch from).
+	off := false
+	s, _ := System(params(func(c *project.Config) {
+		c.Network.DNS = project.DNSResolvers
+		c.VM.SecurityUpdates = &off
+	}))
+	if !strings.Contains(s, "DNS=resolvers\n") || strings.Contains(s, "Suites: ${VERSION_CODENAME}-security") {
+		t.Errorf("dns: resolvers and security_updates: false should be reflected:\n%s", s)
+	}
+	s, _ = System(params(func(c *project.Config) { c.Network.Mode = project.NetworkNone }))
+	if strings.Contains(s, "Suites: ${VERSION_CODENAME}-security") {
+		t.Error("none mode must not try to fetch security updates")
 	}
 }
 

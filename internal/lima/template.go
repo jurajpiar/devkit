@@ -96,6 +96,24 @@ ssh:
   localPort: {{.Config.SSHPort}}
   loadDotSSHPubKeys: true
 
+# Guest listeners are not forwarded to the Mac unless named in
+# network.forward. The first matching rule wins, so the catch-all comes last.
+portForwards:
+{{- range .Config.Network.Forward}}
+  - guestPort: {{.}}
+    hostIP: "127.0.0.1"
+{{- end}}
+  # Lima's documented form for "forward nothing else": 0.0.0.0 here matches
+  # any bound interface, and proto: any covers UDP as well as TCP.
+  - guestIP: "0.0.0.0"
+    guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
+  - guestIP: "::"
+    guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
+
 provision:
   - mode: system
     script: |

@@ -24,7 +24,7 @@ note()   { printf '  \033[33m[note]\033[0m    %s\n' "$1"; }
 section(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # The policy, as root applied it. Readable, not writable.
-MODE=allowlist ALLOW_HOST=0 SOURCE=copy MOUNT_POINT=
+MODE=allowlist ALLOW_HOST=0 DNS=proxy SOURCE=copy MOUNT_POINT=
 if [ -r /etc/devkit/network.conf ]; then . /etc/devkit/network.conf; fi
 # source.conf is read as data, not sourced: MOUNT_POINT is a host path and
 # may contain spaces or shell metacharacters.
@@ -120,15 +120,23 @@ if [ "$(curl -s -m 8 -o /dev/null -w '%{http_code}' https://registry.npmjs.org/ 
 fi
 
 section "Exfiltrating over DNS"
-# DNS to the configured resolvers is allowed unless the mode is none, so the
-# proxy can resolve names. A determined program can tunnel data through query
-# names. Documented in SECURITY.md as an accepted risk; none mode closes it.
+# By default only the proxy may resolve names (network.dns: proxy), so a
+# query name cannot carry data out. With dns: resolvers the whole VM may
+# query its resolvers, and a program can tunnel data through query names.
 if getent hosts example.com >/dev/null 2>&1; then
-  if [ "$MODE" = none ]; then leaked "DNS resolves in none mode"
-  else note "DNS resolves external names (tunnelling is possible; network.mode none stops it)"; fi
+  if [ "${DNS:-proxy}" = resolvers ] && [ "$MODE" != none ]; then note "DNS resolves external names (dns: resolvers; tunnelling is possible)"
+  else leaked "DNS resolves although network.dns is $DNS in $MODE mode"; fi
 else
-  held "DNS does not resolve"
+  held "DNS does not resolve for the sandbox user (only the proxy resolves)"
 fi
+# A tunnel to a non-web port of an allowed host is not a web request.
+code="$(curl -s -m 8 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%{http_connect}' https://github.com:22/ 2>/dev/null)"
+case "$code" in
+  403) held "proxy refuses a tunnel to github.com:22 (403); allowed hosts are web ports only" ;;
+  200) leaked "proxy opened a tunnel to github.com:22" ;;
+  000) if [ "$MODE" = none ]; then held "proxy is off (none mode)"; else held "no tunnel to github.com:22"; fi ;;
+  *)   held "tunnel to github.com:22 not established ($code)" ;;
+esac
 
 section "Reading your files and the VM's secrets"
 # The host filesystem is never mounted unless devkit.yaml says source: mount,

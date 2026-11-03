@@ -189,6 +189,7 @@ func TestSandboxGuarantees(t *testing.T) {
 	})
 
 	t.Run("escape attempts", func(t *testing.T) { escapeAttempts(t, s, dir) })
+	t.Run("hardening", func(t *testing.T) { hardeningAttempts(t, s, dir) })
 
 	t.Run("trust audit runs and reads the reference store", func(t *testing.T) {
 		out, _ := s.run("audit")
@@ -344,8 +345,14 @@ func TestSandboxGuarantees(t *testing.T) {
 		// 502 before any tunnel exists, never 200. A plain-HTTP 502 would not
 		// do, since the proxy also sends one after reaching a non-HTTP
 		// listener and failing to parse its reply.
-		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "502" {
-			t.Fatalf("open mode must not let the proxy tunnel to the host; want 502, got: %s", out)
+		// On the listener's port the port policy answers first: 403, since
+		// open mode still means web ports only. On 443 the policy allows the
+		// dial and the firewall must reject it: 502, never 200.
+		if out, _ = s.shell(hostTunnel); strings.TrimSpace(out) != "403" {
+			t.Fatalf("open mode: CONNECT to a non-web port must be refused by policy (403), got: %s", out)
+		}
+		if out, _ = s.shell("curl -s -m 10 -p -x http://127.0.0.1:3128 --noproxy '' -o /dev/null -w '%{http_connect}' https://host.lima.internal:443/ ; echo"); strings.TrimSpace(out) != "502" {
+			t.Fatalf("open mode must not let the proxy tunnel to the host on 443; want 502, got: %s", out)
 		}
 		if out, _ = s.shell(hostDirect); strings.Contains(out, "devkit-host-listener") {
 			t.Fatalf("open mode: direct dial reached the host listener: %s", out)

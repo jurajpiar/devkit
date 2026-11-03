@@ -147,3 +147,29 @@ func TestAllowGrammar(t *testing.T) {
 		t.Errorf("ordinary git url and branch rejected: %v", err)
 	}
 }
+
+func TestAllowPortsDNSAndForward(t *testing.T) {
+	c := Default()
+	c.Name = "x"
+	c.Network.Allow = []string{"github.com", "internal.example:8443", "**.corp.example:5432"}
+	c.Network.DNS = DNSResolvers
+	c.Network.Forward = []int{3000, 8080}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("ports, dns and forward should validate: %v", err)
+	}
+	for _, bad := range []func(*Config){
+		func(c *Config) { c.Network.Allow = []string{"github.com:0"} },
+		func(c *Config) { c.Network.Allow = []string{"github.com:70000"} },
+		func(c *Config) { c.Network.Allow = []string{"github.com:22:22"} },
+		func(c *Config) { c.Network.DNS = "open" },
+		func(c *Config) { c.Network.Forward = []int{0} },
+		func(c *Config) { c.Network.Forward = []int{65536} },
+	} {
+		c := Default()
+		c.Name = "x"
+		bad(c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("should be rejected: %+v", c.Network)
+		}
+	}
+}

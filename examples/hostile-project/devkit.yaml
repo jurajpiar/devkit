@@ -1,0 +1,30 @@
+# devkit sandbox for "hostile-project". One VM per project; see README.md.
+name: hostile-project
+source: copy            # copy | git | mount
+# repo: https://github.com/you/repo.git   # for source: git
+# branch: main
+
+tools:
+  node: "22"
+  containers: false     # rootless containerd + nerdctl inside the VM
+  # packages: [postgresql-client]
+
+vm:
+  cpus: 4
+  memory_gb: 8
+  disk_gb: 50
+
+ssh_port: 2222           # ssh devkit-hostile-project
+
+network:
+  mode: allowlist       # allowlist | open | none
+  allow:
+    - "registry.npmjs.org"
+    - "registry.yarnpkg.com"
+    - "github.com"
+    - "**.github.com"
+    - "**.githubusercontent.com"
+    - "nodejs.org"
+  allow_host: false     # let the VM reach services on your Mac
+
+# sudo: false            # root inside the VM can disable the firewall

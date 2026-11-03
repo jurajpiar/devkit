@@ -150,6 +150,8 @@ network:
     - github.com
     - "**.github.com"
   allow_host: false     # reach services on your Mac
+  # dns: proxy          # proxy (only the proxy resolves names) | resolvers
+  # forward: [3000]     # guest ports exposed on 127.0.0.1; nothing otherwise
   # distrust: [AAA Certificate Services]   # root CAs the VM must not trust
 
 # exclude: [.git, node_modules]   # never copied into the VM (defaults apply)
@@ -173,9 +175,22 @@ network:
 | `open` | Any host, via the audited proxy; the firewall still rejects direct connections | Trusted code, want the log |
 | `none` | Nothing, not even DNS | Air-gap after dependencies are installed: `devkit up --network none` |
 
-Allowed hosts are hostnames or IPs: `example.com` exact, `*.example.com` one
-level, `**.example.com` any depth. Anything else is rejected at validation.
-DNS is permitted only to the VM's configured resolvers.
+Allowed hosts are hostnames: `example.com` exact, `*.example.com` one
+level, `**.example.com` any depth. An entry allows the web ports, 80 and 443,
+and nothing else on that host; `host:port` allows exactly one other port.
+Anything else is rejected at validation. By default only the proxy may resolve
+names: it looks up allowed hosts itself, and the sandbox cannot send a DNS
+query at all, so a query name cannot carry data out. `dns: resolvers` reopens
+DNS to the whole VM for tools that resolve a name before they use the proxy.
+
+Nothing the sandbox listens on is reachable from your Mac unless its port is in
+`forward`. A page served from the sandbox and opened in your browser would run
+with the browser's unrestricted network, so forwarding is opt-in per port.
+
+The guest applies Ubuntu's security pocket on every boot, before the firewall
+comes up, so a VM does not stay at its image's patch level. `vm.security_updates:
+false` turns that off. A new kernel installed this way runs from the next
+`devkit up`.
 
 **Trust store.** The VM trusts what Ubuntu's `ca-certificates` package
 trusts, refreshed by root on every boot, so a VM created before a CA was

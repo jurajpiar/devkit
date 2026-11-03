@@ -154,6 +154,8 @@ func renderConfig(c *project.Config) string {
 		fmt.Fprintf(&b, "    - %q\n", h)
 	}
 	fmt.Fprintf(&b, "  allow_host: false     # let the VM reach services on your Mac\n")
+	fmt.Fprintf(&b, "  # dns: proxy          # only the proxy resolves names; resolvers opens DNS to the VM\n")
+	fmt.Fprintf(&b, "  # forward: [3000]     # guest ports exposed on 127.0.0.1; none otherwise\n")
 	fmt.Fprintf(&b, "\n# sudo: false            # root inside the VM can disable the firewall\n")
 	return b.String()
 }

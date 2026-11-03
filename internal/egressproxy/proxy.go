@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,11 +27,13 @@ type ProxyConfig struct {
 
 // Proxy is an HTTP/HTTPS proxy with domain filtering
 type Proxy struct {
-	config ProxyConfig
-	filter *Filter
-	audit  *AuditLogger
-	server *http.Server
-	mu     sync.Mutex
+	dialOnce sync.Once
+	dial     *net.Dialer
+	config   ProxyConfig
+	filter   *Filter
+	audit    *AuditLogger
+	server   *http.Server
+	mu       sync.Mutex
 }
 
 // NewProxy creates a new egress proxy
@@ -101,7 +105,7 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // handleConnect handles HTTPS CONNECT requests (tunneling)
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
-	host := r.Host
+	host := withDefaultPort(r.Host, "443")
 
 	// Check if host is allowed
 	result := p.filter.CheckWithDetails(host)
@@ -113,7 +117,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Establish connection to target
-	targetConn, err := net.DialTimeout("tcp", host, 10*time.Second)
+	targetConn, err := p.dialer().DialContext(r.Context(), "tcp", host)
 	if err != nil {
 		p.audit.LogError(host, err)
 		http.Error(w, fmt.Sprintf("Failed to connect to %s: %v", host, err), http.StatusBadGateway)
@@ -170,6 +174,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = r.Host
 	}
+	host = withDefaultPort(host, schemePort(r.URL.Scheme))
 
 	// Check if host is allowed
 	result := p.filter.CheckWithDetails(host)
@@ -189,11 +194,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Forward the request
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: p.dialer().DialContext, Proxy: nil},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Check if redirect target is allowed
-			if !p.filter.IsAllowed(req.URL.Host) {
-				return fmt.Errorf("redirect to %s blocked by allowlist", req.URL.Host)
+			target := withDefaultPort(req.URL.Host, schemePort(req.URL.Scheme))
+			if !p.filter.IsAllowed(target) {
+				return fmt.Errorf("redirect to %s blocked by allowlist", target)
 			}
 			return nil
 		},
@@ -245,4 +252,73 @@ func (p *Proxy) UpdateAllowedHosts(hosts []string) {
 // GetStats returns proxy statistics
 func (p *Proxy) GetStats() AuditStats {
 	return p.audit.GetStats()
+}
+
+// withDefaultPort returns hostport with port added when it names none, so
+// the allowlist's port policy always sees the port that would be dialled.
+func withDefaultPort(hostport, port string) string {
+	if _, _, err := net.SplitHostPort(hostport); err == nil {
+		return hostport
+	}
+	return net.JoinHostPort(strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]"), port)
+}
+
+// schemePort is the port a plain-HTTP proxy request implies by its scheme.
+func schemePort(scheme string) string {
+	if strings.EqualFold(scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+// resolvConf is where systemd-resolved keeps the real upstream resolvers.
+// /etc/resolv.conf points at the local stub, which cannot forward once the
+// firewall allows DNS to the proxy's account only.
+const resolvConf = "/run/systemd/resolve/resolv.conf"
+
+// dialer resolves names against the upstream resolvers directly, as the
+// proxy's own user, so that no other account in the VM needs DNS at all.
+func (p *Proxy) dialer() *net.Dialer {
+	p.dialOnce.Do(func() {
+		p.dial = &net.Dialer{Timeout: 10 * time.Second}
+		servers := upstreamResolvers(resolvConf)
+		if len(servers) == 0 {
+			return
+		}
+		p.dial.Resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				var last error
+				for _, s := range servers {
+					c, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, net.JoinHostPort(s, "53"))
+					if err == nil {
+						return c, nil
+					}
+					last = err
+				}
+				return nil, last
+			},
+		}
+	})
+	return p.dial
+}
+
+// upstreamResolvers reads the nameserver lines of a resolv.conf, skipping
+// loopback stubs. Empty when the file is absent, in which case the system
+// resolver is used.
+func upstreamResolvers(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "nameserver" {
+			if ip := net.ParseIP(f[1]); ip != nil && !ip.IsLoopback() {
+				out = append(out, f[1])
+			}
+		}
+	}
+	return out
 }
