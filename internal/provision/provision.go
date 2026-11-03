@@ -308,7 +308,7 @@ if [ "$MODE" != "none" ]; then
 export HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL http_proxy=$PROXY_URL https_proxy=$PROXY_URL
 export NO_PROXY=$NO_PROXY_HOSTS no_proxy=$NO_PROXY_HOSTS
 EOF
-  sed -i '/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d' /etc/environment
+  sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d}' /etc/environment
   cat >> /etc/environment <<EOF
 HTTP_PROXY=$PROXY_URL
 HTTPS_PROXY=$PROXY_URL
@@ -323,12 +323,13 @@ Acquire::https::Proxy "$PROXY_URL";
 EOF
 else
   rm -f /etc/profile.d/devkit-proxy.sh /etc/apt/apt.conf.d/99devkit-proxy
-  sed -i '/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d' /etc/environment
+  sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d}' /etc/environment
 fi
-# Keep Lima's block at the end of /etc/environment. Lima's boot script rewrites
-# that block on every boot and, if the file then differs, terminates the user's
-# sessions, which is the trigger for the logind stall above. With the block
-# last, later boots see no change and nothing is terminated.
+# Keep Lima's block at the end of /etc/environment, and never edit inside it:
+# the proxy edits above skip it. Lima's boot script rewrites that block on
+# every boot and, if the file then differs, terminates the user's sessions,
+# which is the trigger for the logind stall above. With the block last and
+# untouched, later boots see no change and nothing is terminated.
 if grep -q '^#LIMA-START' /etc/environment; then
   limablock="$(sed -n '/^#LIMA-START/,/^#LIMA-END/p' /etc/environment)"
   sed -i '/^#LIMA-START/,/^#LIMA-END/d' /etc/environment

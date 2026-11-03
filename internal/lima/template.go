@@ -62,6 +62,11 @@ mounts:
 mounts: []
 {{- end}}
 
+# The host's proxy settings never enter the VM: the only egress is devkit's
+# own proxy, and a propagated value would land in Lima's /etc/environment
+# block, which must stay byte-identical across boots.
+propagateProxyEnv: false
+
 # Rootless containers inside the VM are opt-in.
 containerd:
   system: false

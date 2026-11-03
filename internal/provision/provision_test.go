@@ -1,6 +1,10 @@
 package provision
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -297,5 +301,71 @@ func TestHostileConfigCannotReachRoot(t *testing.T) {
 	}
 	if strings.Count(usr, "\nEOF\n") != 1 {
 		t.Errorf("exactly one heredoc terminator expected in the user script:\n%s", usr)
+	}
+}
+
+// TestEnvironmentEditsAreIdempotent runs the /etc/environment fragment of the
+// system script twice, with proxy entries inside Lima's block, and checks that
+// the second run changes nothing and the block comes through untouched and
+// last. Lima terminates the user's sessions whenever the file differs after its
+// own rewrite, so any drift here re-arms the logind stall on every boot.
+func TestEnvironmentEditsAreIdempotent(t *testing.T) {
+	sed := "sed"
+	if runtime.GOOS == "darwin" {
+		sed = "gsed"
+	}
+	if _, err := exec.LookPath(sed); err != nil {
+		t.Skipf("needs GNU sed (%s)", sed)
+	}
+	limaBlock := "#LIMA-START\nHTTP_PROXY=http://host.proxy:3128\nhttp_proxy=http://host.proxy:3128\nPATH=/usr/bin\n#LIMA-END\n"
+	for _, mode := range []string{project.NetworkAllowlist, project.NetworkNone} {
+		t.Run(mode, func(t *testing.T) {
+			s, err := System(params(func(c *project.Config) { c.Network.Mode = mode }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := strings.Index(s, "# ---- proxy account and proxy environment ----")
+			end := strings.Index(s[start:], "printf '%s\\n' \"$limablock\" >> /etc/environment\nfi\n")
+			if start < 0 || end < 0 {
+				t.Fatal("environment fragment not found")
+			}
+			frag := s[start : start+end+len("printf '%s\\n' \"$limablock\" >> /etc/environment\nfi\n")]
+			dir := t.TempDir()
+			env := filepath.Join(dir, "environment")
+			frag = strings.ReplaceAll(frag, "/etc/environment", env)
+			frag = strings.ReplaceAll(frag, "/etc/profile.d", dir)
+			frag = strings.ReplaceAll(frag, "/etc/apt/apt.conf.d", dir)
+			frag = strings.ReplaceAll(frag, "sed -i", sed+" -i")
+			frag = strings.ReplaceAll(frag, "id devkit-proxy >/dev/null 2>&1 || useradd", "true || useradd")
+			script := "set -eu\nMODE=" + mode + "\n" + frag
+			if err := os.WriteFile(env, []byte("LANG=C\n"+limaBlock+"STALE=1\nHTTP_PROXY=http://old:1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run := func() string {
+				out, err := exec.Command("bash", "-c", script).CombinedOutput()
+				if err != nil {
+					t.Fatalf("fragment failed: %v\n%s", err, out)
+				}
+				b, err := os.ReadFile(env)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(b)
+			}
+			first := run()
+			second := run()
+			if first != second {
+				t.Errorf("second run changed the file:\n--- first\n%s--- second\n%s", first, second)
+			}
+			if !strings.HasSuffix(first, limaBlock) {
+				t.Errorf("Lima block not last or altered:\n%s", first)
+			}
+			if strings.Contains(strings.TrimSuffix(first, limaBlock), "http://old:1") {
+				t.Errorf("stale proxy line outside the block survived:\n%s", first)
+			}
+			if mode == project.NetworkAllowlist && !strings.Contains(first, "HTTPS_PROXY=http://127.0.0.1:3128\n") {
+				t.Errorf("devkit proxy line missing:\n%s", first)
+			}
+		})
 	}
 }
