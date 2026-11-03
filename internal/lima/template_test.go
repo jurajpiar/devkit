@@ -49,6 +49,17 @@ func TestRenderIsValidYAML(t *testing.T) {
 	if containerd["user"] != false {
 		t.Errorf("containers must be opt-in, got %v", containerd["user"])
 	}
+	// No host proxy may enter the guest: not from limactl's environment and
+	// not from the macOS system settings, which only an empty env entry drops.
+	if doc["propagateProxyEnv"] != false {
+		t.Errorf("propagateProxyEnv = %v, want false", doc["propagateProxyEnv"])
+	}
+	env, _ := doc["env"].(map[string]any)
+	for _, k := range proxyVars {
+		if v, ok := env[k]; !ok || v != "" {
+			t.Errorf("env.%s should be set to an empty string, got %v (present=%v)", k, v, ok)
+		}
+	}
 }
 
 func TestRenderMount(t *testing.T) {

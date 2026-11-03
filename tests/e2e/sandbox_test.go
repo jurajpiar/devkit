@@ -247,6 +247,29 @@ func TestSandboxGuarantees(t *testing.T) {
 		}
 	})
 
+	t.Run("host proxy never enters the guest and the environment file is stable", func(t *testing.T) {
+		// Lima would copy a proxy from limactl's environment into its block
+		// in /etc/environment, behind devkit's own settings, and the block
+		// would then differ on every boot. Reboot with one set and check
+		// that the file is byte-identical and the block carries no proxy.
+		before, _ := s.shell("md5sum /etc/environment")
+		for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+			t.Setenv(k, "http://host-proxy.invalid:3128")
+		}
+		s.mustRun("up", "--no-sync", "--no-install")
+		after, _ := s.shell("md5sum /etc/environment")
+		if before != after || !strings.Contains(before, "/etc/environment") {
+			t.Fatalf("/etc/environment changed across a reboot with a host proxy set:\n%s\n%s", before, after)
+		}
+		out, _ := s.shell("sed -n '/^#LIMA-START/,/^#LIMA-END/p' /etc/environment | grep -ci proxy; true")
+		if strings.TrimSpace(out) != "0" {
+			t.Fatalf("Lima's block should carry no proxy settings: %s", out)
+		}
+		if out, _ = s.shell("grep -c '^HTTPS_PROXY=http://127.0.0.1:3128$' /etc/environment; true"); strings.TrimSpace(out) != "1" {
+			t.Fatalf("devkit's own proxy line should be present once: %s", out)
+		}
+	})
+
 	t.Run("open mode is still audited", func(t *testing.T) {
 		s.mustRun("up", "--network", "open", "--no-sync", "--no-install")
 		out, _ := s.shell("curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com/ ; echo exit=$?")
