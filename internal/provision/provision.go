@@ -332,7 +332,9 @@ EOF
   before="$(ls /boot/vmlinuz-* 2>/dev/null | sort | tail -n1)"
   # full-upgrade, not upgrade: a kernel security update arrives as a new
   # package that upgrade would hold back.
-  if $SECAPT update -q >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive $SECAPT full-upgrade -y -q >/dev/null 2>&1; then
+  # Error-Mode=any: a failed index download is an error, not a warning
+  # followed by an upgrade against the previous lists.
+  if $SECAPT -o APT::Update::Error-Mode=any update -q >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive $SECAPT full-upgrade -y -q >/dev/null 2>&1; then
     after="$(ls /boot/vmlinuz-* 2>/dev/null | sort | tail -n1)"
     [ "$before" != "$after" ] && echo "devkit: a kernel security update was installed; it runs from the next devkit up" >&2
   else

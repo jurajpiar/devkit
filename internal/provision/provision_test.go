@@ -63,6 +63,7 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"rm -f /etc/systemd/resolved.conf.d/devkit.conf",
 		"Suites: ${VERSION_CODENAME}-security",
 		"$SECAPT full-upgrade -y -q",
+		"$SECAPT -o APT::Update::Error-Mode=any update -q",
 		"kernel.io_uring_disabled = 2",
 		"sysctl -q -p /etc/sysctl.d/90-devkit.conf",
 		"-o Dir::Etc::SourceParts=/dev/null",
