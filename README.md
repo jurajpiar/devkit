@@ -229,8 +229,8 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | `devkit sync` | Copy the directory again, or `git pull` |
 | `devkit logs [-f] [-n N]` | Egress audit log |
 | `devkit connect` | IDE connection instructions |
-| `devkit down` | Stop the VM, keep its disk |
-| `devkit rm [-f]` | Delete the VM |
+| `devkit down [name]` | Stop the VM, keep its disk |
+| `devkit rm [-f] [name]` | Delete the VM. Without a name, the current project's; completion lists the devkit VMs |
 | `devkit ls` | List devkit VMs |
 | `devkit doctor` | Check the host |
 

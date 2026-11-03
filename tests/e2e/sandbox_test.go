@@ -314,7 +314,7 @@ func TestNixToolchain(t *testing.T) {
 	})
 
 	t.Run("untrusted substituter is ignored", func(t *testing.T) {
-		out, _ := s.shell(`nix build --no-link --substituters https://evil.example --expr 'derivation { name = "x"; system = builtins.currentSystem; builder = "/bin/sh"; args = ["-c" "echo > $out"]; }' 2>&1; echo exit=$?`)
+		out, _ := s.shell(`nix build --no-link --impure --substituters https://evil.example --expr 'derivation { name = "x"; system = builtins.currentSystem; builder = "/bin/sh"; args = ["-c" "echo > $out"]; }' 2>&1; echo exit=$?`)
 		if !strings.Contains(out, "untrusted substituter") {
 			t.Fatalf("the daemon should refuse a substituter from a non-trusted user: %s", out)
 		}

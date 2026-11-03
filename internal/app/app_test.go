@@ -260,3 +260,18 @@ func TestPrintableStripsControlCharacters(t *testing.T) {
 		t.Errorf("printable(%q) = %q", in, got)
 	}
 }
+
+func TestTargetConfigByName(t *testing.T) {
+	cmd := rootCmd
+	for _, in := range []string{"devkit-demo", "demo"} {
+		c, err := targetConfig(cmd, []string{in})
+		if err != nil || c.VMName() != "devkit-demo" || c.SSHHost() != "devkit-demo" {
+			t.Errorf("targetConfig(%q) = %v, %v", in, c, err)
+		}
+	}
+	for _, in := range []string{"bad name", "../x", "DEVKIT-UP"} {
+		if _, err := targetConfig(cmd, []string{in}); err == nil {
+			t.Errorf("targetConfig(%q) should be rejected", in)
+		}
+	}
+}
