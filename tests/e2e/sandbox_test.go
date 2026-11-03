@@ -217,6 +217,13 @@ func TestSandboxGuarantees(t *testing.T) {
 		if strings.Contains(out, "200") {
 			t.Fatalf("open mode must reject connections that bypass the proxy: %s", out)
 		}
+		// The proxy allows every host in open mode, so it will try the Mac
+		// itself. The firewall must reject the proxy's connection too: a 502
+		// from the proxy, never a response from the host.
+		out, _ = s.shell("curl -s -m 10 -o /dev/null -w '%{http_code}' http://host.lima.internal:2222/ ; echo exit=$?")
+		if !strings.Contains(out, "502exit=0") {
+			t.Fatalf("open mode must not let the proxy reach the host; want 502, got: %s", out)
+		}
 		// Port 53 is not a loophole: only the resolvers accept it.
 		out, _ = s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' 2>&1; echo exit=$?")
 		if strings.Contains(out, "exit=0") {

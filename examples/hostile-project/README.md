@@ -6,11 +6,13 @@ escape suite in `tests/e2e/escape_test.go`.
 
 `probe.sh` runs as the sandbox user and, one attempt at a time, tries to reach
 your Mac, the open internet, your files, and the sandbox's own firewall and
-proxy. Each line reports what it tried:
+proxy. It judges each outcome against the policy root applied at boot, which
+it reads from `/etc/devkit/network.conf`:
 
-- `[held]` the sandbox stopped it. This is the outcome you want for an attack.
-- `[LEAKED]` the attempt succeeded. A boundary did not hold; investigate.
-- `[note]` an outcome that is expected and allowed, so neither good nor bad.
+- `[held]` the sandbox stopped it.
+- `[note]` it worked and the policy allows it: `open` mode, `allow_host`, DNS.
+- `[LEAKED]` it worked and the policy says it must not. Enforcement failed;
+  this should never appear.
 
 It is a reporter, not an exploit. There is no working payload, and it sends no
 data anywhere. The `postinstall` hook runs the same script, so `devkit up` also
@@ -30,8 +32,8 @@ devkit logs               # the proxy's view: every host it allowed or blocked
 
 | Attempt | `allowlist` (default) | `open` | `none` |
 |---|---|---|---|
-| Reach your Mac | held | held | held |
-| Fetch an off-allowlist host | held (proxy 403) | note (allowed, logged) | held |
+| Send packets to your Mac | held | held | held |
+| Fetch an off-allowlist host | held (proxy 403) | note (fetched, logged) | held (no route) |
 | Bypass the proxy directly | held | held | held |
 | Resolve a DNS name | note (possible) | note (possible) | held |
 | Read host files or Lima secrets | held | held | held |
@@ -40,7 +42,7 @@ devkit logs               # the proxy's view: every host it allowed or blocked
 Two of these are `note`, not `held`, on purpose, so the example teaches the
 real boundary rather than pretending there is none:
 
-- **DNS.** In `allowlist` and `open` modes the VM may query its resolver, so a
+- **DNS.** In `allowlist` and `open` modes the VM may query its resolvers, so a
   determined program can tunnel data out through query names. `network.mode:
   none` closes it. This is listed as an accepted risk in
   [SECURITY.md](../../SECURITY.md).
@@ -48,13 +50,16 @@ real boundary rather than pretending there is none:
   the audited proxy and still in `devkit logs`; the firewall keeps rejecting
   anything that skips the proxy.
 
-## Try to make it leak
+## Loosen the policy and watch
 
-This is the point of the example. Loosen `devkit.yaml` and watch a `held` turn
-into a `note` or a `LEAKED`:
+Change `devkit.yaml`, run `devkit up`, run the probe again. A `held` turns
+into a `note` where you opened the door, and nowhere else:
 
-- Set `network.allow_host: true`, run `devkit up`, and the host checks start
-  reporting the Mac as reachable, by design.
-- Add `example.com` to `network.allow` and the off-allowlist fetch is allowed.
-- Set `sudo: true` and the policy checks leak, because root can switch the
-  firewall off. The config says as much on that line.
+- `network.allow_host: true`: packets to your Mac now leave the VM, and any
+  port with a listener on the Mac opens.
+- `network.mode: open`: example.com is fetched, and `devkit logs` shows it.
+- `network.mode: none`: DNS stops resolving, and the proxy is off.
+- `sudo: true`: the sudo check reports `LEAKED`, which is accurate. Root in
+  the VM can switch the firewall off; the config says so on that line.
+
+`LEAKED` for anything else means devkit has a bug. Please report it.
