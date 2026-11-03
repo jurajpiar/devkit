@@ -37,6 +37,7 @@ func init() {
 	upCmd.Flags().String("network", "", "set network.mode in devkit.yaml before starting: allowlist, open or none")
 	upCmd.Flags().Bool("no-sync", false, "do not copy or clone the source into the VM")
 	upCmd.Flags().Bool("no-install", false, "do not install project dependencies")
+	upCmd.Flags().Bool("relock", false, "resolve toolchain versions again and rewrite .devkit/mise.lock")
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
@@ -156,9 +157,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	noInstall, _ := cmd.Flags().GetBool("no-install")
+	if cfg.Network.Mode != project.NetworkNone {
+		relock, _ := cmd.Flags().GetBool("relock")
+		if err := installToolchains(ctx, cfg, cwd, relock); err != nil {
+			return err
+		}
+	}
 	if !noInstall && cfg.Network.Mode != project.NetworkNone {
 		fmt.Println("Installing dependencies")
-		if err := lima.ExecStream(ctx, name, installScript); err != nil {
+		if err := lima.ExecStream(ctx, name, installScript(cfg)); err != nil {
 			fmt.Printf("Warning: dependency installation failed: %v\n", err)
 		}
 		printBlocked(ctx, name)
@@ -237,17 +244,126 @@ func syncSource(ctx context.Context, cfg *project.Config, cwd string) error {
 	return nil
 }
 
-const installScript = `cd "$HOME/workspace" 2>/dev/null || exit 0
-if [ -f package.json ]; then
-  # Lockfile-only installs: nothing newer than the lockfile is ever fetched.
-  if   [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile
-  elif [ -f yarn.lock ];      then yarn install --frozen-lockfile
+// installToolchains makes the toolchains from devkit.yaml available in the
+// VM. Everything here runs as the sandbox user through the audited proxy.
+//
+// mise: the first run resolves tools.versions and records every download's
+// URL and checksum in a lockfile, which devkit copies to .devkit/mise.lock
+// beside devkit.yaml. Later runs install with --locked, so nothing newer or
+// different can slip in until --relock is asked for.
+//
+// nix: the project's flake.nix provides the dev shell. The closure is fetched
+// now so that later commands start instantly. A flake.lock written by the
+// first evaluation is copied back for source: copy, since it belongs in the
+// repository.
+func installToolchains(ctx context.Context, cfg *project.Config, cwd string, relock bool) error {
+	name := cfg.VMName()
+	switch cfg.Tools.Manager {
+	case project.ManagerMise:
+		if len(cfg.Tools.Versions) == 0 {
+			return nil
+		}
+		home, err := guestHome(ctx, name)
+		if err != nil {
+			return err
+		}
+		hostLock := filepath.Join(cwd, project.LockDir, "mise.lock")
+		guestLock := home + "/.config/mise/mise.lock"
+		if relock {
+			_ = os.Remove(hostLock)
+		}
+		if _, err := os.Stat(hostLock); err == nil {
+			fmt.Printf("Installing toolchains pinned by %s\n", filepath.Join(project.LockDir, "mise.lock"))
+			if err := lima.CopyTo(ctx, name, hostLock, guestLock); err != nil {
+				return fmt.Errorf("copy mise.lock into VM: %w", err)
+			}
+			if err := lima.ExecStream(ctx, name, "mise install --locked"); err != nil {
+				return fmt.Errorf("mise install --locked failed (run 'devkit up --relock' after changing tools.versions): %w", err)
+			}
+			return nil
+		}
+		fmt.Println("Installing toolchains and recording their checksums")
+		_, _ = lima.Exec(ctx, name, "rm -f "+guestLock)
+		if err := lima.ExecStream(ctx, name, "mise install && mise lock --global"); err != nil {
+			return fmt.Errorf("mise install failed: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(hostLock), 0o755); err != nil {
+			return err
+		}
+		if err := lima.CopyFrom(ctx, name, guestLock, hostLock); err != nil {
+			return fmt.Errorf("copy mise.lock out of VM: %w", err)
+		}
+		fmt.Printf("Recorded toolchain checksums in %s; later runs refuse anything else\n", filepath.Join(project.LockDir, "mise.lock"))
+	case project.ManagerNix:
+		ws := "$HOME/" + provision.WorkspaceDir
+		out, _ := lima.Exec(ctx, name, "test -f "+ws+"/flake.nix && echo yes")
+		if strings.TrimSpace(out) != "yes" {
+			fmt.Println("No flake.nix in the workspace; 'devkit init --toolchain nix' writes a starting point")
+			return nil
+		}
+		fmt.Println("Fetching the dev shell from flake.nix")
+		if err := lima.ExecStream(ctx, name, "cd "+ws+" && nix develop --command true"); err != nil {
+			return fmt.Errorf("nix develop failed: %w", err)
+		}
+		hostLock := filepath.Join(cwd, "flake.lock")
+		if _, err := os.Stat(hostLock); err != nil && cfg.Source == project.SourceCopy {
+			home, err := guestHome(ctx, name)
+			if err != nil {
+				return err
+			}
+			if err := lima.CopyFrom(ctx, name, home+"/"+provision.WorkspaceDir+"/flake.lock", hostLock); err == nil {
+				fmt.Println("Wrote flake.lock from the first evaluation; commit it to pin the inputs")
+			}
+		}
+	}
+	return nil
+}
+
+func guestHome(ctx context.Context, name string) (string, error) {
+	out, err := lima.Exec(ctx, name, "printf %s \"$HOME\"")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return "", fmt.Errorf("could not read the sandbox home directory: %v", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// installScript installs project dependencies from the lockfile that is
+// present, or runs the configured install command. With manager: nix it
+// runs inside the dev shell.
+func installScript(cfg *project.Config) string {
+	body := cfg.Install
+	if body == "" {
+		body = genericInstall
+	}
+	script := "cd \"$HOME/" + provision.WorkspaceDir + "\" 2>/dev/null || exit 0\n"
+	if cfg.Tools.Manager == project.ManagerNix {
+		script += "if [ -f flake.nix ]; then exec nix develop --command bash -lc " + shellQuote(body) + "; fi\n"
+	}
+	return script + body
+}
+
+// genericInstall picks the install command from the lockfile. Every branch
+// installs exactly what the lockfile says and nothing newer.
+const genericInstall = `if [ -f package.json ]; then
+  if   [ -f pnpm-lock.yaml ]; then command -v pnpm >/dev/null || corepack enable; pnpm install --frozen-lockfile
+  elif [ -f yarn.lock ];      then command -v yarn >/dev/null || corepack enable; yarn install --frozen-lockfile
   elif [ -f bun.lockb ] || [ -f bun.lock ]; then echo "bun lockfile found but bun is not installed; skipping"
   elif [ -f package-lock.json ]; then npm ci
   else echo "no lockfile; running npm install (commit the lockfile it writes)"; npm install; fi
-else
-  echo "no package.json; nothing to install"
-fi`
+elif [ -f go.sum ];           then go mod download
+elif [ -f Cargo.lock ];       then cargo fetch --locked
+elif [ -f uv.lock ];          then uv sync --frozen
+elif [ -f poetry.lock ];      then poetry install
+elif [ -f requirements.txt ]; then python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+elif [ -f Gemfile.lock ];     then bundle install
+elif [ -f gradlew ];          then ./gradlew --no-daemon dependencies >/dev/null && echo "gradle dependencies resolved"
+elif [ -f pom.xml ];          then mvn -B -q dependency:resolve
+else echo "nothing to install (set install: in devkit.yaml to override)"; fi`
+
+// shellQuote wraps s in single quotes for bash.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
 
 // printBlocked summarises hosts the proxy refused during this run.
 func printBlocked(ctx context.Context, name string) {

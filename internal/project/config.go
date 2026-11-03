@@ -29,8 +29,19 @@ const (
 	SourceMount = "mount" // mount the current directory read-only (opt-in)
 )
 
+// Toolchain managers.
+const (
+	ManagerMise = "mise" // pinned mise binary installs the versions in tools.versions
+	ManagerNix  = "nix"  // multi-user Nix; the project's flake.nix provides the dev shell
+	ManagerNone = "none" // apt packages only
+)
+
 // DefaultFile is the config file name looked up in the current directory.
 const DefaultFile = "devkit.yaml"
+
+// LockDir is the per-project directory beside devkit.yaml where devkit keeps
+// state that is not part of the repository, such as the toolchain lockfile.
+const LockDir = ".devkit"
 
 // Config is the parsed devkit.yaml.
 type Config struct {
@@ -49,11 +60,22 @@ type Config struct {
 	// Sudo grants the sandbox user passwordless root inside the VM. Off by
 	// default because root can disable the egress firewall.
 	Sudo bool `yaml:"sudo,omitempty"`
+	// Install replaces the lockfile-based dependency install that devkit
+	// would otherwise pick from the files in the workspace. It runs as the
+	// sandbox user, inside the dev shell when manager is nix.
+	Install string `yaml:"install,omitempty"`
 }
 
-// Tools lists what gets installed into the VM at first boot.
+// Tools lists what gets installed into the VM.
 type Tools struct {
-	// Node is a Node.js major version such as "22". Empty means no Node.js.
+	// Manager chooses how language toolchains get into the VM: mise, nix or
+	// none. Empty means mise when versions are set, otherwise none.
+	Manager string `yaml:"manager,omitempty"`
+	// Versions maps a mise tool name to a version, such as node: "22" or
+	// go: "1.27". Only used with manager: mise. A mise.toml or idiomatic
+	// version file in the repository layers on top of these.
+	Versions map[string]string `yaml:"versions,omitempty"`
+	// Node is shorthand for versions.node, kept for older configs.
 	Node string `yaml:"node,omitempty"`
 	// Containers installs rootless containerd and nerdctl inside the VM.
 	Containers bool `yaml:"containers"`
@@ -78,20 +100,27 @@ type Network struct {
 	AllowHost bool `yaml:"allow_host"`
 }
 
-// DefaultAllow is the seed allowlist for a Node.js project.
+// DefaultAllow is the seed allowlist every project gets. devkit init adds
+// the registries for the ecosystems it detects and the toolchain manager's
+// download hosts on top.
 var DefaultAllow = []string{
-	"registry.npmjs.org",
-	"registry.yarnpkg.com",
 	"github.com",
 	"**.github.com",
 	"**.githubusercontent.com",
-	"nodejs.org",
+}
+
+// ManagerHosts are the hosts a toolchain manager needs to fetch and verify
+// toolchains. Tool-specific hosts live in package detect.
+var ManagerHosts = map[string][]string{
+	ManagerMise: {"mise-versions.jdx.dev", "**.sigstore.dev"},
+	ManagerNix:  {"cache.nixos.org", "channels.nixos.org"},
 }
 
 // DefaultExclude lists paths never copied into the VM.
 var DefaultExclude = []string{
-	".git", "node_modules", ".next", "dist", "build", ".cache",
-	".DS_Store", "._*", "*.log", "devkit.yaml", ".devkit",
+	".git", "node_modules", ".next", "dist", "build", ".cache", "target",
+	".venv", "__pycache__", "vendor",
+	".DS_Store", "._*", "*.log", "devkit.yaml", LockDir,
 }
 
 // Default returns a config with every default applied.
@@ -122,6 +151,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Network.Mode == "" {
 		c.Network.Mode = NetworkAllowlist
+	}
+	if c.Tools.Node != "" {
+		if c.Tools.Versions == nil {
+			c.Tools.Versions = map[string]string{}
+		}
+		if c.Tools.Versions["node"] == "" {
+			c.Tools.Versions["node"] = c.Tools.Node
+		}
+		c.Tools.Node = ""
+	}
+	if c.Tools.Manager == "" {
+		c.Tools.Manager = ManagerNone
+		if len(c.Tools.Versions) > 0 {
+			c.Tools.Manager = ManagerMise
+		}
 	}
 	if c.Network.Allow == nil {
 		c.Network.Allow = append([]string(nil), DefaultAllow...)
@@ -185,8 +229,11 @@ var (
 	// metacharacters; both are interpolated into a command run in the VM.
 	repoRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~:/@%+-]*$`)
 	branchRe = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._/-]*$`)
-	nodeRe   = regexp.MustCompile(`^[0-9]{1,3}$`)
-	pkgRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
+	// toolRe and versionRe cover mise tool short names and version specs;
+	// both end up in a TOML file the user provisioning script writes.
+	toolRe    = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,40}$`)
+	versionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,40}$`)
+	pkgRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
 )
 
 // Validate checks the config for mistakes a user could make.
@@ -223,8 +270,22 @@ func (c *Config) Validate() error {
 	if c.VM.CPUs < 1 || c.VM.MemoryGB < 1 || c.VM.DiskGB < 10 {
 		return fmt.Errorf("vm needs at least 1 cpu, 1 GB memory and 10 GB disk")
 	}
-	if c.Tools.Node != "" && !nodeRe.MatchString(c.Tools.Node) {
-		return fmt.Errorf("tools.node must be a major version such as \"22\" (got %q)", c.Tools.Node)
+	switch c.Tools.Manager {
+	case ManagerMise, ManagerNone:
+	case ManagerNix:
+		if len(c.Tools.Versions) > 0 {
+			return fmt.Errorf("tools.versions is not used with manager: nix; put toolchains in flake.nix")
+		}
+	default:
+		return fmt.Errorf("tools.manager must be mise, nix or none (got %q)", c.Tools.Manager)
+	}
+	for tool, v := range c.Tools.Versions {
+		if !toolRe.MatchString(tool) {
+			return fmt.Errorf("tools.versions key %q is not a mise tool name (backends such as aqua: belong in the repo's mise.toml)", tool)
+		}
+		if !versionRe.MatchString(v) {
+			return fmt.Errorf("tools.versions.%s %q is not a version", tool, v)
+		}
 	}
 	for _, p := range c.Tools.Packages {
 		if !pkgRe.MatchString(p) {

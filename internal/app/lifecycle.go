@@ -120,12 +120,7 @@ var shellCmd = &cobra.Command{
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err
 		}
-		ws := "$HOME/" + provision.WorkspaceDir
-		script := fmt.Sprintf("cd %s 2>/dev/null; exec bash -l", ws)
-		if len(args) > 0 {
-			script = fmt.Sprintf("cd %s 2>/dev/null; %s", ws, strings.Join(args, " "))
-		}
-		return lima.Shell(cmd.Context(), cfg.VMName(), "", "bash", "-lc", script)
+		return lima.Shell(cmd.Context(), cfg.VMName(), "", "bash", "-lc", shellScript(cfg, args))
 	},
 }
 
@@ -180,6 +175,22 @@ func init() {
 	rmCmd.Flags().BoolP("force", "f", false, "do not ask for confirmation")
 	logsCmd.Flags().BoolP("follow", "f", false, "keep following the log")
 	logsCmd.Flags().IntP("lines", "n", 100, "number of lines to show")
+}
+
+// shellScript opens a login shell in the workspace, or runs a command there.
+// With manager: nix and a flake.nix present, both happen inside the dev
+// shell so the project's toolchains are on PATH.
+func shellScript(cfg *project.Config, args []string) string {
+	ws := "$HOME/" + provision.WorkspaceDir
+	inner := "exec bash -l"
+	if len(args) > 0 {
+		inner = strings.Join(args, " ")
+	}
+	if cfg.Tools.Manager == project.ManagerNix {
+		return fmt.Sprintf("cd %s 2>/dev/null; if [ -f flake.nix ]; then exec nix develop --command bash -lc %s; fi; %s",
+			ws, shellQuote(inner), inner)
+	}
+	return fmt.Sprintf("cd %s 2>/dev/null; %s", ws, inner)
 }
 
 func mustBeRunning(cmd *cobra.Command, cfg *project.Config) error {

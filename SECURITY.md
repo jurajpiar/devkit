@@ -48,9 +48,21 @@ only process that can open outbound TCP connections. Tools pick it up from
 Software that ignores proxy settings is simply blocked by the firewall.
 
 **Config values cannot inject into the policy.** `network.allow`, `repo`,
-`branch`, `tools.node` and `tools.packages` are validated against strict
+`branch`, `tools.versions` and `tools.packages` are validated against strict
 grammars, and the policy files are written through quoted heredocs, so a
-hostile `devkit.yaml` cannot run commands as root in the VM.
+hostile `devkit.yaml` cannot run commands as root in the VM. `install:` is
+deliberately free-form: it runs as the sandbox user, which is the thing being
+sandboxed.
+
+**Toolchains are installed by the sandbox user.** Root installs only the
+manager (mise or Nix) from a release archive pinned by SHA-256 in devkit's
+source, with the pin taken after verifying the upstream signature. The
+toolchains come in afterwards as the sandbox user, through the proxy and into
+the audit log. mise runs with plugin backends disabled, provenance checks on
+every install, a three-day minimum release age, and a lockfile that devkit
+writes on the first run and enforces with `--locked` afterwards. Nix checks
+every substitute against the cache's signing key and pins inputs in
+`flake.lock`.
 
 **Air gap.** `network.mode: none` rejects all outbound traffic including DNS.
 Incoming SSH still works because its return packets are an established
@@ -93,11 +105,17 @@ target host to `/var/log/devkit/egress.log`. `devkit logs` reads it, and
 - **Resource use.** The VM is sized by `vm:`. Code inside can exhaust its own
   CPU, memory and disk but not the host's beyond those limits.
 - **Supply chain before the sandbox.** devkit itself and Lima are installed
-  by you; verify them. The Ubuntu image is pinned by digest, Node.js comes
-  from NodeSource's apt repository verified against a signing key embedded in
-  devkit, and apt verifies Ubuntu packages. See "What gets downloaded" in the
-  README. Between boot and the end of provisioning the firewall is not yet
-  applied; only root runs during that window.
+  by you; verify them. The Ubuntu image, mise and Nix are pinned by digest,
+  and apt verifies Ubuntu packages. See "What gets downloaded" in the README.
+  Between boot and the end of provisioning the firewall is not yet applied;
+  only root runs during that window, and that is when the manager's archive
+  is fetched and hash-checked.
+- **Toolchain verification is uneven.** mise verifies Node against upstream's
+  signed checksums, Go against a same-origin checksum, Python and Ruby builds
+  against GitHub attestations, and `rustup-init` not at all. The lockfile
+  turns each of those into a pin after the first run, so the exposure is the
+  first `devkit up` and every `--relock`. Nix verifies everything against the
+  cache key but trusts the hashes you commit in `flake.lock`.
 - **Lima user key.** Lima's SSH key in `~/.lima/_config/user` grants access to
   every Lima VM on the machine. That is Lima's design, not devkit's.
 

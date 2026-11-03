@@ -34,25 +34,32 @@ func TestSlugAndRepoName(t *testing.T) {
 	}
 }
 
-func TestNodeMajor(t *testing.T) {
-	for in, want := range map[string]string{"node:22-alpine": "22", "20.11.1": "20", "lts": "", "node:lts-alpine": ""} {
-		if got := nodeMajor(in); got != want {
-			t.Errorf("nodeMajor(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestRenderConfigParses(t *testing.T) {
 	c := project.Default()
 	c.Name = "demo"
-	c.Tools.Node = "22"
+	c.Tools.Manager = project.ManagerMise
+	c.Tools.Versions = map[string]string{"node": "22", "go": "1.27"}
+	c.Tools.Packages = []string{"pkg-config"}
+	c.Install = "make deps"
 	c.SSHPort = 2230
 	got, err := project.Parse([]byte(renderConfig(c)))
 	if err != nil {
 		t.Fatalf("rendered config does not parse: %v\n%s", err, renderConfig(c))
 	}
-	if got.Name != "demo" || got.SSHPort != 2230 || got.Tools.Node != "22" || len(got.Network.Allow) != len(project.DefaultAllow) {
+	if got.Name != "demo" || got.SSHPort != 2230 || got.Tools.Manager != project.ManagerMise ||
+		got.Tools.Versions["node"] != "22" || got.Tools.Versions["go"] != "1.27" ||
+		len(got.Tools.Packages) != 1 || len(got.Network.Allow) != len(project.DefaultAllow) {
 		t.Fatalf("round trip lost data: %+v", got)
+	}
+	if got.Install != "" {
+		t.Fatal("install is only ever written by the user, not by init")
+	}
+	for _, m := range []string{project.ManagerNix, project.ManagerNone} {
+		c.Tools.Manager = m
+		c.Tools.Versions = nil
+		if got, err := project.Parse([]byte(renderConfig(c))); err != nil || got.Tools.Manager != m {
+			t.Fatalf("%s config does not round-trip: %v", m, err)
+		}
 	}
 	c.Source = project.SourceGit
 	c.Repo = "https://github.com/x/y.git"
@@ -181,5 +188,68 @@ func TestFindSourceIgnoresWorkingDirectory(t *testing.T) {
 	t.Setenv("DEVKIT_SRC", dir)
 	if src, err := findSource(); err != nil || src != dir {
 		t.Fatalf("DEVKIT_SRC should be honoured: %v %q", err, src)
+	}
+}
+
+func TestInstallScript(t *testing.T) {
+	c := project.Default()
+	c.Tools.Manager = project.ManagerMise
+	s := installScript(c)
+	for _, want := range []string{
+		`cd "$HOME/workspace" 2>/dev/null || exit 0`,
+		"pnpm install --frozen-lockfile", "yarn install --frozen-lockfile", "npm ci",
+		"go mod download", "cargo fetch --locked", "uv sync --frozen", "bundle install",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install script missing %q", want)
+		}
+	}
+	if strings.Contains(s, "nix develop") {
+		t.Error("mise mode must not call nix")
+	}
+
+	c.Install = "make deps && echo it's done"
+	s = installScript(c)
+	if !strings.HasSuffix(s, "make deps && echo it's done") || strings.Contains(s, "npm ci") {
+		t.Errorf("install: must replace the generic script:\n%s", s)
+	}
+
+	c.Tools.Manager = project.ManagerNix
+	s = installScript(c)
+	want := `if [ -f flake.nix ]; then exec nix develop --command bash -lc 'make deps && echo it'\''s done'; fi`
+	if !strings.Contains(s, want) {
+		t.Errorf("nix mode should run the install inside the dev shell with safe quoting:\n%s", s)
+	}
+}
+
+func TestShellScript(t *testing.T) {
+	c := project.Default()
+	c.Tools.Manager = project.ManagerMise
+	if got := shellScript(c, nil); got != `cd $HOME/workspace 2>/dev/null; exec bash -l` {
+		t.Errorf("mise shell: %q", got)
+	}
+	if got := shellScript(c, []string{"node", "--version"}); !strings.HasSuffix(got, "; node --version") {
+		t.Errorf("mise command: %q", got)
+	}
+	c.Tools.Manager = project.ManagerNix
+	got := shellScript(c, []string{"go", "version"})
+	if !strings.Contains(got, `nix develop --command bash -lc 'go version'`) || !strings.HasSuffix(got, "; go version") {
+		t.Errorf("nix command should run in the dev shell and fall back without a flake: %q", got)
+	}
+}
+
+func TestRenderFlake(t *testing.T) {
+	f := renderFlake(map[string]string{"node": "22", "go": "1.27", "python": "3.12", "ruby": "3.3.6", "java": "21", "rust": "latest"})
+	for _, want := range []string{
+		`inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"`,
+		"packages = with pkgs; [ go_1_27 jdk21 nodejs_22 python312 ruby_3_3 cargo rustc rustfmt clippy ];",
+		`"aarch64-linux" "x86_64-linux"`,
+	} {
+		if !strings.Contains(f, want) {
+			t.Errorf("flake missing %q:\n%s", want, f)
+		}
+	}
+	if !strings.Contains(renderFlake(nil), "[ git ]") {
+		t.Error("an empty version set should still produce a usable shell")
 	}
 }
