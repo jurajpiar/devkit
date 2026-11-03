@@ -27,9 +27,12 @@ func escapeAttempts(t *testing.T, s *sandbox, hostDir string) {
 			if strings.Contains(out, "exit=0") {
 				t.Errorf("direct TCP to %s should be rejected: %s", target, out)
 			}
+			// The proxy denies with 403 before connecting. Anything else,
+			// including a banner from sshd or a connection error, would mean
+			// the proxy tried to reach the host.
 			out, _ = s.shell("curl -s -m 5 -o /dev/null -w '%{http_code}' http://" + target + "/; echo exit=$?")
-			if strings.Contains(out, "200") {
-				t.Errorf("proxied request to %s got through: %s", target, out)
+			if !strings.Contains(out, "403exit=0") {
+				t.Errorf("proxied request to %s should be denied by the proxy with 403: %s", target, out)
 			}
 		}
 		// UDP: the REJECT rule surfaces as EPERM on the send itself, or as

@@ -84,7 +84,8 @@ flowchart LR
     code -- "every connection" --> proxy
     proxy -- "on the list" --> ok
     proxy -- "not on the list" --> no
-    code -. "any other route:<br/>direct, to your Mac, over DNS" .-> no
+    code -- "DNS, to the VM's<br/>resolvers only" --> ok
+    code -. "any other route:<br/>direct, or to your Mac" .-> no
 ```
 
 Three things make this hold. The VM has no shared folders and no sudo, so the
@@ -92,8 +93,10 @@ code sees an empty Ubuntu machine. A firewall written by root at boot lets
 only the proxy's own user open connections, so a program that ignores the
 proxy settings is rejected rather than let out. And the proxy decides by
 hostname and logs every attempt, which is what `devkit logs` shows. It does
-not inspect content; TLS passes through untouched. In `none` mode the firewall
-rejects everything, DNS included.
+not inspect content; TLS passes through untouched. DNS is the one direct
+exception: the VM may query its configured resolvers, so a determined program
+can tunnel data through DNS. `none` mode closes that too by rejecting
+everything, DNS included.
 
 ## Configuration
 
