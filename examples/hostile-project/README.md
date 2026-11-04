@@ -37,7 +37,7 @@ devkit logs               # the proxy's view: every host it allowed or blocked
 | Bypass the proxy directly | held | held | held |
 | Resolve a DNS name | held (`dns: resolvers` makes it a note) | held (same) | held |
 | Tunnel to github.com:22 through the proxy | held | held | held |
-| Vendor a stale root CA (`certs/`, see `devkit audit`) | named stale | named stale | named stale |
+| Vendor a stale root CA (`certs/`, see `devkit audit`) | named stale | named stale | only flagged with a recent cached Mozilla store |
 | Read host files or Lima secrets | held | held | held |
 | sudo, edit the firewall, kill the proxy | held | held | held |
 
