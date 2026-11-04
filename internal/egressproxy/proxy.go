@@ -314,11 +314,16 @@ func (p *Proxy) dialer() *net.Dialer {
 // before the failover connection resends it to the next.
 const perUpstreamTimeout = 2500 * time.Millisecond
 
-// failoverConn is a connected UDP DNS socket that moves to the next upstream
-// when the current one does not answer within perUpstream. It keeps the last
-// datagram written so it can resend it to each upstream in turn, which makes
-// a silent primary resolver fail over to a working secondary within one
-// query instead of relying on the resolver's own retry.
+// failoverConn is a DNS socket that moves to the next upstream when the
+// current one cannot be dialled or does not answer within perUpstream. It
+// keeps the last datagram written so it can resend it to each upstream in
+// turn, which makes a silent or refusing primary fail over to a working
+// secondary within one query instead of relying on the resolver's own retry.
+//
+// For UDP a datagram is a whole answer. For TCP the answer is a length-prefixed
+// frame that may arrive in pieces; the conn acquires the complete frame from
+// one upstream before handing any of it to the caller, so a failover never
+// splices two upstreams' bytes into one message.
 type failoverConn struct {
 	ctx         context.Context
 	network     string // "udp" or "tcp", as the resolver requested
@@ -330,6 +335,7 @@ type failoverConn struct {
 	idx      int
 	lastMsg  []byte
 	deadline time.Time
+	frame    []byte // tcp: the complete frame being served, if any
 }
 
 // newFailoverConn returns a net.Conn for UDP (a PacketConn, so Go uses
@@ -341,7 +347,7 @@ func newFailoverConn(ctx context.Context, network string, addrs []string, perUps
 		network = "udp"
 	}
 	c := &failoverConn{ctx: ctx, network: network, addrs: addrs, perUpstream: perUpstream}
-	if err := c.dialCurrent(); err != nil {
+	if err := c.dialNext(); err != nil {
 		return nil, err
 	}
 	if network == "udp" {
@@ -361,74 +367,144 @@ func (c *udpFailoverConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	return n, c.RemoteAddr(), err
 }
 
-func (c *failoverConn) dialCurrent() error {
-	conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(c.ctx, c.network, c.addrs[c.idx])
-	if err != nil {
-		return err
+// dialNext dials the upstream at idx, advancing past any that refuse, so a
+// primary that rejects TCP (or is unreachable) does not end the query while
+// a secondary remains. Returns the last error when every upstream fails.
+func (c *failoverConn) dialNext() error {
+	var last error
+	for c.idx < len(c.addrs) {
+		conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(c.ctx, c.network, c.addrs[c.idx])
+		if err == nil {
+			c.conn = conn
+			return nil
+		}
+		last = err
+		c.idx++
 	}
-	c.conn = conn
-	return nil
+	c.idx = len(c.addrs) - 1
+	return last
+}
+
+// advance closes the current upstream, moves to the next that can be dialled
+// and resends the last query. false when no upstream remains.
+func (c *failoverConn) advance() bool {
+	if c.idx+1 >= len(c.addrs) {
+		return false
+	}
+	c.conn.Close()
+	c.idx++
+	if err := c.dialNext(); err != nil {
+		return false
+	}
+	if len(c.lastMsg) > 0 {
+		if _, err := c.conn.Write(c.lastMsg); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *failoverConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.lastMsg = append(c.lastMsg[:0], b...)
+	c.frame = nil // a new query: any buffered frame belongs to the old one
 	return c.conn.Write(b)
+}
+
+// armDeadline sets the socket read deadline for the current attempt: a short
+// cap while another upstream remains, the full remaining deadline for the
+// last (or only) one. Returns false, having set nothing, when a set deadline
+// has already passed, so an expired deadline never turns into "block forever".
+func (c *failoverConn) armDeadline() bool {
+	hasDeadline := !c.deadline.IsZero()
+	if hasDeadline && !time.Now().Before(c.deadline) {
+		return false
+	}
+	if c.idx+1 >= len(c.addrs) {
+		if hasDeadline {
+			_ = c.conn.SetReadDeadline(c.deadline)
+		} else {
+			_ = c.conn.SetReadDeadline(time.Time{})
+		}
+		return true
+	}
+	cap := time.Now().Add(c.perUpstream)
+	if hasDeadline && c.deadline.Before(cap) {
+		cap = c.deadline
+	}
+	_ = c.conn.SetReadDeadline(cap)
+	return true
+}
+
+func (c *failoverConn) timeout() error {
+	return &net.OpError{Op: "read", Net: c.network, Err: errReadTimeout}
 }
 
 func (c *failoverConn) Read(b []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.network == "tcp" {
+		return c.readTCP(b)
+	}
+	// UDP: one datagram is one answer; fail over between whole datagrams.
 	var lastErr error
 	for {
-		hasDeadline := !c.deadline.IsZero()
-		if hasDeadline && !time.Now().Before(c.deadline) {
-			// A set deadline that has already passed: never clear the read
-			// deadline (which would block forever); report the timeout.
+		if !c.armDeadline() {
 			if lastErr == nil {
-				lastErr = &net.OpError{Op: "read", Net: c.network, Err: errReadTimeout}
+				lastErr = c.timeout()
 			}
 			return 0, lastErr
-		}
-		// Give an upstream only perUpstream while another remains, so a silent
-		// one fails over quickly; give the last (or only) upstream the full
-		// remaining deadline, so a single slow-but-working resolver is not cut
-		// off early. Absolute deadlines throughout, so "expired" is explicit.
-		last := c.idx+1 >= len(c.addrs)
-		if last {
-			if hasDeadline {
-				_ = c.conn.SetReadDeadline(c.deadline)
-			} else {
-				_ = c.conn.SetReadDeadline(time.Time{}) // no deadline: block
-			}
-		} else {
-			cap := time.Now().Add(c.perUpstream)
-			if hasDeadline && c.deadline.Before(cap) {
-				cap = c.deadline
-			}
-			_ = c.conn.SetReadDeadline(cap)
 		}
 		n, err := c.conn.Read(b)
 		if err == nil {
 			return n, nil
 		}
 		lastErr = err
-		// Only a timeout means "this upstream is silent"; a real error on a
-		// connected UDP socket (e.g. ICMP port-unreachable) is also a reason
-		// to try the next. Either way, move on if any upstream is left.
-		if c.idx+1 >= len(c.addrs) {
+		if !c.advance() {
 			return 0, err
 		}
-		c.conn.Close()
-		c.idx++
-		if derr := c.dialCurrent(); derr != nil {
-			return 0, derr
+	}
+}
+
+// readTCP serves the caller from a complete frame. When none is buffered it
+// acquires one from the current upstream (length prefix, then exactly that
+// many bytes) and fails over, resending the query, if any part of it does
+// not arrive; the caller never sees a partial frame from one upstream
+// followed by bytes from another.
+func (c *failoverConn) readTCP(b []byte) (int, error) {
+	if len(c.frame) == 0 {
+		if err := c.acquireFrame(); err != nil {
+			return 0, err
 		}
-		if len(c.lastMsg) > 0 {
-			if _, werr := c.conn.Write(c.lastMsg); werr != nil {
-				return 0, werr
+	}
+	n := copy(b, c.frame)
+	c.frame = c.frame[n:]
+	return n, nil
+}
+
+func (c *failoverConn) acquireFrame() error {
+	var lastErr error
+	for {
+		if !c.armDeadline() {
+			if lastErr == nil {
+				lastErr = c.timeout()
 			}
+			return lastErr
+		}
+		var prefix [2]byte
+		_, err := io.ReadFull(c.conn, prefix[:])
+		if err == nil {
+			body := make([]byte, int(prefix[0])<<8|int(prefix[1]))
+			_, err = io.ReadFull(c.conn, body)
+			if err == nil {
+				c.frame = append(prefix[:], body...)
+				return nil
+			}
+		}
+		lastErr = err
+		if !c.advance() {
+			return err
 		}
 	}
 }

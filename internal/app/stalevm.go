@@ -23,7 +23,9 @@ func warnIfStale(ctx context.Context, cfg *project.Config) {
 	if want == "" {
 		return
 	}
-	out, err := lima.Exec(ctx, cfg.VMName(), "cat /etc/devkit/provision.id 2>/dev/null")
+	// "|| true": a VM from before the stamp has no file, and that case must
+	// reach the warning below rather than look like an ssh failure.
+	out, err := lima.Exec(ctx, cfg.VMName(), "cat /etc/devkit/provision.id 2>/dev/null || true")
 	if err != nil {
 		return
 	}

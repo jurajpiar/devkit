@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -69,6 +70,13 @@ func render(src string, p Params) (string, error) {
 	t, err := template.New("script").Funcs(template.FuncMap{
 		"join": strings.Join,
 		"shq":  shellQuote,
+		"joinInts": func(xs []int, sep string) string {
+			parts := make([]string, len(xs))
+			for i, x := range xs {
+				parts[i] = strconv.Itoa(x)
+			}
+			return strings.Join(parts, sep)
+		},
 		"bool": func(b bool) string {
 			if b {
 				return "1"
@@ -179,6 +187,7 @@ cat > /etc/devkit/network.conf <<'EOF'
 MODE={{.Config.Network.Mode}}
 ALLOW_HOST={{bool .Config.Network.AllowHost}}
 DNS={{if .Config.Network.DNS}}{{.Config.Network.DNS}}{{else}}proxy{{end}}
+FORWARD={{joinInts .Config.Network.Forward ","}}
 EOF
 # What the sandbox may see of the host: nothing, or one mount at one path.
 cat > /etc/devkit/source.conf <<'EOF'

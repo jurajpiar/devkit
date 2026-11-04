@@ -58,6 +58,7 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		`-d "$ip" -p udp --dport 53 $DNS_OWNER -j ACCEPT`,
 		`DNS_OWNER="-m owner --uid-owner devkit-proxy"`,
 		"DNS=proxy\n",
+		"FORWARD=\n",
 		`DNS="proxy"`,
 		"DNSStubListener=no",
 		"rm -f /etc/systemd/resolved.conf.d/devkit.conf",
@@ -474,6 +475,7 @@ func TestFingerprintStableAndPolicySensitive(t *testing.T) {
 		func(c *project.Config) { c.Network.Mode = project.NetworkOpen },
 		func(c *project.Config) { c.Network.DNS = project.DNSResolvers },
 		func(c *project.Config) { c.Network.Allow = append(c.Network.Allow, "example.com:8443") },
+		func(c *project.Config) { c.Network.Forward = []int{3000} },
 	} {
 		p := params(mod)
 		if got, _ := Fingerprint(p); got == a {

@@ -98,6 +98,8 @@ func hardeningAttempts(t *testing.T, s *sandbox, dir string) {
 		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: false", fmt.Sprintf("allow_host: false\n  forward: [%d]", port2))
 		t.Cleanup(func() {
 			setYAML(t, filepath.Join(dir, "devkit.yaml"), fmt.Sprintf("\n  forward: [%d]", port2), "")
+			// Reapply, or later subtests would run with the port still forwarded.
+			s.mustRun("up", "--no-sync", "--no-install")
 		})
 		s.mustRun("up", "--no-sync", "--no-install")
 		s.mustRun("shell", fmt.Sprintf("nohup python3 -m http.server %d --bind 0.0.0.0 >/dev/null 2>&1 & sleep 1; echo started", port2))

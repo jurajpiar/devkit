@@ -203,3 +203,101 @@ func TestFailoverFallsBackToTCPOnTruncation(t *testing.T) {
 		t.Errorf("got %v, want 10.9.8.7 from the TCP answer", ips)
 	}
 }
+
+// miniDNSStalling truncates over UDP like miniDNSTruncating, but over TCP it
+// sends only the two-byte length prefix and then stalls: the case where a
+// naive failover would splice a healthy upstream's prefix into the payload.
+func miniDNSStalling(t *testing.T) (addr string, stop func()) {
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := udp.LocalAddr().(*net.UDPAddr).Port
+	tcp, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, from, err := udp.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n >= 12 {
+				resp := append([]byte{buf[0], buf[1], 0x83, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, buf[12:n]...)
+				_, _ = udp.WriteTo(resp, from)
+			}
+		}
+	}()
+	go func() {
+		for {
+			conn, err := tcp.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				var l [2]byte
+				if _, err := conn.Read(l[:]); err != nil {
+					conn.Close()
+					return
+				}
+				_, _ = conn.Write([]byte{0x00, 0x40}) // a prefix, then silence
+				// hold the connection open without answering
+				time.Sleep(10 * time.Second)
+				conn.Close()
+			}()
+		}
+	}()
+	return udp.LocalAddr().String(), func() { udp.Close(); tcp.Close() }
+}
+
+// A primary that refuses the connection (dial error) must not end the query
+// while a secondary remains, on the TCP retry as well as the UDP attempt.
+func TestFailoverPastRefusingPrimary(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := ln.Addr().String()
+	ln.Close() // now nothing listens there, TCP or UDP
+	live, stop := miniDNSTruncating(t)
+	defer stop()
+	addrs := []string{refused, live}
+	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return newFailoverConn(ctx, network, addrs, 400*time.Millisecond)
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	ips, err := r.LookupHost(ctx, "big.test")
+	if err != nil {
+		t.Fatalf("a refusing primary should be skipped for the live secondary: %v", err)
+	}
+	if len(ips) == 0 || ips[0] != "10.9.8.7" {
+		t.Errorf("got %v, want 10.9.8.7 from the secondary's TCP answer", ips)
+	}
+}
+
+// A TCP primary that sends a length prefix and then stalls must not corrupt
+// the answer: the whole frame is acquired from one upstream before any of it
+// reaches the resolver, so failover replays the query on the secondary and
+// serves its frame intact.
+func TestFailoverTCPFrameAtomic(t *testing.T) {
+	stalling, stop1 := miniDNSStalling(t)
+	defer stop1()
+	live, stop2 := miniDNSTruncating(t)
+	defer stop2()
+	addrs := []string{stalling, live}
+	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return newFailoverConn(ctx, network, addrs, 300*time.Millisecond)
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	ips, err := r.LookupHost(ctx, "big.test")
+	if err != nil {
+		t.Fatalf("a stalling TCP primary should fail over cleanly: %v", err)
+	}
+	if len(ips) == 0 || ips[0] != "10.9.8.7" {
+		t.Errorf("got %v, want 10.9.8.7 intact from the secondary", ips)
+	}
+}
