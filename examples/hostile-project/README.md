@@ -37,6 +37,7 @@ devkit logs               # the proxy's view: every host it allowed or blocked
 | Bypass the proxy directly | held | held | held |
 | Resolve a DNS name | held (`dns: resolvers` makes it a note) | held (same) | held |
 | Tunnel to github.com:22 through the proxy | held | held | held |
+| Vendor a stale root CA (`certs/`, see `devkit audit`) | named stale | named stale | named stale |
 | Read host files or Lima secrets | held | held | held |
 | sudo, edit the firewall, kill the proxy | held | held | held |
 
@@ -65,3 +66,13 @@ into a `note` where you opened the door, and nowhere else:
   the VM can switch the firewall off; the config says so on that line.
 
 `LEAKED` for anything else means devkit has a bug. Please report it.
+
+## The vendored trust store
+
+`certs/vendored-ca-bundle.pem` is the other half of the demonstration, the
+one the probe cannot run because it is about trust rather than reach. It
+vendors the Izenpe.com root, which Ubuntu's `ca-certificates` still carries
+but Mozilla no longer trusts for TLS, the way a dependency might ship its own
+bundle. Run `devkit audit` in this project and it is named as stale, with the
+`network.distrust` entry that would remove it from the system bundle too. A
+fresh VM without this file audits clean.
