@@ -61,7 +61,7 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"FORWARD=\n",
 		`DNS="proxy"`,
 		"DNSStubListener=no",
-		"rm -f /etc/systemd/resolved.conf.d/devkit.conf",
+		"ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf",
 		"Suites: ${VERSION_CODENAME}-security",
 		"$SECAPT full-upgrade -y -q",
 		"$SECAPT -o APT::Update::Error-Mode=any update -q",
@@ -254,7 +254,7 @@ func TestSystemScriptNix(t *testing.T) {
 		`want="` + NixArm64SHA + `"`,
 		`want="` + NixAmd64SHA + `"`,
 		"https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${sys}.tar.xz",
-		`echo "devkit: refused Nix ${NIX_VERSION} with hash $got (expected $want)"`,
+		`warn "refused Nix ${NIX_VERSION} with hash $got (expected $want)"`,
 		`HOME=/root USER=root "$tmp/nix-${NIX_VERSION}-${sys}/install" --daemon --yes --no-channel-add --no-modify-profile`,
 		"experimental-features = nix-command flakes",
 		"/etc/systemd/system/nix-daemon.service.d/devkit-proxy.conf",
@@ -414,7 +414,7 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			frag = strings.ReplaceAll(frag, "/usr/local/bin", q(dir))
 			frag = strings.ReplaceAll(frag, "sed -i", sed+" -i")
 			frag = strings.ReplaceAll(frag, "id devkit-proxy >/dev/null 2>&1 || useradd", "true || useradd")
-			script := "set -eu\nMODE=" + mode + "\n" + frag
+			script := "set -eu\nstep() { :; }\nMODE=" + mode + "\n" + frag
 			if err := os.WriteFile(env, []byte("LANG=C\n"+limaBlock+"STALE=1\nHTTP_PROXY=http://old:1\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -447,15 +447,29 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 	}
 }
 
-func TestStubIsDisabledAfterDownloadsAndBeforeFirewall(t *testing.T) {
+func TestResolutionIsSetBeforeFirewall(t *testing.T) {
+	for _, dns := range []string{"", project.DNSResolvers} {
+		s, _ := System(params(func(c *project.Config) { c.Network.DNS = dns }))
+		// Root resolves upstream directly before every download, whatever the mode.
+		early := strings.Index(s, "ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf")
+		for _, dl := range []string{"$APT update\n", "SEC_SOURCES=", "--only-upgrade ca-certificates"} {
+			if i := strings.Index(s, dl); i >= 0 && !(early > 0 && early < i) {
+				t.Errorf("dns=%q: libc must point upstream before %q", dns, dl)
+			}
+		}
+		// The mode's own setup comes after the downloads and before the firewall.
+		final := strings.Index(s, "# ---- name resolution: who may ask")
+		ca := strings.Index(s, "--only-upgrade ca-certificates")
+		fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
+		if !(ca < final && final < fw) {
+			t.Errorf("dns=%q: final resolver setup must sit between the downloads and the firewall", dns)
+		}
+	}
 	s, _ := System(params(nil))
-	on := strings.Index(s, "rm -f /etc/systemd/resolved.conf.d/devkit.conf")
-	refresh := strings.Index(s, "--only-upgrade ca-certificates")
-	sec := strings.Index(s, "full-upgrade -y -q")
-	off := strings.Index(s, "DNSStubListener=no")
-	fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
-	if !(on < sec && sec < refresh && refresh < off && off < fw) {
-		t.Errorf("stub must be restored before root's downloads and disabled after them, before the firewall: on=%d sec=%d refresh=%d off=%d fw=%d", on, sec, refresh, off, fw)
+	hold := s[strings.Index(s, "cat > /usr/local/sbin/devkit-boot-hold"):]
+	hold = hold[:strings.Index(hold, "\nEOF\n")]
+	if strings.Contains(hold, "DNS:-proxy") || strings.Contains(hold, "network.conf") {
+		t.Error("the boot hold must not depend on the previous boot's DNS mode")
 	}
 }
 
@@ -500,5 +514,96 @@ func TestStampIsPublishedLast(t *testing.T) {
 	done := strings.Index(s, "provisioning done")
 	if !(rm > 0 && rm < fw && fw < stamp && stamp < done) {
 		t.Errorf("stamp must be removed first and written only after the firewall, just before done: rm=%d fw=%d stamp=%d done=%d", rm, fw, stamp, done)
+	}
+}
+
+func TestProgressSteps(t *testing.T) {
+	s, _ := System(params(nil))
+	for _, want := range []string{
+		"step() { printf 'devkit-progress: %s\\n' \"$*\" > /dev/hvc0 2>/dev/null || true; }",
+		`step "applying Ubuntu security updates (can take a minute)"`,
+		`step "applying the firewall"`,
+		"step \"done\"\necho \"devkit: provisioning done",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("system script missing %q", want)
+		}
+	}
+	// Steps must appear in the order they run.
+	if strings.Index(s, `step "provisioning started"`) > strings.Index(s, `step "applying the firewall"`) {
+		t.Error("progress steps out of order")
+	}
+}
+
+func TestBootHold(t *testing.T) {
+	s, _ := System(params(nil))
+	for _, want := range []string{
+		`SANDBOX_UID="$(id -u "$DEVKIT_USER")"`,
+		"-m owner --uid-owner \\$who -j REJECT",
+		"-m owner --uid-owner $RESOLVE_UID -j REJECT",
+		"Before=network-pre.target ssh.socket ssh.service cloud-init-local.service sysinit.target",
+		"systemctl enable devkit-boot-hold.service",
+		"$t -P OUTPUT DROP",
+		"date +%s > /run/devkit/firewall-at",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("system script missing %q", want)
+		}
+	}
+	// The firewall must go back to an ACCEPT policy only after its final REJECT.
+	if strings.Index(s, "iptables -A OUTPUT -j REJECT") > strings.Index(s, "$t -P OUTPUT ACCEPT 2>/dev/null || true; done") {
+		t.Error("policy restored before the final REJECT")
+	}
+}
+
+func TestBootHoldDoesNotOpenLoopbackForTheSandbox(t *testing.T) {
+	s, _ := System(params(nil))
+	hold := s[strings.Index(s, "cat > /usr/local/sbin/devkit-boot-hold"):]
+	hold = hold[:strings.Index(hold, "\nEOF\n")]
+	if strings.Contains(hold, "-o lo -j ACCEPT") {
+		t.Error("the boot hold must not accept loopback ahead of the sandbox user's REJECT")
+	}
+}
+
+func TestStateIsTrustedOnlyForRootAndProxy(t *testing.T) {
+	s, _ := System(params(nil))
+	fw := s[strings.Index(s, "cat > /usr/local/sbin/devkit-firewall"):]
+	fw = fw[:strings.Index(fw, "\nEOF\n")]
+	if strings.Contains(fw, "-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT") {
+		t.Error("the firewall must not accept established traffic regardless of owner")
+	}
+	for _, want := range []string{
+		"-m owner --uid-owner 0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"-m owner --uid-owner devkit-proxy -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"-m conntrack --ctdir REPLY -j ACCEPT",
+	} {
+		if !strings.Contains(fw, want) {
+			t.Errorf("firewall missing %q", want)
+		}
+	}
+	hold := s[strings.Index(s, "cat > /usr/local/sbin/devkit-boot-hold"):]
+	hold = hold[:strings.Index(hold, "\nEOF\n")]
+	if strings.Contains(hold, "--ctstate ESTABLISHED") {
+		t.Error("the boot hold must not accept by connection state")
+	}
+	if !strings.Contains(hold, "for who in $SANDBOX_UID $SUBUIDS") {
+		t.Error("the boot hold must also hold the sandbox's subordinate UIDs")
+	}
+}
+
+func TestWarningsReachTheSerialConsole(t *testing.T) {
+	s, _ := System(params(nil))
+	for _, want := range []string{
+		`warn() { printf 'devkit: %s\n' "$*" >&2; step "warning: $*"; }`,
+		`warn "could not apply security updates; continuing with the installed versions"`,
+		`warn "could not refresh ca-certificates; keeping the installed bundle"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("system script missing %q", want)
+		}
+	}
+	main := s[:strings.Index(s, "cat > /usr/local/sbin/devkit-install-proxy")]
+	if strings.Contains(main, `echo "devkit: could not`) {
+		t.Error("a provisioning warning still goes only to the guest's log")
 	}
 }
