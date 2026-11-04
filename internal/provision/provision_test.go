@@ -254,7 +254,7 @@ func TestSystemScriptNix(t *testing.T) {
 		`want="` + NixArm64SHA + `"`,
 		`want="` + NixAmd64SHA + `"`,
 		"https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${sys}.tar.xz",
-		`echo "devkit: refused Nix ${NIX_VERSION} with hash $got (expected $want)"`,
+		`warn "refused Nix ${NIX_VERSION} with hash $got (expected $want)"`,
 		`HOME=/root USER=root "$tmp/nix-${NIX_VERSION}-${sys}/install" --daemon --yes --no-channel-add --no-modify-profile`,
 		"experimental-features = nix-command flakes",
 		"/etc/systemd/system/nix-daemon.service.d/devkit-proxy.conf",
@@ -448,14 +448,28 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 }
 
 func TestResolutionIsSetBeforeFirewall(t *testing.T) {
-	s, _ := System(params(nil))
-	link := strings.Index(s, "ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf")
-	fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
-	if !(link > 0 && link < fw) {
-		t.Errorf("libc must point at the upstream resolvers before the firewall: link=%d fw=%d", link, fw)
+	for _, dns := range []string{"", project.DNSResolvers} {
+		s, _ := System(params(func(c *project.Config) { c.Network.DNS = dns }))
+		// Root resolves upstream directly before every download, whatever the mode.
+		early := strings.Index(s, "ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf")
+		for _, dl := range []string{"$APT update\n", "SEC_SOURCES=", "--only-upgrade ca-certificates"} {
+			if i := strings.Index(s, dl); i >= 0 && !(early > 0 && early < i) {
+				t.Errorf("dns=%q: libc must point upstream before %q", dns, dl)
+			}
+		}
+		// The mode's own setup comes after the downloads and before the firewall.
+		final := strings.Index(s, "# ---- name resolution: who may ask")
+		ca := strings.Index(s, "--only-upgrade ca-certificates")
+		fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
+		if !(ca < final && final < fw) {
+			t.Errorf("dns=%q: final resolver setup must sit between the downloads and the firewall", dns)
+		}
 	}
-	if strings.Contains(s, "for the duration of provisioning") {
-		t.Error("the stub must no longer be re-enabled at the start of a boot")
+	s, _ := System(params(nil))
+	hold := s[strings.Index(s, "cat > /usr/local/sbin/devkit-boot-hold"):]
+	hold = hold[:strings.Index(hold, "\nEOF\n")]
+	if strings.Contains(hold, "DNS:-proxy") || strings.Contains(hold, "network.conf") {
+		t.Error("the boot hold must not depend on the previous boot's DNS mode")
 	}
 }
 
@@ -574,5 +588,22 @@ func TestStateIsTrustedOnlyForRootAndProxy(t *testing.T) {
 	}
 	if !strings.Contains(hold, "for who in $SANDBOX_UID $SUBUIDS") {
 		t.Error("the boot hold must also hold the sandbox's subordinate UIDs")
+	}
+}
+
+func TestWarningsReachTheSerialConsole(t *testing.T) {
+	s, _ := System(params(nil))
+	for _, want := range []string{
+		`warn() { printf 'devkit: %s\n' "$*" >&2; step "warning: $*"; }`,
+		`warn "could not apply security updates; continuing with the installed versions"`,
+		`warn "could not refresh ca-certificates; keeping the installed bundle"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("system script missing %q", want)
+		}
+	}
+	main := s[:strings.Index(s, "cat > /usr/local/sbin/devkit-install-proxy")]
+	if strings.Contains(main, `echo "devkit: could not`) {
+		t.Error("a provisioning warning still goes only to the guest's log")
 	}
 }

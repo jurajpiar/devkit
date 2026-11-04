@@ -156,6 +156,10 @@ chmod 755 /var/log/devkit
 # write). Step names only, nothing secret.
 mkdir -p /run/devkit && chmod 755 /run/devkit
 step() { printf 'devkit-progress: %s\n' "$*" > /dev/hvc0 2>/dev/null || true; }
+# Warnings and notes reach devkit up the same way; stderr alone ends in the
+# guest's cloud-init log, where nobody sees it.
+warn() { printf 'devkit: %s\n' "$*" >&2; step "warning: $*"; }
+note() { printf 'devkit: %s\n' "$*" >&2; step "note: $*"; }
 step "provisioning started"
 
 # ---- logind stall guard ----
@@ -167,7 +171,7 @@ step "provisioning started"
 # first wait out the 90 s stop timeout: kill it outright and start it again.
 # Sessions survive a logind restart.
 if ! timeout 5 loginctl list-sessions >/dev/null 2>&1; then
-  echo "devkit: systemd-logind is unresponsive; killing and restarting it" >&2
+  warn "systemd-logind is unresponsive; killing and restarting it"
   systemctl kill --signal=SIGKILL systemd-logind.service || true
   systemctl start systemd-logind.service || true
   for _ in $(seq 1 20); do
@@ -180,6 +184,13 @@ fi
 # forever for the user manager before the user provisioning. Enable it again
 # now that logind answers; it is idempotent and starts the user manager.
 loginctl enable-linger "$DEVKIT_USER" || true
+
+# ---- name resolution for this boot's downloads ----
+# Root resolves upstream directly while it provisions, whatever the mode, so
+# its downloads never depend on systemd-resolved, which the boot hold keeps
+# off the network until the firewall is up. The boot's own resolver setup is
+# applied at the end (see "name resolution: who may ask").
+ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf
 
 # ---- policy files, regenerated from devkit.yaml on every boot ----
 step "writing the sandbox policy"
@@ -245,14 +256,14 @@ if [ "$(cat /var/lib/devkit/.mise 2>/dev/null || true)" != "$MISE_VERSION" ]; th
   case "$(uname -m)" in
     aarch64) arch=arm64; want="{{.MiseArm64SHA}}" ;;
     x86_64)  arch=x64;   want="{{.MiseAmd64SHA}}" ;;
-    *) echo "devkit: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    *) warn "unsupported architecture $(uname -m)"; exit 1 ;;
   esac
   tmp="$(mktemp -d /var/lib/devkit/mise.XXXXXX)"
   "${CURL[@]}" -o "$tmp/mise.tar.xz" \
     "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${arch}.tar.xz"
   got="$(sha256sum "$tmp/mise.tar.xz" | awk '{print $1}')"
   if [ "$got" != "$want" ]; then
-    echo "devkit: refused mise ${MISE_VERSION} with hash $got (expected $want)" >&2
+    warn "refused mise ${MISE_VERSION} with hash $got (expected $want)"
     rm -rf "$tmp"; exit 1
   fi
   tar -xJf "$tmp/mise.tar.xz" -C "$tmp"
@@ -294,14 +305,14 @@ if [ ! -f /var/lib/devkit/.nix ]; then
   case "$(uname -m)" in
     aarch64) sys=aarch64-linux; want="{{.NixArm64SHA}}" ;;
     x86_64)  sys=x86_64-linux;  want="{{.NixAmd64SHA}}" ;;
-    *) echo "devkit: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    *) warn "unsupported architecture $(uname -m)"; exit 1 ;;
   esac
   tmp="$(mktemp -d /var/lib/devkit/nix.XXXXXX)"
   "${CURL[@]}" -o "$tmp/nix.tar.xz" \
     "https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${sys}.tar.xz"
   got="$(sha256sum "$tmp/nix.tar.xz" | awk '{print $1}')"
   if [ "$got" != "$want" ]; then
-    echo "devkit: refused Nix ${NIX_VERSION} with hash $got (expected $want)" >&2
+    warn "refused Nix ${NIX_VERSION} with hash $got (expected $want)"
     rm -rf "$tmp"; exit 1
   fi
   tar -xJf "$tmp/nix.tar.xz" -C "$tmp"
@@ -314,7 +325,7 @@ EOF
   rm -rf "$tmp"
   echo "$NIX_VERSION" > /var/lib/devkit/.nix
 elif [ "$(cat /var/lib/devkit/.nix)" != "$NIX_VERSION" ]; then
-  echo "devkit: Nix $(cat /var/lib/devkit/.nix) is installed; devkit now pins ${NIX_VERSION}. Recreate the VM (devkit rm) to upgrade." >&2
+  warn "Nix $(cat /var/lib/devkit/.nix) is installed; devkit now pins ${NIX_VERSION}. Recreate the VM (devkit rm) to upgrade."
 fi
 cat > /etc/profile.d/devkit-nix.sh <<'EOF'
 if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
@@ -397,12 +408,12 @@ EOF
   # followed by an upgrade against the previous lists.
   if $SECAPT -o APT::Update::Error-Mode=any update -q >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive $SECAPT full-upgrade -y -q >/dev/null 2>&1; then
     after="$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -n1)"
-    [ "$before" != "$after" ] && echo "devkit: a kernel security update was installed; run 'devkit down && devkit up' to boot into it" >&2
+    [ "$before" != "$after" ] && note "a kernel security update was installed; run 'devkit down && devkit up' to boot into it"
     # When the pocket was last applied successfully. apt keeps the index
     # files' upstream timestamps, so they say nothing about this boot.
     date -u +%s > /var/lib/devkit/.security-updated && chmod 644 /var/lib/devkit/.security-updated
   else
-    echo "devkit: could not apply security updates; continuing with the installed versions" >&2
+    warn "could not apply security updates; continuing with the installed versions"
   fi
 fi
 {{- end}}
@@ -414,7 +425,7 @@ step "refreshing the CA trust store"
 # Runs before the firewall, like apt's other work here; apt verifies it.
 if [ "$MODE" != "none" ]; then
   ($APT update -q && $APT install -y -q --only-upgrade ca-certificates) >/dev/null 2>&1 \
-    || echo "devkit: could not refresh ca-certificates; keeping the installed bundle" >&2
+    || warn "could not refresh ca-certificates; keeping the installed bundle"
 fi
 CACONF=/etc/ca-certificates.conf
 # Undo the names applied on the previous boot, then apply this boot's. The
@@ -434,9 +445,9 @@ if grep -q "^mozilla/$f\.crt\$" "$CACONF"; then
   sed -i "s|^mozilla/$f\.crt\$|!mozilla/$f.crt|" "$CACONF"
   echo "${n// /_}" >> /var/lib/devkit/.distrust
 elif grep -q "^!mozilla/$f\.crt\$" "$CACONF"; then
-  echo "devkit: network.distrust: '$n' is already disabled by the distro" >&2
+  warn "network.distrust: '$n' is already disabled by the distro"
 else
-  echo "devkit: network.distrust: no root named '$n' in the system bundle" >&2
+  warn "network.distrust: no root named '$n' in the system bundle"
 fi
 {{- end}}
 update-ca-certificates --fresh >/dev/null 2>&1 || true
@@ -539,16 +550,14 @@ EOF
 chmod 440 /etc/sudoers.d/devkit
 visudo -cf /etc/sudoers.d/devkit >/dev/null
 
+
 # ---- name resolution: who may ask, and through what ----
-# With DNS=proxy (or none) nothing but the proxy may resolve names. libc is
-# pointed at the upstream resolvers directly (systemd's "uplink" mode), so
-# root's own lookups during provisioning do not depend on systemd-resolved,
-# and resolved's stub is switched off: neither the stub nor resolved over
-# D-Bus can act as a relay for the sandbox. The firewall below rejects port 53
-# for every account but the proxy's, so a lookup by anyone else fails at
-# once; on later boots the boot hold does the same until the firewall is up.
-# resolved keeps writing the upstream list that the proxy and libc read.
-# With DNS=resolvers the VM uses the stub as Ubuntu ships it.
+# With DNS=proxy (or none) nothing but the proxy may resolve names: libc
+# stays pointed at the upstream resolvers and the stub is off, so neither the
+# stub nor resolved over D-Bus relays for the sandbox, and the firewall below
+# rejects port 53 for every account but the proxy's. With DNS=resolvers the VM
+# uses the stub as Ubuntu ships it. Applied last among the steps before the
+# firewall, after root's downloads.
 mkdir -p /etc/systemd/resolved.conf.d
 if [ "$MODE" = "none" ] || [ "${DNS:-proxy}" = "proxy" ]; then
   printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/devkit.conf
@@ -646,15 +655,13 @@ SUBUIDS="$(awk -F: -v u="$DEVKIT_USER" '$1==u{print $2"-"($2+$3-1); exit}' /etc/
 cat > /usr/local/sbin/devkit-boot-hold <<EOF
 #!/bin/sh
 # Loopback is held too: the egress proxy and systemd-resolved listen there,
-# and either would relay for the sandbox before the firewall exists.
-# systemd-resolved itself is held in DNS=proxy and none modes, where it must
-# not query upstream for anyone (the sandbox can ask it over D-Bus); root
+# and either would relay for the sandbox before the firewall exists. Root
 # resolves upstream directly and keeps its downloads.
 # Decided by owner and direction, never by "established": a held account's
 # socket could otherwise ride a tracked flow root opened from the same source
 # port (see the firewall). Replies on connections made to the guest, its SSH
-# sessions, still pass.
-. /etc/devkit/network.conf 2>/dev/null || true
+# sessions, still pass. systemd-resolved is held in every mode: provisioning
+# never needs it, and the sandbox could ask it over D-Bus.
 modprobe nf_conntrack 2>/dev/null || true
 for t in iptables ip6tables; do
   \$t -P OUTPUT ACCEPT 2>/dev/null || true
@@ -663,7 +670,7 @@ for t in iptables ip6tables; do
     \$t -A OUTPUT -m owner --uid-owner \$who -m conntrack --ctdir REPLY -j ACCEPT 2>/dev/null || true
     \$t -A OUTPUT -m owner --uid-owner \$who -j REJECT 2>/dev/null || true
   done
-  if [ -n "$RESOLVE_UID" ] && { [ "\${MODE:-allowlist}" = none ] || [ "\${DNS:-proxy}" = proxy ]; }; then
+  if [ -n "$RESOLVE_UID" ]; then
     \$t -A OUTPUT -m owner --uid-owner $RESOLVE_UID -j REJECT 2>/dev/null || true
   fi
 done
