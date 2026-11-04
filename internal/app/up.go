@@ -148,7 +148,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	if inst == nil || !inst.Running() {
 		fmt.Printf("Starting VM %s\n", name)
-		if err := lima.Start(ctx, name); err != nil {
+		stopWatch := watchProvisioning(ctx, name)
+		err := lima.Start(ctx, name)
+		stopWatch()
+		if err != nil {
 			return err
 		}
 	} else {

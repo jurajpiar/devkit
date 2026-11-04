@@ -149,6 +149,14 @@ DNS="{{if .Config.Network.DNS}}{{.Config.Network.DNS}}{{else}}proxy{{end}}"
 mkdir -p /etc/devkit /var/log/devkit /var/lib/devkit {{.DropDir}}
 chmod 755 /var/log/devkit
 
+# ---- progress, for devkit up to show while Lima waits on these scripts ----
+# /run is fresh on every boot, so no line survives from an earlier one. Plain
+# step names only; nothing secret goes here, and the sandbox may read it.
+mkdir -p /run/devkit && chmod 755 /run/devkit
+: > /run/devkit/progress && chmod 644 /run/devkit/progress
+step() { printf '%s\n' "$*" >> /run/devkit/progress; }
+step "provisioning started"
+
 # ---- logind stall guard ----
 # Lima's boot script terminates the user's sessions to apply /etc/environment
 # while its host agent is opening the first SSH session. On some boots that
@@ -182,6 +190,7 @@ if [ -f /etc/systemd/resolved.conf.d/devkit.conf ]; then
 fi
 
 # ---- policy files, regenerated from devkit.yaml on every boot ----
+step "writing the sandbox policy"
 # Quoted heredocs: values come from the template, never from shell expansion.
 cat > /etc/devkit/network.conf <<'EOF'
 MODE={{.Config.Network.Mode}}
@@ -224,6 +233,7 @@ APT="apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false -o DPk
 CURL=(curl -fsSL --noproxy '*' --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900)
 
 # ---- base packages (first boot) ----
+step "checking base packages (installed on first boot)"
 if [ ! -f /var/lib/devkit/.base ]; then
   $APT update
   $APT install -y --no-install-recommends \
@@ -234,6 +244,7 @@ DEVKIT_HOME="$(getent passwd "$DEVKIT_USER" | cut -d: -f6)"
 {{- if eq .Config.Tools.Manager "mise"}}
 
 # ---- mise, the toolchain manager: pinned release, verified by SHA-256 ----
+step "checking mise (installed on first boot)"
 # The hashes are from the release's signed SHASUMS256.txt (see provision.go).
 # Toolchains themselves are installed later by the sandbox user through the
 # audited proxy; mise verifies each against upstream checksums or signatures.
@@ -283,6 +294,7 @@ rm -f /etc/profile.d/devkit-mise.sh
 {{- if eq .Config.Tools.Manager "nix"}}
 
 # ---- Nix (multi-user): pinned release, verified by SHA-256 ----
+step "checking Nix (installed on first boot)"
 # Installed once. The daemon fetches through the audited proxy; substitutes
 # from cache.nixos.org are checked against the cache's signing key by Nix.
 NIX_VERSION="{{.NixVersion}}"
@@ -322,6 +334,7 @@ rm -f /etc/profile.d/devkit-nix.sh
 {{- end}}
 
 # ---- extra packages (re-run only when the list changes) ----
+step "checking extra packages"
 WANT_PKGS="{{join .Config.Tools.Packages " "}}"
 if [ -n "$WANT_PKGS" ] && [ "$(cat /var/lib/devkit/.packages 2>/dev/null || true)" != "$WANT_PKGS" ]; then
   $APT update
@@ -330,6 +343,7 @@ if [ -n "$WANT_PKGS" ] && [ "$(cat /var/lib/devkit/.packages 2>/dev/null || true
 fi
 
 # ---- kernel attack surface for unprivileged code ----
+step "restricting the kernel attack surface"
 # A local privilege escalation is what turns the sandbox user into root, and
 # root can drop the firewall. These close the interfaces most kernel exploits
 # of recent years needed from an unprivileged process; Ubuntu already
@@ -367,6 +381,7 @@ for m in algif_aead algif_hash algif_skcipher algif_rng af_alg; do
 done
 
 # ---- security updates: Ubuntu's security pocket, before the firewall ----
+step "applying Ubuntu security updates (can take a minute)"
 # A pinned image gets weaker every week. Only the security pocket is
 # applied, so the rest of the system stays at the image's versions. A new
 # kernel on disk runs from the next restart.
@@ -401,6 +416,7 @@ fi
 {{- end}}
 
 # ---- trust store: the distro's current bundle, minus network.distrust ----
+step "refreshing the CA trust store"
 # ca-certificates is the source of truth and is refreshed on every boot, so a
 # VM created before a CA was removed upstream catches up on its next start.
 # Runs before the firewall, like apt's other work here; apt verifies it.
@@ -450,6 +466,7 @@ PYEOF
 chmod 755 /usr/local/bin/devkit-audit
 
 # ---- proxy account and proxy environment ----
+step "configuring the egress proxy"
 id devkit-proxy >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin devkit-proxy
 PROXY_URL="http://{{.ProxyListen}}"
 # With allow_host the host is reached directly (the firewall permits it), so
@@ -544,6 +561,7 @@ if [ "$MODE" = "none" ] || [ "${DNS:-proxy}" = "proxy" ]; then
 fi
 
 # ---- firewall ----
+step "applying the firewall"
 cat > /usr/local/sbin/devkit-firewall <<'EOF'
 #!/bin/bash
 # Applies /etc/devkit/network.conf to the OUTPUT chain. Runs as root.
@@ -680,6 +698,7 @@ fi
 /usr/local/sbin/devkit-firewall
 echo "{{.ProvisionID}}" > /etc/devkit/provision.id
 chmod 644 /etc/devkit/provision.id
+step "done"
 echo "devkit: provisioning done (network=$MODE)"
 `
 
