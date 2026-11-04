@@ -414,7 +414,7 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			frag = strings.ReplaceAll(frag, "/usr/local/bin", q(dir))
 			frag = strings.ReplaceAll(frag, "sed -i", sed+" -i")
 			frag = strings.ReplaceAll(frag, "id devkit-proxy >/dev/null 2>&1 || useradd", "true || useradd")
-			script := "set -eu\nMODE=" + mode + "\n" + frag
+			script := "set -eu\nstep() { :; }\nMODE=" + mode + "\n" + frag
 			if err := os.WriteFile(env, []byte("LANG=C\n"+limaBlock+"STALE=1\nHTTP_PROXY=http://old:1\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -500,5 +500,23 @@ func TestStampIsPublishedLast(t *testing.T) {
 	done := strings.Index(s, "provisioning done")
 	if !(rm > 0 && rm < fw && fw < stamp && stamp < done) {
 		t.Errorf("stamp must be removed first and written only after the firewall, just before done: rm=%d fw=%d stamp=%d done=%d", rm, fw, stamp, done)
+	}
+}
+
+func TestProgressSteps(t *testing.T) {
+	s, _ := System(params(nil))
+	for _, want := range []string{
+		": > /run/devkit/progress && chmod 644 /run/devkit/progress",
+		`step "applying Ubuntu security updates (can take a minute)"`,
+		`step "applying the firewall"`,
+		"step \"done\"\necho \"devkit: provisioning done",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("system script missing %q", want)
+		}
+	}
+	// Steps must appear in the order they run.
+	if strings.Index(s, `step "provisioning started"`) > strings.Index(s, `step "applying the firewall"`) {
+		t.Error("progress steps out of order")
 	}
 }
