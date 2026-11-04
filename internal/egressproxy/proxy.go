@@ -299,8 +299,11 @@ func (p *Proxy) dialer() *net.Dialer {
 		// the same server every retry and a silent upstream was never left.
 		p.dial.Resolver = &net.Resolver{
 			PreferGo: true,
+			// network is "udp" normally and "tcp" when Go retries a
+			// truncated answer; honour it, or large/truncated responses
+			// would never resolve.
 			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return newFailoverConn(ctx, addrs, perUpstreamTimeout)
+				return newFailoverConn(ctx, network, addrs, perUpstreamTimeout)
 			},
 		}
 	})
@@ -318,6 +321,7 @@ const perUpstreamTimeout = 2500 * time.Millisecond
 // query instead of relying on the resolver's own retry.
 type failoverConn struct {
 	ctx         context.Context
+	network     string // "udp" or "tcp", as the resolver requested
 	addrs       []string
 	perUpstream time.Duration
 
@@ -328,16 +332,37 @@ type failoverConn struct {
 	deadline time.Time
 }
 
-func newFailoverConn(ctx context.Context, addrs []string, perUpstream time.Duration) (*failoverConn, error) {
-	c := &failoverConn{ctx: ctx, addrs: addrs, perUpstream: perUpstream}
+// newFailoverConn returns a net.Conn for UDP (a PacketConn, so Go uses
+// datagram framing) or TCP (a plain stream conn, so Go uses length-prefixed
+// framing). Both fail over to the next upstream when the current one is
+// silent or unreachable.
+func newFailoverConn(ctx context.Context, network string, addrs []string, perUpstream time.Duration) (net.Conn, error) {
+	if network == "" {
+		network = "udp"
+	}
+	c := &failoverConn{ctx: ctx, network: network, addrs: addrs, perUpstream: perUpstream}
 	if err := c.dialCurrent(); err != nil {
 		return nil, err
+	}
+	if network == "udp" {
+		return &udpFailoverConn{c}, nil
 	}
 	return c, nil
 }
 
+// udpFailoverConn adds ReadFrom/WriteTo so the UDP variant satisfies
+// net.PacketConn; the resolver's type assertion on that selects datagram
+// framing. A TCP conn must not satisfy it, hence the separate type.
+type udpFailoverConn struct{ *failoverConn }
+
+func (c *udpFailoverConn) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
+func (c *udpFailoverConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := c.Read(b)
+	return n, c.RemoteAddr(), err
+}
+
 func (c *failoverConn) dialCurrent() error {
-	conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(c.ctx, "udp", c.addrs[c.idx])
+	conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(c.ctx, c.network, c.addrs[c.idx])
 	if err != nil {
 		return err
 	}
@@ -357,34 +382,32 @@ func (c *failoverConn) Read(b []byte) (int, error) {
 	defer c.mu.Unlock()
 	var lastErr error
 	for {
-		// Give an upstream only perUpstream to answer while another remains,
-		// so a silent one fails over quickly; give the last (or only) upstream
-		// the full remaining deadline, so a single slow-but-working resolver
-		// is not cut off early.
-		var try time.Duration
-		last := c.idx+1 >= len(c.addrs)
-		rem := time.Duration(-1)
-		if !c.deadline.IsZero() {
-			rem = time.Until(c.deadline)
-		}
-		if last {
-			try = rem // -1 (no deadline) means block until the conn's own deadline
-		} else {
-			try = c.perUpstream
-			if rem >= 0 && rem < try {
-				try = rem
-			}
-		}
-		if rem == 0 || (rem > 0 && try <= 0) {
+		hasDeadline := !c.deadline.IsZero()
+		if hasDeadline && !time.Now().Before(c.deadline) {
+			// A set deadline that has already passed: never clear the read
+			// deadline (which would block forever); report the timeout.
 			if lastErr == nil {
-				lastErr = &net.OpError{Op: "read", Net: "udp", Err: errReadTimeout}
+				lastErr = &net.OpError{Op: "read", Net: c.network, Err: errReadTimeout}
 			}
 			return 0, lastErr
 		}
-		if try >= 0 {
-			_ = c.conn.SetReadDeadline(time.Now().Add(try))
+		// Give an upstream only perUpstream while another remains, so a silent
+		// one fails over quickly; give the last (or only) upstream the full
+		// remaining deadline, so a single slow-but-working resolver is not cut
+		// off early. Absolute deadlines throughout, so "expired" is explicit.
+		last := c.idx+1 >= len(c.addrs)
+		if last {
+			if hasDeadline {
+				_ = c.conn.SetReadDeadline(c.deadline)
+			} else {
+				_ = c.conn.SetReadDeadline(time.Time{}) // no deadline: block
+			}
 		} else {
-			_ = c.conn.SetReadDeadline(time.Time{}) // block (bounded by SetDeadline, if any)
+			cap := time.Now().Add(c.perUpstream)
+			if hasDeadline && c.deadline.Before(cap) {
+				cap = c.deadline
+			}
+			_ = c.conn.SetReadDeadline(cap)
 		}
 		n, err := c.conn.Read(b)
 		if err == nil {
@@ -436,17 +459,6 @@ func (c *failoverConn) SetReadDeadline(t time.Time) error {
 func (c *failoverConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
 func (c *failoverConn) LocalAddr() net.Addr                { return c.conn.LocalAddr() }
 func (c *failoverConn) RemoteAddr() net.Addr               { return c.conn.RemoteAddr() }
-
-// ReadFrom and WriteTo make failoverConn satisfy net.PacketConn. Go's DNS
-// resolver uses that type assertion to choose UDP datagram framing over the
-// length-prefixed TCP framing; without it the query would be framed for TCP
-// and a UDP upstream would drop it. The address is ignored: the socket is
-// connected, and the datagram roundtrip calls Write/Read anyway.
-func (c *failoverConn) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
-func (c *failoverConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, err := c.Read(b)
-	return n, c.RemoteAddr(), err
-}
 
 var errReadTimeout = timeoutError{}
 

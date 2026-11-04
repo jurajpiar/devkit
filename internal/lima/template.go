@@ -131,6 +131,11 @@ func Render(in TemplateInput) (string, error) {
 		EgressSHA256: in.EgressSHA256,
 		MountPath:    in.HostDir,
 	}
+	fp, err := provision.Fingerprint(params)
+	if err != nil {
+		return "", err
+	}
+	params.ProvisionID = fp
 	sys, err := provision.System(params)
 	if err != nil {
 		return "", err

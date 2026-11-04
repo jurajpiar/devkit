@@ -65,6 +65,8 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"$SECAPT full-upgrade -y -q",
 		"$SECAPT -o APT::Update::Error-Mode=any update -q",
 		"date -u +%s > /var/lib/devkit/.security-updated",
+		"sort -V | tail -n1",
+		"> /etc/devkit/provision.id",
 		"kernel.io_uring_disabled = 2",
 		"sysctl -q -p /etc/sysctl.d/90-devkit.conf",
 		"install af_alg /bin/false",
@@ -452,5 +454,36 @@ func TestStubIsDisabledAfterDownloadsAndBeforeFirewall(t *testing.T) {
 	fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
 	if !(on < sec && sec < refresh && refresh < off && off < fw) {
 		t.Errorf("stub must be restored before root's downloads and disabled after them, before the firewall: on=%d sec=%d refresh=%d off=%d fw=%d", on, sec, refresh, off, fw)
+	}
+}
+
+func TestFingerprintStableAndPolicySensitive(t *testing.T) {
+	base := params(nil)
+	a, err := Fingerprint(base)
+	if err != nil || a == "" {
+		t.Fatalf("fingerprint: %v", err)
+	}
+	// Stable for identical policy, and independent of the host mount path.
+	b := params(nil)
+	b.MountPath = "/somewhere/else"
+	if got, _ := Fingerprint(b); got != a {
+		t.Errorf("fingerprint should ignore MountPath: %s vs %s", a, got)
+	}
+	// Changes when policy changes.
+	for _, mod := range []func(*project.Config){
+		func(c *project.Config) { c.Network.Mode = project.NetworkOpen },
+		func(c *project.Config) { c.Network.DNS = project.DNSResolvers },
+		func(c *project.Config) { c.Network.Allow = append(c.Network.Allow, "example.com:8443") },
+	} {
+		p := params(mod)
+		if got, _ := Fingerprint(p); got == a {
+			t.Error("fingerprint should change when policy changes")
+		}
+	}
+	// Changes when the proxy binary hash changes.
+	c := params(nil)
+	c.EgressSHA256 = "deadbeefdeadbeef"
+	if got, _ := Fingerprint(c); got == a {
+		t.Error("fingerprint should change with the proxy hash")
 	}
 }

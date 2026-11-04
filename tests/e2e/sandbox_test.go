@@ -261,6 +261,27 @@ func TestSandboxGuarantees(t *testing.T) {
 		}
 	})
 
+	t.Run("provision stamp flags a VM running older policy", func(t *testing.T) {
+		// A freshly provisioned VM matches the binary, so no warning.
+		if out := s.mustRun("shell", "true"); strings.Contains(out, "Warning:") {
+			t.Fatalf("a fresh VM should not warn about stale policy:\n%s", out)
+		}
+		// Change the policy in devkit.yaml but do not run up: the VM now runs
+		// older policy than the binary would apply, and commands must say so.
+		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: false", "allow_host: false\n  dns: resolvers")
+		out, _ := s.run("shell", "true")
+		if !strings.Contains(out, "down && devkit up") {
+			t.Errorf("a policy change without up should warn to reprovision:\n%s", out)
+		}
+		// Reconcile and confirm the warning clears.
+		s.mustRun("up", "--no-sync", "--no-install")
+		if out := s.mustRun("shell", "true"); strings.Contains(out, "Warning:") {
+			t.Fatalf("after up the warning should clear:\n%s", out)
+		}
+		setYAML(t, filepath.Join(dir, "devkit.yaml"), "\n  dns: resolvers", "")
+		s.mustRun("up", "--no-sync", "--no-install")
+	})
+
 	t.Run("no sudo", func(t *testing.T) {
 		out, err := s.shell("sudo -n true 2>&1; echo exit=$?")
 		if err != nil || !strings.Contains(out, "exit=1") {
@@ -386,13 +407,12 @@ func TestSandboxGuarantees(t *testing.T) {
 		setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: false", "allow_host: true")
 		t.Cleanup(func() { setYAML(t, filepath.Join(dir, "devkit.yaml"), "allow_host: true", "allow_host: false") })
 		s.mustRun("up", "--network", "allowlist", "--no-sync", "--no-install")
-		out, _ := s.shell("timeout 5 bash -c 'exec 3<>/dev/tcp/host.lima.internal/2222' 2>&1; echo exit=$?")
-		if !strings.Contains(out, "exit=0") {
-			t.Fatalf("host should be reachable with allow_host: %s", out)
-		}
-		// Positive control: the listener the earlier subtests could not
-		// reach answers now, so their failures were the policy, not a dead port.
-		if out, _ = s.shell(hostDirect); !strings.Contains(out, "devkit-host-listener") {
+		// Positive control: the suite's own listener on the Mac, which the
+		// earlier subtests could not reach, answers now, so their failures
+		// were the policy, not a dead port. (Not port 2222: that is only this
+		// VM's SSH port by coincidence, and another VM may hold it.)
+		out, _ := s.shell(hostDirect)
+		if !strings.Contains(out, "devkit-host-listener") {
 			t.Fatalf("allow_host should reach the host listener: %s", out)
 		}
 		// Forced through the proxy, the same tunnel now completes: policy
@@ -410,6 +430,11 @@ func TestSandboxGuarantees(t *testing.T) {
 
 	t.Run("air gap", func(t *testing.T) {
 		s.mustRun("up", "--network", "none", "--no-sync", "--no-install")
+		// The stamp must agree in none mode too, where up renders without a
+		// proxy hash; a stray staleness warning here would be a false alarm.
+		if out := s.mustRun("shell", "true"); strings.Contains(out, "Warning:") {
+			t.Fatalf("air-gapped VM should not be reported stale:\n%s", out)
+		}
 		out, _ := s.shell("curl -s -m 10 -o /dev/null -w '%{http_code}' https://registry.npmjs.org/ ; echo exit=$?")
 		if strings.Contains(out, "200") {
 			t.Fatalf("air-gapped VM reached the internet: %s", out)

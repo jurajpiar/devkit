@@ -1,0 +1,38 @@
+# devkit sandbox for "hostile-project". One VM per project; see README.md.
+name: hostile-project
+source: copy            # copy | git | mount
+# repo: https://github.com/you/repo.git   # for source: git
+# branch: main
+
+tools:
+  manager: mise         # mise | nix | none (see README: Toolchains)
+  versions:             # mise tool: version; a mise.toml in the repo layers on top
+    node: "22"
+  containers: false     # rootless containerd + nerdctl inside the VM
+  # packages: [postgresql-client]
+
+# install: npm ci        # replaces the lockfile-based install devkit picks
+
+vm:
+  cpus: 4
+  memory_gb: 8
+  disk_gb: 50
+
+ssh_port: 2223           # ssh devkit-hostile-project
+
+network:
+  mode: allowlist       # allowlist | open | none
+  allow:
+    - "github.com"
+    - "**.github.com"
+    - "**.githubusercontent.com"
+    - "mise-versions.jdx.dev"
+    - "**.sigstore.dev"
+    - "registry.npmjs.org"
+    - "registry.yarnpkg.com"
+    - "nodejs.org"
+  allow_host: false     # let the VM reach services on your Mac
+  # dns: proxy          # only the proxy resolves names; resolvers opens DNS to the VM
+  # forward: [3000]     # guest ports exposed on 127.0.0.1; none otherwise
+
+# sudo: false            # root inside the VM can disable the firewall

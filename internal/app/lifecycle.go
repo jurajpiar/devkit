@@ -125,6 +125,7 @@ var shellCmd = &cobra.Command{
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err
 		}
+		warnIfStale(cmd.Context(), cfg)
 		return lima.Shell(cmd.Context(), cfg.VMName(), "", "bash", "-lc", shellScript(cfg, args))
 	},
 }
@@ -143,6 +144,7 @@ var syncCmd = &cobra.Command{
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err
 		}
+		warnIfStale(cmd.Context(), cfg)
 		cwd, _ := os.Getwd()
 		if cfg.Source == project.SourceGit {
 			return lima.ExecStream(cmd.Context(), cfg.VMName(), "git -C \"$HOME/"+provision.WorkspaceDir+"\" pull --ff-only")
@@ -165,6 +167,7 @@ var logsCmd = &cobra.Command{
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err
 		}
+		warnIfStale(cmd.Context(), cfg)
 		follow, _ := cmd.Flags().GetBool("follow")
 		lines, _ := cmd.Flags().GetInt("lines")
 		tail := fmt.Sprintf("tail -n %d", lines)

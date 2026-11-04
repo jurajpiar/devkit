@@ -36,6 +36,7 @@ run to a verdict.`,
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return &exitError{code: 2, msg: err.Error()}
 		}
+		warnIfStale(cmd.Context(), cfg)
 		script := "devkit-audit"
 		if deep, _ := cmd.Flags().GetBool("deep"); deep {
 			script += " --deep"

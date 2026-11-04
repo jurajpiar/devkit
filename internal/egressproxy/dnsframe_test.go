@@ -40,8 +40,8 @@ func miniDNS(t *testing.T) (addr string, stop func()) {
 			for qend < n && q[qend] != 0 {
 				qend += int(q[qend]) + 1
 			}
-			qend++        // null label
-			qend += 4     // QTYPE + QCLASS
+			qend++    // null label
+			qend += 4 // QTYPE + QCLASS
 			if qend > n {
 				qend = n
 			}
@@ -64,12 +64,12 @@ func TestFailoverResolvesWithUDPFraming(t *testing.T) {
 	defer bh.Close() // black hole: reads nothing, never replies
 
 	for _, addrs := range [][]string{
-		{live},                     // single upstream: must use UDP framing
+		{live},                          // single upstream: must use UDP framing
 		{bh.LocalAddr().String(), live}, // failover: skip the silent one
 	} {
 		addrs := addrs
 		r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return newFailoverConn(ctx, addrs, 400*time.Millisecond)
+			return newFailoverConn(ctx, "udp", addrs, 400*time.Millisecond)
 		}}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		ips, err := r.LookupHost(ctx, "anything.test")
@@ -86,5 +86,120 @@ func TestFailoverResolvesWithUDPFraming(t *testing.T) {
 		if !found {
 			t.Errorf("addrs=%v: got %v, want 10.1.2.3", addrs, ips)
 		}
+	}
+}
+
+// miniDNSTruncating answers UDP queries with the TC (truncated) bit set and
+// no answer, and serves the full A record over TCP (length-prefixed). It
+// proves the resolver falls back to TCP through the failover dialer.
+func miniDNSTruncating(t *testing.T) (addr string, stop func()) {
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := udp.LocalAddr().(*net.UDPAddr).Port
+	tcp, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := func(q []byte, tc bool) []byte {
+		resp := []byte{q[0], q[1]}
+		// Header byte 2: QR=1 (0x80), RD=1 (0x01), TC=0x02 when truncated.
+		// Header byte 3: RA=1 (0x80). TC lives in byte 2, not byte 3.
+		flags1 := byte(0x81)
+		if tc {
+			flags1 |= 0x02
+		}
+		resp = append(resp, flags1, 0x80, 0x00, 0x01)
+		if tc {
+			resp = append(resp, 0x00, 0x00) // ANCOUNT 0 when truncated
+		} else {
+			resp = append(resp, 0x00, 0x01)
+		}
+		resp = append(resp, 0x00, 0x00, 0x00, 0x00)
+		qend := 12
+		for qend < len(q) && q[qend] != 0 {
+			qend += int(q[qend]) + 1
+		}
+		qend += 5
+		if qend > len(q) {
+			qend = len(q)
+		}
+		resp = append(resp, q[12:qend]...)
+		if !tc {
+			resp = append(resp, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 10, 9, 8, 7)
+		}
+		return resp
+	}
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, from, err := udp.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n >= 12 {
+				_, _ = udp.WriteTo(answer(buf[:n], true), from)
+			}
+		}
+	}()
+	go func() {
+		for {
+			conn, err := tcp.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				var l [2]byte
+				if _, err := conn.Read(l[:]); err != nil {
+					return
+				}
+				msg := make([]byte, int(l[0])<<8|int(l[1]))
+				if _, err := conn.Read(msg); err != nil {
+					return
+				}
+				resp := answer(msg, false)
+				conn.Write([]byte{byte(len(resp) >> 8), byte(len(resp))})
+				conn.Write(resp)
+			}()
+		}
+	}()
+	return udp.LocalAddr().String(), func() { udp.Close(); tcp.Close() }
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}
+
+func TestFailoverFallsBackToTCPOnTruncation(t *testing.T) {
+	live, stop := miniDNSTruncating(t)
+	defer stop()
+	addrs := []string{live}
+	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return newFailoverConn(ctx, network, addrs, 400*time.Millisecond)
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ips, err := r.LookupHost(ctx, "big.test")
+	if err != nil {
+		t.Fatalf("truncated UDP answer should retry over TCP: %v", err)
+	}
+	found := false
+	for _, ip := range ips {
+		if ip == "10.9.8.7" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("got %v, want 10.9.8.7 from the TCP answer", ips)
 	}
 }

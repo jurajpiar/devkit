@@ -37,11 +37,12 @@ func TestFailoverConnSkipsSilentUpstream(t *testing.T) {
 	}()
 
 	addrs := []string{blackHole.LocalAddr().String(), live.LocalAddr().String()}
-	c, err := newFailoverConn(context.Background(), addrs, 200*time.Millisecond)
+	conn, err := newFailoverConn(context.Background(), "udp", addrs, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer conn.Close()
+	c := conn.(*udpFailoverConn)
 	c.SetDeadline(time.Now().Add(5 * time.Second))
 
 	msg := []byte("query-payload")
@@ -73,7 +74,7 @@ func TestFailoverConnAllSilentTimesOut(t *testing.T) {
 		defer bh.Close()
 		addrs = append(addrs, bh.LocalAddr().String())
 	}
-	c, err := newFailoverConn(context.Background(), addrs, 100*time.Millisecond)
+	c, err := newFailoverConn(context.Background(), "udp", addrs, 100*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,4 +95,4 @@ func TestFailoverConnAllSilentTimesOut(t *testing.T) {
 	}
 }
 
-var _ net.PacketConn = (*failoverConn)(nil)
+var _ net.PacketConn = (*udpFailoverConn)(nil)

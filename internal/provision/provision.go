@@ -7,6 +7,8 @@ package provision
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"text/template"
@@ -24,11 +26,30 @@ type Params struct {
 	EgressSHA256 string
 	// MountPath is the guest path of the host directory for source: mount.
 	MountPath string
+	// ProvisionID fingerprints the policy this script applies. The VM records
+	// it so commands can tell when a VM is running provisioning older than the
+	// devkit binary. Set by Fingerprint; leave empty when computing it.
+	ProvisionID string
 }
 
 // System renders the root provisioning script.
 func System(p Params) (string, error) {
 	return render(systemTmpl, p)
+}
+
+// Fingerprint is a short, stable hash of the policy a given Params produces:
+// the system script with its own ID blanked, so it captures the firewall,
+// DNS, trust, kernel and proxy-hash choices but not the fingerprint itself.
+// Identical inputs give the same value; any policy change gives a new one.
+func Fingerprint(p Params) (string, error) {
+	p.ProvisionID = ""
+	p.MountPath = "" // a host path, not policy: the fingerprint must not vary with it
+	s, err := System(p)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:12], nil
 }
 
 // User renders the per-user provisioning script.
@@ -168,7 +189,8 @@ cat > /etc/devkit/egress.conf <<'EOF'
 EXTRA_ARGS=-allowed={{if eq .Config.Network.Mode "open"}}*{{else}}{{join .Config.Network.Allow ","}}{{end}}
 EOF
 echo "{{.EgressSHA256}}" > /etc/devkit/egress.sha256
-chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256
+echo "{{.ProvisionID}}" > /etc/devkit/provision.id
+chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256 /etc/devkit/provision.id
 chown "$DEVKIT_USER" {{.DropDir}}
 chmod 700 {{.DropDir}}
 
@@ -348,14 +370,14 @@ Components: main universe restricted multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
   SECAPT="$APT -o Dir::Etc::SourceList=$SEC_SOURCES -o Dir::Etc::SourceParts=/dev/null"
-  before="$(ls /boot/vmlinuz-* 2>/dev/null | sort | tail -n1)"
+  before="$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -n1)"
   # full-upgrade, not upgrade: a kernel security update arrives as a new
   # package that upgrade would hold back.
   # Error-Mode=any: a failed index download is an error, not a warning
   # followed by an upgrade against the previous lists.
   if $SECAPT -o APT::Update::Error-Mode=any update -q >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive $SECAPT full-upgrade -y -q >/dev/null 2>&1; then
-    after="$(ls /boot/vmlinuz-* 2>/dev/null | sort | tail -n1)"
-    [ "$before" != "$after" ] && echo "devkit: a kernel security update was installed; it runs from the next devkit up" >&2
+    after="$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -n1)"
+    [ "$before" != "$after" ] && echo "devkit: a kernel security update was installed; run 'devkit down && devkit up' to boot into it" >&2
     # When the pocket was last applied successfully. apt keeps the index
     # files' upstream timestamps, so they say nothing about this boot.
     date -u +%s > /var/lib/devkit/.security-updated && chmod 644 /var/lib/devkit/.security-updated

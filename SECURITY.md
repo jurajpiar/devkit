@@ -85,8 +85,9 @@ image's patch level while the image ages. That matters more than anything
 else on this page once an attacker is inside: a local privilege escalation
 turns the sandbox user into root, and root can drop the firewall and reach
 your Mac's loopback services through Lima's gateway. A kernel update installed
-this way runs from the next `devkit up`. `vm.security_updates: false` turns
-the step off.
+this way runs from the next boot; `devkit up` does not reboot a VM whose
+configuration has not changed, so `devkit down && devkit up` is what boots
+into it. `vm.security_updates: false` turns the step off.
 
 **One less surface for the privilege escalation.** Patching closes known
 holes; it cannot close the one nobody has reported yet. So the guest also

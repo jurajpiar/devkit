@@ -192,8 +192,9 @@ comes up, so a VM does not stay at its image's patch level. Expect the cost on
 the first boot after a kernel update lands: `devkit up` took about a minute
 longer than usual the day one did (1 m 45 s against 46 s). Later boots only
 check the pocket and take seconds. The new kernel is installed to disk and runs
-from the next `devkit up`; the boot that installed it says so. `vm.security_updates:
-false` turns the step off.
+from the next boot. `devkit up` does not reboot a VM whose configuration is
+unchanged, so run `devkit down && devkit up` to boot into a new kernel; the
+boot that installed it says so. `vm.security_updates: false` turns the step off.
 
 **Trust store.** The VM trusts what Ubuntu's `ca-certificates` package
 trusts, refreshed by root on every boot, so a VM created before a CA was
