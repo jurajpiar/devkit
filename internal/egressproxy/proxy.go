@@ -23,6 +23,11 @@ type ProxyConfig struct {
 	AuditLog bool
 	// Logger is the logger to use (nil for default)
 	Logger *log.Logger
+	// Resolvers, as "host:port", are the DNS servers the proxy resolves
+	// through. Empty means the upstream servers systemd-resolved lists in
+	// /run/systemd/resolve/resolv.conf, which is what the VM uses; tests set
+	// it to local servers.
+	Resolvers []string
 }
 
 // Proxy is an HTTP/HTTPS proxy with domain filtering
@@ -290,13 +295,14 @@ const resolvConf = "/run/systemd/resolve/resolv.conf"
 func (p *Proxy) dialer() *net.Dialer {
 	p.dialOnce.Do(func() {
 		p.dial = &net.Dialer{Timeout: 10 * time.Second}
-		servers := upstreamResolvers(resolvConf)
-		if len(servers) == 0 {
-			return
+		addrs := p.config.Resolvers
+		if len(addrs) == 0 {
+			for _, s := range upstreamResolvers(resolvConf) {
+				addrs = append(addrs, net.JoinHostPort(s, "53"))
+			}
 		}
-		addrs := make([]string, len(servers))
-		for i, s := range servers {
-			addrs[i] = net.JoinHostPort(s, "53")
+		if len(addrs) == 0 {
+			return
 		}
 		// One Dial gives Go's resolver a connection that itself fails over:
 		// it sends each query to the first upstream and, if that upstream is

@@ -39,7 +39,47 @@ jobs:
           if [ -n "$unformatted" ]; then echo "Not gofmt-formatted:"; echo "$unformatted"; exit 1; fi
       - name: go vet
         run: go vet ./...
+
+      - name: ShellCheck (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          command -v shellcheck || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
+          echo "DEVKIT_REQUIRE_SHELLCHECK=1" >> "$GITHUB_ENV"
+
+      # Lima for "limactl validate" of the rendered instance config. Each
+      # tarball is pinned by SHA-256, taken from the release's SHA256SUMS
+      # after checking its signature by Lima's maintainer (key
+      # C020EA876CE4E06C7AB95AEF49524C6F9F638F1A).
+      - name: Lima (macOS)
+        if: runner.os == 'macOS'
+        env:
+          LIMA_VERSION: 2.2.1
+          LIMA_SHA256_X64: 6b776e4bc41f358e6ee01fefcc78e2eb26f11635a0fcff632234af77a566c6c4
+          LIMA_SHA256_ARM64: 9e9eacce88f37e185c346bad73aa6136f738d8cdf8c3bb23cd42b071824bc66e
+        run: |
+          case "${{ runner.arch }}" in
+            X64)   arch=x86_64; LIMA_SHA256="$LIMA_SHA256_X64" ;;
+            ARM64) arch=arm64;  LIMA_SHA256="$LIMA_SHA256_ARM64" ;;
+            *) echo "no pinned Lima for ${{ runner.arch }}"; exit 1 ;;
+          esac
+          f="lima-${LIMA_VERSION}-Darwin-${arch}.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/$f"
+          echo "${LIMA_SHA256}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/lima" && tar -C "$RUNNER_TEMP/lima" -xzf "$RUNNER_TEMP/$f"
+          echo "$RUNNER_TEMP/lima/bin" >> "$GITHUB_PATH"
+          echo "DEVKIT_REQUIRE_LIMACTL=1" >> "$GITHUB_ENV"
+
       - name: unit tests
         run: make test
       - name: build (cross-compiles the guest proxy and embeds it)
         run: make build
+
+      # The firewall and boot hold, loaded into network namespaces and
+      # checked account by account with the real kernel's netfilter. Needs
+      # root: the test binary is built as the runner user and only it runs
+      # under sudo.
+      - name: firewall behaviour in network namespaces (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          go test -c -o "$RUNNER_TEMP/provision.test" ./internal/provision
+          sudo DEVKIT_NETNS=1 "$RUNNER_TEMP/provision.test" -test.run Netns -test.v

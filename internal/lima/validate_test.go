@@ -13,6 +13,9 @@ import (
 // Skipped when Lima is not installed.
 func TestLimactlValidate(t *testing.T) {
 	if CheckInstalled() != nil {
+		if os.Getenv("DEVKIT_REQUIRE_LIMACTL") != "" {
+			t.Fatal("limactl is required (DEVKIT_REQUIRE_LIMACTL) but not installed")
+		}
 		t.Skip("limactl not installed")
 	}
 	c := project.Default()

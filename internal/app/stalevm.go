@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -19,7 +20,14 @@ import (
 // a devkit upgrade. It is best-effort: any uncertainty stays silent, and it
 // never blocks the command.
 func warnIfStale(ctx context.Context, cfg *project.Config) {
-	want := expectedProvisionID(ctx, cfg)
+	warnIfStaleTo(ctx, cfg, os.Stderr)
+}
+
+// provisionIDFor is what warnIfStale compares against; tests replace it.
+var provisionIDFor = expectedProvisionID
+
+func warnIfStaleTo(ctx context.Context, cfg *project.Config, w io.Writer) {
+	want := provisionIDFor(ctx, cfg)
 	if want == "" {
 		return
 	}
@@ -35,10 +43,10 @@ func warnIfStale(ctx context.Context, cfg *project.Config) {
 	}
 	if got == "" {
 		// The VM predates the stamp entirely: it is from before this feature.
-		fmt.Fprintf(os.Stderr, "Warning: this VM predates the current devkit's sandbox policy.\n  Run 'devkit down && devkit up' to reprovision it.\n")
+		fmt.Fprintf(w, "Warning: this VM predates the current devkit's sandbox policy.\n  Run 'devkit down && devkit up' to reprovision it.\n")
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Warning: this VM applied an older devkit policy (%s; this devkit expects %s).\n  Run 'devkit down && devkit up' to apply the current sandbox policy.\n", got, want)
+	fmt.Fprintf(w, "Warning: this VM applied an older devkit policy (%s; this devkit expects %s).\n  Run 'devkit down && devkit up' to apply the current sandbox policy.\n", got, want)
 }
 
 // expectedProvisionID is the fingerprint this binary would write for cfg, or

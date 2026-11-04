@@ -107,55 +107,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	renderedPath := filepath.Join(devkitHome(), "instances", name+".yaml")
-	if err := os.MkdirAll(filepath.Dir(renderedPath), 0o755); err != nil {
+	if err := reconcileVM(ctx, name, rendered, inst); err != nil {
 		return err
-	}
-
-	switch {
-	case inst == nil:
-		fmt.Printf("Creating VM %s (first boot downloads Ubuntu and installs tools; a few minutes)\n", name)
-		if err := os.WriteFile(renderedPath, []byte(rendered), 0o644); err != nil {
-			return err
-		}
-		if err := lima.Validate(ctx, renderedPath); err != nil {
-			return err
-		}
-		if err := lima.Create(ctx, name, renderedPath); err != nil {
-			return err
-		}
-	default:
-		// Compare with the instance's own lima.yaml, which Lima stores
-		// verbatim, rather than a cache keyed by name: two Lima homes can
-		// hold same-named instances.
-		prev, _ := os.ReadFile(lima.ConfigPath(name))
-		if string(prev) != rendered {
-			if inst.Running() {
-				fmt.Println("devkit.yaml changed; restarting VM to apply it")
-				if err := lima.Stop(ctx, name); err != nil {
-					return err
-				}
-				inst.Status = "Stopped"
-			}
-			if err := os.WriteFile(renderedPath, []byte(rendered), 0o644); err != nil {
-				return err
-			}
-			if err := lima.WriteConfig(name, rendered); err != nil {
-				return err
-			}
-		}
-	}
-
-	if inst == nil || !inst.Running() {
-		fmt.Printf("Starting VM %s\n", name)
-		stopWatch := watchProvisioning(ctx, name)
-		err := lima.Start(ctx, name)
-		stopWatch()
-		if err != nil {
-			return err
-		}
-	} else {
-		fmt.Printf("VM %s is running\n", name)
 	}
 
 	if proxyBin != nil {
@@ -447,4 +400,63 @@ func setSecurityUpdates(path string, on bool) error {
 		return fmt.Errorf("could not find the vm block in %s", path)
 	}
 	return os.WriteFile(path, updated, 0o644)
+}
+
+// reconcileVM brings the Lima instance in line with the rendered config:
+// create it if it does not exist; if its stored config differs, stop it when
+// running and write the new config; then start it unless it is already
+// running with the current config. Provisioning runs on that start.
+func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance) error {
+	renderedPath := filepath.Join(devkitHome(), "instances", name+".yaml")
+	if err := os.MkdirAll(filepath.Dir(renderedPath), 0o755); err != nil {
+		return err
+	}
+
+	switch {
+	case inst == nil:
+		fmt.Printf("Creating VM %s (first boot downloads Ubuntu and installs tools; a few minutes)\n", name)
+		if err := os.WriteFile(renderedPath, []byte(rendered), 0o644); err != nil {
+			return err
+		}
+		if err := lima.Validate(ctx, renderedPath); err != nil {
+			return err
+		}
+		if err := lima.Create(ctx, name, renderedPath); err != nil {
+			return err
+		}
+	default:
+		// Compare with the instance's own lima.yaml, which Lima stores
+		// verbatim, rather than a cache keyed by name: two Lima homes can
+		// hold same-named instances.
+		prev, _ := os.ReadFile(lima.ConfigPath(name))
+		if string(prev) != rendered {
+			if inst.Running() {
+				fmt.Println("devkit.yaml changed; restarting VM to apply it")
+				if err := lima.Stop(ctx, name); err != nil {
+					return err
+				}
+				inst.Status = "Stopped"
+			}
+			if err := os.WriteFile(renderedPath, []byte(rendered), 0o644); err != nil {
+				return err
+			}
+			if err := lima.WriteConfig(name, rendered); err != nil {
+				return err
+			}
+		}
+	}
+
+	if inst == nil || !inst.Running() {
+		fmt.Printf("Starting VM %s\n", name)
+		stopWatch := watchProvisioning(ctx, name)
+		err := lima.Start(ctx, name)
+		stopWatch()
+		if err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("VM %s is running\n", name)
+	}
+
+	return nil
 }
