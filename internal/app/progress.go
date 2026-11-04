@@ -48,60 +48,67 @@ func watchSerial(parent context.Context, path string, w io.Writer, every time.Du
 		changed, beat := time.Now(), time.Now()
 		announced := false
 		partial := ""
-		tick := time.NewTicker(every)
-		defer tick.Stop()
 		elapsed := func() string { return fmt.Sprintf("%ds", int(time.Since(start).Seconds())) }
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
+		announce := func(l string) {
+			// The getty prompt means the guest is up. Worth saying only before
+			// the first step; on a restart it can arrive after.
+			if !announced && current == "" && (strings.Contains(l, " login: ") || strings.HasSuffix(strings.TrimRight(l, " "), " login:")) {
+				fmt.Fprintf(w, "devkit: guest is up; Lima is running its own boot scripts (%s)\n", elapsed())
+				announced, beat = true, time.Now()
 			}
+		}
+		poll := func() {
 			if fi, err := os.Stat(path); err == nil && fi.Size() < offset {
 				offset = 0 // Lima started a fresh log
 			}
-			if f, err := os.Open(path); err == nil {
-				if _, err := f.Seek(offset, io.SeekStart); err == nil {
-					data, _ := io.ReadAll(f)
-					offset += int64(len(data))
-					buf := partial + string(data)
-					partial = ""
-					// An unterminated last line is held for the next read.
-					if i := strings.LastIndexByte(buf, '\n'); i < len(buf)-1 {
-						partial, buf = buf[i+1:], buf[:i+1]
-					}
-					sc := bufio.NewScanner(strings.NewReader(buf))
-					var lines []string
-					for sc.Scan() {
-						lines = append(lines, sc.Text())
-					}
-					for _, l := range lines {
-						l = strings.TrimRight(l, "\r")
-						// The getty prompt means the guest is up. Worth saying only
-						// before the first step; on a restart it can arrive after.
-						// It may share a console line with a step, so fall through.
-						if !announced && current == "" && (strings.Contains(l, " login: ") || strings.HasSuffix(l, " login:")) {
-							fmt.Fprintf(w, "devkit: guest is up; Lima is running its own boot scripts (%s)\n", elapsed())
-							announced, beat = true, time.Now()
-						}
-						i := strings.Index(l, progressPrefix)
-						if i < 0 {
-							continue
-						}
-						step := printable(strings.TrimSpace(l[i+len(progressPrefix):]))
-						if step == "" {
-							continue
-						}
-						if step == "done" {
-							fmt.Fprintf(w, "devkit: provisioning finished (%s); Lima is finishing up\n", elapsed())
-						} else {
-							fmt.Fprintf(w, "devkit: %s (%s)\n", step, elapsed())
-						}
-						current, changed, beat = step, time.Now(), time.Now()
-					}
-				}
-				f.Close()
+			f, err := os.Open(path)
+			if err != nil {
+				return
 			}
+			defer f.Close()
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				return
+			}
+			data, _ := io.ReadAll(f)
+			offset += int64(len(data))
+			buf := partial + string(data)
+			partial = ""
+			// An unterminated last line is held for the next read.
+			if i := strings.LastIndexByte(buf, '\n'); i < len(buf)-1 {
+				partial, buf = buf[i+1:], buf[:i+1]
+			}
+			sc := bufio.NewScanner(strings.NewReader(buf))
+			for sc.Scan() {
+				l := strings.TrimRight(sc.Text(), "\r")
+				announce(l) // may share a console line with a step: fall through
+				i := strings.Index(l, progressPrefix)
+				if i < 0 {
+					continue
+				}
+				step := printable(strings.TrimSpace(l[i+len(progressPrefix):]))
+				if step == "" {
+					continue
+				}
+				if step == "done" {
+					fmt.Fprintf(w, "devkit: provisioning finished (%s); Lima is finishing up\n", elapsed())
+				} else {
+					fmt.Fprintf(w, "devkit: %s (%s)\n", step, elapsed())
+				}
+				current, changed, beat = step, time.Now(), time.Now()
+			}
+			// getty prints its prompt without a newline; do not wait for one.
+			announce(partial)
+		}
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				poll() // steps written since the last tick, "done" included
+				return
+			case <-tick.C:
+			}
+			poll()
 			if current != "done" && time.Since(changed) >= progressHeartbeat && time.Since(beat) >= progressHeartbeat {
 				what := current
 				if what == "" {

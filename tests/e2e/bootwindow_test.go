@@ -36,10 +36,24 @@ func TestBootWindowIsClosed(t *testing.T) {
 	t.Cleanup(func() { _, _ = s.run("rm", "--force") })
 	s.mustRun("up", "--no-install")
 
+	// Each hook tries four routes out, each recorded as one atomic line
+	// "<ts> <hook> <route> <result>", result "ok" when the route worked:
+	//   direct    a TCP connection that bypasses the proxy
+	//   dns       a lookup through the libc resolver (the stub, or upstream)
+	//   resolved  a lookup asked of systemd-resolved over D-Bus, which then
+	//             queries upstream as its own user
+	//   proxy     a request relayed by the egress proxy on loopback
+	// Background, so the hook never delays the session that runs it.
 	attempt := func(tag string) string {
-		// Background, so the hook never delays the session that runs it; one
-		// printf per attempt, so concurrent hooks never interleave a line.
-		return fmt.Sprintf(`( c=$(curl -s -m 3 --noproxy '*' -o /dev/null -w '%%{http_code}' http://example.com/); printf '%%s %s %%s %%s\n' "$(date +%%s)" "$c" "$(printf %%s "${BASH_EXECUTION_STRING:-}" | tr -s ' \n' '  ' | cut -c1-40)" >>"$HOME/boot-escape.log" ) </dev/null >/dev/null 2>&1 &`, tag)
+		one := func(route, cmd string) string {
+			return fmt.Sprintf(`( if %s >/dev/null 2>&1; then r=ok; else r=no; fi; printf '%%s %s %s %%s\n' "$(date +%%s)" "$r" >>"$HOME/boot-escape.log" ) </dev/null >/dev/null 2>&1 &`, cmd, tag, route)
+		}
+		return strings.Join([]string{
+			one("direct", `curl -sf -m 3 --noproxy '*' -o /dev/null http://example.com/`),
+			one("dns", `timeout 4 getent hosts example.org`),
+			one("resolved", `timeout 6 resolvectl query --legend=no example.net`),
+			one("proxy", `curl -sf -m 4 -x http://127.0.0.1:3128 --noproxy '' -o /dev/null https://registry.npmjs.org/`),
+		}, " ")
 	}
 	plant := "mkdir -p ~/.ssh && printf '%s\\n' " + shq(attempt("rc")) + " > ~/.ssh/rc" +
 		" && { printf '%s\\n' " + shq(attempt("bashrc")) + "; cat ~/.bashrc; } > ~/.bashrc.new && mv ~/.bashrc.new ~/.bashrc" +
@@ -65,7 +79,7 @@ func TestBootWindowIsClosed(t *testing.T) {
 	if len(tail) >= 2 {
 		fwAt, _ = strconv.ParseInt(tail[0], 10, 64)
 	}
-	line := regexp.MustCompile(`^(\d+) (\w+) (\d{3}) ?(.*)$`)
+	line := regexp.MustCompile(`^(\d+) (\w+) (\w+) (ok|no)$`)
 	var thisBoot, beforeFirewall int
 	for _, l := range strings.Split(parts[0], "\n") {
 		m := line.FindStringSubmatch(strings.TrimSpace(l))
@@ -77,14 +91,25 @@ func TestBootWindowIsClosed(t *testing.T) {
 			continue
 		}
 		thisBoot++
-		if fwAt > 0 && ts < fwAt {
+		pre := fwAt > 0 && ts < fwAt
+		if pre {
 			beforeFirewall++
 		}
-		if m[3] != "000" {
-			t.Errorf("a %s hook reached the internet directly during boot (HTTP %s, at +%ds, firewall at +%ds, running %q)", m[2], m[3], ts-bootAt, fwAt-bootAt, m[4])
+		hook, route, ok := m[2], m[3], m[4] == "ok"
+		switch {
+		case ok && pre:
+			// Before the firewall nothing may leave for the sandbox, by any route.
+			t.Errorf("a %s hook got out by %s before the firewall (at +%ds, firewall at +%ds)", hook, route, ts-bootAt, fwAt-bootAt)
+		case ok && route != "proxy":
+			// After it, only the audited proxy to an allowed host may work.
+			t.Errorf("a %s hook got out by %s after the firewall (at +%ds)", hook, route, ts-bootAt)
 		}
 	}
 	t.Logf("%d hook attempts this boot, %d before the firewall was applied", thisBoot, beforeFirewall)
+	if t.Failed() {
+		diag, _ := s.shell("echo boot=$(date -u -d \"$(uptime -s)\" +%s) fw=$(cat /run/devkit/firewall-at); grep -E ' (dns|resolved) ok' ~/boot-escape.log; ls -l /etc/resolv.conf; grep -v '^#' /etc/resolv.conf; grep '^hosts' /etc/nsswitch.conf; getent hosts example.org; echo getent-now=$?")
+		t.Logf("diagnostics:\n%s", diag)
+	}
 	if beforeFirewall == 0 {
 		t.Fatalf("no hook ran before the firewall was applied, so the test proves nothing:\n%s", logOut)
 	}

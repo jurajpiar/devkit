@@ -33,7 +33,7 @@ func TestWatchSerial(t *testing.T) {
 	f.WriteString("lima-x login: devkit-progress: provisioning started\n") // shares a line with the prompt
 	f.WriteString("devkit-progress: applying the firewall\x1b[2J\n")
 	f.WriteString("lima-x login: \n") // a later prompt: no second announcement
-	f.WriteString("devkit-prog") // unterminated: must wait for the rest
+	f.WriteString("devkit-prog")      // unterminated: must wait for the rest
 	time.Sleep(100 * time.Millisecond)
 	f.WriteString("ress: done\n")
 	f.Close()
@@ -52,5 +52,34 @@ func TestWatchSerial(t *testing.T) {
 		if strings.Contains(got, bad) {
 			t.Errorf("should not show %q:\n%s", bad, got)
 		}
+	}
+}
+
+// Stopping right after a step is written, before the next tick, still shows
+// it: the watcher reads once more on stop. A prompt without a newline, as
+// getty prints it, is announced without waiting for another line.
+func TestWatchSerialFinalReadAndBarePrompt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "serialv.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out syncBuf
+	stop := watchSerial(context.Background(), path, &out, time.Hour) // never ticks
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("Ubuntu 24.04 lima-x hvc0\n\nlima-x login: ")
+	f.Close()
+	stop()
+	if !strings.Contains(out.String(), "guest is up") {
+		t.Errorf("a prompt without a newline should be announced:\n%s", out.String())
+	}
+
+	var out2 syncBuf
+	stop2 := watchSerial(context.Background(), path, &out2, time.Hour)
+	f, _ = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("\ndevkit-progress: applying the firewall\ndevkit-progress: done\n")
+	f.Close()
+	stop2()
+	if !strings.Contains(out2.String(), "provisioning finished") {
+		t.Errorf("steps written before stop must be shown:\n%s", out2.String())
 	}
 }

@@ -73,8 +73,22 @@ HTTP 200s from it before the fix. A unit installed on the first boot now runs
 on every later boot before sshd starts and rejects all new outbound traffic
 from the sandbox user until the firewall replaces it, and the firewall itself
 is rebuilt under a DROP policy so the moment between old and new rules is
-closed. The first boot needs no hold: nothing of the sandbox's exists on a
-fresh disk. `devkit up`'s progress display follows the serial console from
+closed. The hold decides by account and direction only, so loopback is held
+too (the egress proxy and systemd-resolved listen there and would relay), and
+in DNS=proxy and none modes systemd-resolved itself is held, which closes
+lookups the sandbox asks of it over D-Bus. The first boot needs no hold:
+nothing of the sandbox's exists on a fresh disk.
+
+**Connection state is trusted only for root and the proxy.** conntrack keys
+a flow by addresses and ports, not by the account that owns it, and an entry
+outlives its socket. A firewall that accepts "established" traffic before it
+checks the owner lets a sandbox socket bound to a source port the proxy just
+used for a lookup ride that live entry out; a sweep of every ephemeral port
+got 70 DNS queries answered that way before this rule. So "established"
+passes only for root and the proxy, and every other account may send only in
+the reply direction of a connection made to the guest, its SSH sessions and
+forwarded ports, plus what an explicit rule allows. The end-to-end suite
+repeats the sweep while the proxy is resolving names and requires no answer. `devkit up`'s progress display follows the serial console from
 the host for the same reason: polling over SSH would execute those files.
 
 **Egress allowlist.** In `allowlist` and `open` modes an iptables `OUTPUT`
