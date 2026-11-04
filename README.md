@@ -188,9 +188,12 @@ Nothing the sandbox listens on is reachable from your Mac unless its port is in
 with the browser's unrestricted network, so forwarding is opt-in per port.
 
 The guest applies Ubuntu's security pocket on every boot, before the firewall
-comes up, so a VM does not stay at its image's patch level. `vm.security_updates:
-false` turns that off. A new kernel installed this way runs from the next
-`devkit up`.
+comes up, so a VM does not stay at its image's patch level. Expect the cost on
+the first boot after a kernel update lands: `devkit up` took about a minute
+longer than usual the day one did (1 m 45 s against 46 s). Later boots only
+check the pocket and take seconds. The new kernel is installed to disk and runs
+from the next `devkit up`; the boot that installed it says so. `vm.security_updates:
+false` turns the step off.
 
 **Trust store.** The VM trusts what Ubuntu's `ca-certificates` package
 trusts, refreshed by root on every boot, so a VM created before a CA was
