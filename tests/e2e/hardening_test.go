@@ -88,8 +88,11 @@ sleep 3; python3 ~/sweep.py "$resolver"; wait`)
 		if m == nil {
 			t.Fatalf("sweep did not report: %s", out)
 		}
-		if m[2] != "0" {
-			t.Errorf("%s DNS queries from the sandbox were accepted (%s answered) by riding tracked connections", m[1], m[2])
+		// sent counts sends the firewall accepted (a REJECT fails the send
+		// itself with EPERM), so it is the firewall's verdict and does not
+		// depend on the resolver answering.
+		if m[1] != "0" || m[2] != "0" {
+			t.Errorf("%s DNS queries from the sandbox were accepted by riding tracked connections (%s answered)", m[1], m[2])
 		}
 	})
 
@@ -200,7 +203,7 @@ def query():
     q = struct.pack(">HHHHHH", random.randint(0, 65535), 0x0100, 1, 0, 0, 0)
     for part in b"example.com".split(b"."):
         q += bytes([len(part)]) + part
-    return q + b"\\x00" + struct.pack(">HH", 1, 1)
+    return q + b"\x00" + struct.pack(">HH", 1, 1)
 sent = answered = 0
 for base in range(32768, 61000, 400):
     socks = []
@@ -281,5 +284,37 @@ func TestRootInGuestReachesHost(t *testing.T) {
 	s.mustRun("shell", "sudo iptables -F OUTPUT && sudo iptables -P OUTPUT ACCEPT && echo flushed")
 	if out, _ := s.shell(probe); strings.Contains(out, "mac-loopback-service") {
 		t.Errorf("with root in the guest, a service on the Mac's loopback is reachable: %s", strings.TrimSpace(out))
+	}
+}
+
+// TestUpgradeFromStubOffResolves boots a VM into the state an older devkit
+// left behind (systemd-resolved's stub off, /etc/resolv.conf still pointing
+// at it) and requires the next boot's provisioning, whose downloads need DNS
+// before the firewall, to complete with no failed step. Needs sudo in the
+// guest to stage that state.
+func TestUpgradeFromStubOffResolves(t *testing.T) {
+	if os.Getenv("DEVKIT_E2E_SUDO") == "" {
+		t.Skip("set DEVKIT_E2E_SUDO=1 to run (creates a VM with sudo enabled)")
+	}
+	if _, err := exec.LookPath("limactl"); err != nil {
+		t.Skip("limactl not installed")
+	}
+	devkit := buildDevkitBinary(t)
+	dir := t.TempDir()
+	name := fmt.Sprintf("e2eupg-%d", time.Now().Unix()%100000)
+	s := &sandbox{t: t, devkit: devkit, dir: dir, name: name}
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"e2e","version":"1.0.0"}`)
+	s.mustRun("init", "--name", name)
+	setYAML(t, filepath.Join(dir, "devkit.yaml"), "# sudo: false", "sudo: true")
+	t.Cleanup(func() { _, _ = s.run("rm", "--force") })
+	s.mustRun("up", "--no-install")
+	s.mustRun("shell", "sudo mkdir -p /etc/systemd/resolved.conf.d && printf '[Resolve]\\nDNSStubListener=no\\n' | sudo tee /etc/systemd/resolved.conf.d/devkit.conf >/dev/null && sudo ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf && echo staged")
+	s.mustRun("down")
+	out := s.mustRun("up", "--no-sync", "--no-install")
+	if strings.Contains(out, "warning: could not") {
+		t.Fatalf("provisioning after the upgrade reported a failed step:\n%s", out)
+	}
+	if link, _ := s.shell("readlink /etc/resolv.conf"); !strings.Contains(link, "/run/systemd/resolve/resolv.conf") {
+		t.Errorf("libc should point at the upstream resolvers after provisioning: %s", link)
 	}
 }

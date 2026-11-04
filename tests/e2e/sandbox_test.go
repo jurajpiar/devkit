@@ -125,7 +125,7 @@ func TestSandboxGuarantees(t *testing.T) {
 	// Steps that fail soft say so on stderr; none may, or a green run proves
 	// less than it claims (a DNS stub switched off too early once hid a
 	// failed ca-certificates refresh this way).
-	if strings.Contains(upOut, "devkit: could not") {
+	if strings.Contains(upOut, "warning: could not") {
 		t.Fatalf("devkit up reported a failed step:\n%s", upOut)
 	}
 
@@ -474,7 +474,7 @@ func TestNixToolchain(t *testing.T) {
 	// Steps that fail soft say so on stderr; none may, or a green run proves
 	// less than it claims (a DNS stub switched off too early once hid a
 	// failed ca-certificates refresh this way).
-	if strings.Contains(upOut, "devkit: could not") {
+	if strings.Contains(upOut, "warning: could not") {
 		t.Fatalf("devkit up reported a failed step:\n%s", upOut)
 	}
 
