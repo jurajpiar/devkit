@@ -61,7 +61,7 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"FORWARD=\n",
 		`DNS="proxy"`,
 		"DNSStubListener=no",
-		"rm -f /etc/systemd/resolved.conf.d/devkit.conf",
+		"ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf",
 		"Suites: ${VERSION_CODENAME}-security",
 		"$SECAPT full-upgrade -y -q",
 		"$SECAPT -o APT::Update::Error-Mode=any update -q",
@@ -447,15 +447,15 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 	}
 }
 
-func TestStubIsDisabledAfterDownloadsAndBeforeFirewall(t *testing.T) {
+func TestResolutionIsSetBeforeFirewall(t *testing.T) {
 	s, _ := System(params(nil))
-	on := strings.Index(s, "rm -f /etc/systemd/resolved.conf.d/devkit.conf")
-	refresh := strings.Index(s, "--only-upgrade ca-certificates")
-	sec := strings.Index(s, "full-upgrade -y -q")
-	off := strings.Index(s, "DNSStubListener=no")
+	link := strings.Index(s, "ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf")
 	fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
-	if !(on < sec && sec < refresh && refresh < off && off < fw) {
-		t.Errorf("stub must be restored before root's downloads and disabled after them, before the firewall: on=%d sec=%d refresh=%d off=%d fw=%d", on, sec, refresh, off, fw)
+	if !(link > 0 && link < fw) {
+		t.Errorf("libc must point at the upstream resolvers before the firewall: link=%d fw=%d", link, fw)
+	}
+	if strings.Contains(s, "for the duration of provisioning") {
+		t.Error("the stub must no longer be re-enabled at the start of a boot")
 	}
 }
 
@@ -525,7 +525,8 @@ func TestBootHold(t *testing.T) {
 	s, _ := System(params(nil))
 	for _, want := range []string{
 		`SANDBOX_UID="$(id -u "$DEVKIT_USER")"`,
-		"-m owner --uid-owner $SANDBOX_UID -j REJECT",
+		"-m owner --uid-owner \\$who -j REJECT",
+		"-m owner --uid-owner $RESOLVE_UID -j REJECT",
 		"Before=network-pre.target ssh.socket ssh.service cloud-init-local.service sysinit.target",
 		"systemctl enable devkit-boot-hold.service",
 		"$t -P OUTPUT DROP",
@@ -538,5 +539,40 @@ func TestBootHold(t *testing.T) {
 	// The firewall must go back to an ACCEPT policy only after its final REJECT.
 	if strings.Index(s, "iptables -A OUTPUT -j REJECT") > strings.Index(s, "$t -P OUTPUT ACCEPT 2>/dev/null || true; done") {
 		t.Error("policy restored before the final REJECT")
+	}
+}
+
+func TestBootHoldDoesNotOpenLoopbackForTheSandbox(t *testing.T) {
+	s, _ := System(params(nil))
+	hold := s[strings.Index(s, "cat > /usr/local/sbin/devkit-boot-hold"):]
+	hold = hold[:strings.Index(hold, "\nEOF\n")]
+	if strings.Contains(hold, "-o lo -j ACCEPT") {
+		t.Error("the boot hold must not accept loopback ahead of the sandbox user's REJECT")
+	}
+}
+
+func TestStateIsTrustedOnlyForRootAndProxy(t *testing.T) {
+	s, _ := System(params(nil))
+	fw := s[strings.Index(s, "cat > /usr/local/sbin/devkit-firewall"):]
+	fw = fw[:strings.Index(fw, "\nEOF\n")]
+	if strings.Contains(fw, "-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT") {
+		t.Error("the firewall must not accept established traffic regardless of owner")
+	}
+	for _, want := range []string{
+		"-m owner --uid-owner 0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"-m owner --uid-owner devkit-proxy -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"-m conntrack --ctdir REPLY -j ACCEPT",
+	} {
+		if !strings.Contains(fw, want) {
+			t.Errorf("firewall missing %q", want)
+		}
+	}
+	hold := s[strings.Index(s, "cat > /usr/local/sbin/devkit-boot-hold"):]
+	hold = hold[:strings.Index(hold, "\nEOF\n")]
+	if strings.Contains(hold, "--ctstate ESTABLISHED") {
+		t.Error("the boot hold must not accept by connection state")
+	}
+	if !strings.Contains(hold, "for who in $SANDBOX_UID $SUBUIDS") {
+		t.Error("the boot hold must also hold the sandbox's subordinate UIDs")
 	}
 }
