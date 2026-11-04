@@ -18,9 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Standard runners only: free for public repositories. The end-to-end
-        # suite needs a VM and is not run here; see README "Running the tests".
-        os: [ubuntu-24.04, macos-15]
+        # Standard runners only: free for public repositories. macOS runs on
+        # the Intel image: GitHub's arm64 macOS pool is often too congested to
+        # pick a job up at all. The end-to-end suite needs a VM and is not run
+        # here.
+        os: [ubuntu-24.04, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       # Actions are pinned to full commit SHAs, as devkit pins everything it
