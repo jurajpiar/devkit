@@ -87,6 +87,31 @@ turns the sandbox user into root, and root can drop the firewall and reach
 your Mac's loopback services through Lima's gateway. A kernel update installed
 this way runs from the next `devkit up`. `vm.security_updates: false` turns
 the step off.
+
+**One less surface for the privilege escalation.** Patching closes known
+holes; it cannot close the one nobody has reported yet. So the guest also
+takes away interfaces unprivileged code rarely needs and kernel exploits
+often ride in on. Beyond the sysctl restrictions above (io_uring, BPF, perf,
+userfaultfd, user namespaces), the kernel crypto socket family `AF_ALG` is
+blocked from loading and unloaded if present. That family exposes kernel
+crypto internals to any process and has produced a string of memory-safety
+bugs, Copy-Fail (CVE-2026-31431) the latest; a dev workload does its crypto
+in userspace libraries and never misses it. This does not stop a kernel
+out-of-bounds write in code that is still reachable: nothing short of not
+running that code does, and that is the next point. It removes one whole
+class of reachable bug in advance.
+
+**What it would take to go further, and why it is not the default.** The
+remaining gap is that any reachable kernel bug, in a subsystem we did not
+foresee, still escalates. Closing it means not trusting the guest kernel at
+all: running the project's processes inside a userspace kernel such as gVisor
+*within* the VM, so an exploit meets gVisor's syscall emulation before it ever
+reaches the real kernel. That is real defence in depth but it is not free,
+a measurable cost on syscall-, file- and network-heavy work, and an IDE's
+remote session would have to run inside that inner sandbox rather than in the
+VM. It is a roadmap item, an opt-in mode, not something to impose on every
+project. The VM boundary already keeps a guest-root attacker off your files;
+this would additionally keep a kernel exploit off the host's loopback.
 Software that ignores proxy settings is simply blocked by the firewall.
 
 **Config values cannot inject into the policy.** `network.allow`, `repo`,
@@ -176,9 +201,13 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
 - **Root in the guest.** The firewall and the uid separation are what keep
   the host's loopback and the open internet out of reach. A privilege
   escalation in the guest removes both; the VM boundary still protects your
-  files. The security-pocket updates at boot are the mitigation, together
-  with Ubuntu's own restrictions on unprivileged user namespaces, io_uring,
-  BPF and perf, which the test suite asserts.
+  files. The mitigations are the security-pocket updates at boot, the kernel
+  surface we take away (user namespaces, io_uring, BPF, perf, and the
+  `AF_ALG` crypto family), and, for those who want it, an inner gVisor
+  sandbox on the roadmap. See "The guest is patched" and the two points
+  after it. A kernel bug in a subsystem none of that covers still escalates;
+  that is the residual risk and the reason the boundary we rely on is the
+  hypervisor, not the guest kernel.
 - **Allowed hosts are trusted.** If you allow `**.github.com`, code can push to
   any GitHub repository it has credentials for. Keep the list tight and read
   the log.

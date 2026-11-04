@@ -123,6 +123,17 @@ func hardeningAttempts(t *testing.T, s *sandbox, dir string) {
 			"kernel.apparmor_restrict_unprivileged_userns": "1",
 			"kernel.sysrq":                                 "0",
 		}
+		// The kernel crypto socket family is out of reach: creating an AF_ALG
+		// socket (the surface of Copy-Fail and its algif siblings) must fail
+		// for the sandbox user. AF_ALG is 38; a working family (AF_INET, 2)
+		// is the control.
+		out, _ := s.shell("python3 -c 'import socket; socket.socket(38, 5); print(\"opened\")' 2>&1; echo ---; python3 -c 'import socket; socket.socket(2, 1); print(\"inet-ok\")' 2>&1")
+		if strings.Contains(out, "opened") {
+			t.Errorf("AF_ALG socket should be refused but opened: %s", out)
+		}
+		if !strings.Contains(out, "inet-ok") {
+			t.Errorf("a normal AF_INET socket should still work: %s", out)
+		}
 		for key, accept := range want {
 			out, _ := s.shell("sysctl -n " + key + " 2>/dev/null; echo")
 			got := strings.TrimSpace(out)

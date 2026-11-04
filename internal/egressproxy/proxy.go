@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -32,7 +31,6 @@ type Proxy struct {
 	dial     *net.Dialer
 	trOnce   sync.Once
 	tr       *http.Transport
-	next     uint32 // round-robin index over the upstream resolvers
 	config   ProxyConfig
 	filter   *Filter
 	audit    *AuditLogger
@@ -289,20 +287,174 @@ func (p *Proxy) dialer() *net.Dialer {
 		if len(servers) == 0 {
 			return
 		}
-		// Go's resolver retries a query that gets no answer, calling Dial
-		// again each time. UDP "dials" never fail, so the only way a dead
-		// upstream is skipped is to hand each attempt the next server.
+		addrs := make([]string, len(servers))
+		for i, s := range servers {
+			addrs[i] = net.JoinHostPort(s, "53")
+		}
+		// One Dial gives Go's resolver a connection that itself fails over:
+		// it sends each query to the first upstream and, if that upstream is
+		// silent for perUpstreamTimeout, resends to the next. Rotating
+		// upstreams per Dial (the old approach) did not survive Go issuing
+		// the A and AAAA queries at once: both took a turn, so each landed on
+		// the same server every retry and a silent upstream was never left.
 		p.dial.Resolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				i := atomic.AddUint32(&p.next, 1) - 1
-				s := servers[int(i)%len(servers)]
-				return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, net.JoinHostPort(s, "53"))
+				return newFailoverConn(ctx, addrs, perUpstreamTimeout)
 			},
 		}
 	})
 	return p.dial
 }
+
+// perUpstreamTimeout is how long one DNS upstream is given to answer a query
+// before the failover connection resends it to the next.
+const perUpstreamTimeout = 2500 * time.Millisecond
+
+// failoverConn is a connected UDP DNS socket that moves to the next upstream
+// when the current one does not answer within perUpstream. It keeps the last
+// datagram written so it can resend it to each upstream in turn, which makes
+// a silent primary resolver fail over to a working secondary within one
+// query instead of relying on the resolver's own retry.
+type failoverConn struct {
+	ctx         context.Context
+	addrs       []string
+	perUpstream time.Duration
+
+	mu       sync.Mutex
+	conn     net.Conn
+	idx      int
+	lastMsg  []byte
+	deadline time.Time
+}
+
+func newFailoverConn(ctx context.Context, addrs []string, perUpstream time.Duration) (*failoverConn, error) {
+	c := &failoverConn{ctx: ctx, addrs: addrs, perUpstream: perUpstream}
+	if err := c.dialCurrent(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *failoverConn) dialCurrent() error {
+	conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(c.ctx, "udp", c.addrs[c.idx])
+	if err != nil {
+		return err
+	}
+	c.conn = conn
+	return nil
+}
+
+func (c *failoverConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastMsg = append(c.lastMsg[:0], b...)
+	return c.conn.Write(b)
+}
+
+func (c *failoverConn) Read(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var lastErr error
+	for {
+		// Give an upstream only perUpstream to answer while another remains,
+		// so a silent one fails over quickly; give the last (or only) upstream
+		// the full remaining deadline, so a single slow-but-working resolver
+		// is not cut off early.
+		var try time.Duration
+		last := c.idx+1 >= len(c.addrs)
+		rem := time.Duration(-1)
+		if !c.deadline.IsZero() {
+			rem = time.Until(c.deadline)
+		}
+		if last {
+			try = rem // -1 (no deadline) means block until the conn's own deadline
+		} else {
+			try = c.perUpstream
+			if rem >= 0 && rem < try {
+				try = rem
+			}
+		}
+		if rem == 0 || (rem > 0 && try <= 0) {
+			if lastErr == nil {
+				lastErr = &net.OpError{Op: "read", Net: "udp", Err: errReadTimeout}
+			}
+			return 0, lastErr
+		}
+		if try >= 0 {
+			_ = c.conn.SetReadDeadline(time.Now().Add(try))
+		} else {
+			_ = c.conn.SetReadDeadline(time.Time{}) // block (bounded by SetDeadline, if any)
+		}
+		n, err := c.conn.Read(b)
+		if err == nil {
+			return n, nil
+		}
+		lastErr = err
+		// Only a timeout means "this upstream is silent"; a real error on a
+		// connected UDP socket (e.g. ICMP port-unreachable) is also a reason
+		// to try the next. Either way, move on if any upstream is left.
+		if c.idx+1 >= len(c.addrs) {
+			return 0, err
+		}
+		c.conn.Close()
+		c.idx++
+		if derr := c.dialCurrent(); derr != nil {
+			return 0, derr
+		}
+		if len(c.lastMsg) > 0 {
+			if _, werr := c.conn.Write(c.lastMsg); werr != nil {
+				return 0, werr
+			}
+		}
+	}
+}
+
+func (c *failoverConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
+}
+
+func (c *failoverConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return c.conn.SetDeadline(t)
+}
+
+func (c *failoverConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return nil // Read manages its own per-upstream deadline, bounded by this.
+}
+
+func (c *failoverConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
+func (c *failoverConn) LocalAddr() net.Addr                { return c.conn.LocalAddr() }
+func (c *failoverConn) RemoteAddr() net.Addr               { return c.conn.RemoteAddr() }
+
+// ReadFrom and WriteTo make failoverConn satisfy net.PacketConn. Go's DNS
+// resolver uses that type assertion to choose UDP datagram framing over the
+// length-prefixed TCP framing; without it the query would be framed for TCP
+// and a UDP upstream would drop it. The address is ignored: the socket is
+// connected, and the datagram roundtrip calls Write/Read anyway.
+func (c *failoverConn) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
+func (c *failoverConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := c.Read(b)
+	return n, c.RemoteAddr(), err
+}
+
+var errReadTimeout = timeoutError{}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "dns upstreams did not answer in time" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
 
 // transport is the one http.Transport for forwarded plain-HTTP requests:
 // bounded idle connections with a timeout, rather than a new Transport per

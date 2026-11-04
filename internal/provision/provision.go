@@ -312,6 +312,25 @@ kernel.sysrq = 0
 EOF
 sysctl -q -p /etc/sysctl.d/90-devkit.conf || true
 
+# The kernel crypto socket API (AF_ALG: algif_aead and its siblings) exposes
+# kernel crypto internals to unprivileged processes and has a long history of
+# memory-safety bugs, Copy-Fail (CVE-2026-31431) among them. Nothing in a
+# normal dev workflow uses it, so the whole family is taken out of reach: the
+# modules are blocked from autoloading, and any already loaded and unused are
+# removed. This does not stop a kernel bug elsewhere; it removes one reachable
+# surface, and every future algif bug with it. The security pocket above still
+# patches the specific CVE.
+cat > /etc/modprobe.d/devkit-harden.conf <<'EOF'
+install af_alg /bin/false
+install algif_aead /bin/false
+install algif_hash /bin/false
+install algif_skcipher /bin/false
+install algif_rng /bin/false
+EOF
+for m in algif_aead algif_hash algif_skcipher algif_rng af_alg; do
+  rmmod "$m" 2>/dev/null || true
+done
+
 # ---- security updates: Ubuntu's security pocket, before the firewall ----
 # A pinned image gets weaker every week. Only the security pocket is
 # applied, so the rest of the system stays at the image's versions. A new

@@ -67,6 +67,8 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"date -u +%s > /var/lib/devkit/.security-updated",
 		"kernel.io_uring_disabled = 2",
 		"sysctl -q -p /etc/sysctl.d/90-devkit.conf",
+		"install af_alg /bin/false",
+		"/etc/modprobe.d/devkit-harden.conf",
 		"-o Dir::Etc::SourceParts=/dev/null",
 		`iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT`,
 		`NO_PROXY_HOSTS="localhost,127.0.0.1"`,
