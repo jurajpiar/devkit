@@ -115,6 +115,36 @@ is a project whose code tries to break out and reports, line by line, whether
 each attempt was stopped. Run it, then loosen `devkit.yaml` and watch the
 boundary give way exactly where you told it to.
 
+## How escapes are stopped
+
+Every arrow is something a malicious dependency or a misbehaving agent can try
+from inside the VM, as the sandbox user. It travels right, towards your Mac and
+the internet, until the first component that refuses it. One arrow gets
+through: the audited path to an allowed host.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/escape-map-dark.svg">
+  <img alt="Nine escape attempts, each stopped at the layer that blocks it; only HTTPS to an allowed host on port 443 passes, logged" src="docs/escape-map-light.svg">
+</picture>
+
+Each stop is asserted on a real VM by the end-to-end suite, and most were
+written red first: the escape succeeded, then the design changed until it
+failed.
+
+| Attempt | Stopped by | Proven by |
+|---|---|---|
+| Direct connection to the internet | Firewall: only uid `devkit-proxy` may egress | `direct connections bypassing the proxy are rejected` |
+| Proxy to another host, or to port 22 | Proxy: allowlist, ports 80 and 443 only | `allowed hosts are reachable on web ports only` |
+| DNS query with data in the name | Firewall: port 53 only for the proxy's account; resolver stub off | `DNS is not a side channel` |
+| Connect to your Mac | Firewall: host rejected for every account, the proxy included | `host is unreachable under every address form` |
+| Listen for your Mac to connect | Lima: forward nothing unless listed in `network.forward` | `guest listeners are not forwarded to the Mac unless configured` |
+| Read or write your files | Lima: `mounts: []`; devkit never copies out of the VM | `nothing from the VM lands on the host` |
+| Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | `policy files are root-only` |
+| Become root | No sudo; io_uring, unprivileged BPF, user namespaces and `AF_ALG` off; security pocket at boot | `unprivileged kernel attack surface is reduced`, `security updates are applied` |
+| Root reaches your Mac's loopback | Nothing inside the guest; only the hypervisor keeps your files safe | `TestRootInGuestReachesHost`, kept red on purpose |
+
+Where the picture ends, and the risks that remain, are in [SECURITY.md](SECURITY.md).
+
 ## Configuration
 
 `devkit init` writes this file. Edit it and run `devkit up` again to apply; the
@@ -194,7 +224,9 @@ longer than usual the day one did (1 m 45 s against 46 s). Later boots only
 check the pocket and take seconds. The new kernel is installed to disk and runs
 from the next boot. `devkit up` does not reboot a VM whose configuration is
 unchanged, so run `devkit down && devkit up` to boot into a new kernel; the
-boot that installed it says so. `vm.security_updates: false` turns the step off.
+boot that installed it says so. `vm.security_updates: false` turns the step off;
+`devkit up --no-security-updates` writes that for you, so the next boots are
+quick again and the VM says so in its policy stamp.
 
 **Trust store.** The VM trusts what Ubuntu's `ca-certificates` package
 trusts, refreshed by root on every boot, so a VM created before a CA was

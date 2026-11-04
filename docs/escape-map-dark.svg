@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" style="background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" viewBox="0 0 1060 690" role="img" aria-label="Nine attempts to escape, each arrow stopped at the layer that blocks it: the guest's policy files, the firewall, the egress proxy, or Lima and the hypervisor. Only HTTPS to an allowed host on port 443 passes through to the internet, logged.">
+      <rect width="1060" height="690" fill="#0d1117"/><defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#e4e8ee"/>
+        </marker>
+        <marker id="arrow-allow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#4fc08a"/>
+        </marker>
+      </defs>
+
+      <!-- layer bands -->
+      <g fill="rgba(228,232,238,0.06)">
+        <rect x="270" y="48" width="120" height="612" rx="4"/>
+        <rect x="420" y="48" width="120" height="612" rx="4"/>
+        <rect x="570" y="48" width="120" height="612" rx="4"/>
+        <rect x="720" y="48" width="130" height="612" rx="4"/>
+        <rect x="890" y="48" width="140" height="612" rx="4"/>
+      </g>
+      <!-- layer headers -->
+      <g font-size="12.5" font-weight="600" fill="#e4e8ee" text-anchor="middle">
+        <text x="130" y="68">Sandbox user process</text>
+        <text x="330" y="68">Guest policy</text>
+        <text x="480" y="68">Firewall</text>
+        <text x="630" y="68">Egress proxy</text>
+        <text x="785" y="68">Lima / hypervisor</text>
+        <text x="960" y="68">Outside</text>
+      </g>
+      <g font-size="10.5" fill="#9aa5b6" text-anchor="middle">
+        <text x="130" y="84">no sudo, no CAP_NET_ADMIN</text>
+        <text x="330" y="84">root-only files</text>
+        <text x="480" y="84">iptables OUTPUT</text>
+        <text x="630" y="84">uid devkit-proxy</text>
+        <text x="785" y="84">vz, no mounts</text>
+        <text x="960" y="84">internet / your Mac</text>
+      </g>
+      <!-- hypervisor boundary line -->
+      <line x1="870" y1="48" x2="870" y2="660" stroke="#e4e8ee" stroke-width="2" stroke-dasharray="6 4"/>
+      <text x="866" y="652" font-size="10.5" fill="#9aa5b6" text-anchor="end">Virtualization.framework boundary</text>
+
+      <!-- row 1: allowed path -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="124">HTTPS to an allowed host, port 443</text>
+        <line x1="238" y1="120" x2="896" y2="120" stroke="#4fc08a" stroke-width="2" marker-end="url(#arrow-allow)"/>
+        <text x="480" y="138" font-size="10.5" fill="#4fc08a" text-anchor="middle">proxy's uid: accepted</text>
+        <text x="630" y="138" font-size="10.5" fill="#4fc08a" text-anchor="middle">allowlist and port: ALLOWED, logged</text>
+        <text x="960" y="138" font-size="10.5" fill="#4fc08a" text-anchor="middle">internet</text>
+      </g>
+
+      <!-- row 2: direct connection -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="182">Direct connection to the internet</text>
+        <line x1="238" y1="178" x2="466" y2="178" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="480" cy="178" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M475,173 L485,183 M485,173 L475,183" stroke="#e8604a" stroke-width="2"/>
+        <text x="480" y="200" font-size="10.5" fill="#e8604a" text-anchor="middle">not the proxy's uid: REJECT</text>
+      </g>
+
+      <!-- row 3: via proxy to other host / port -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="240">Via the proxy to any other host, or port 22</text>
+        <line x1="238" y1="236" x2="616" y2="236" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="630" cy="236" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M625,231 L635,241 M635,231 L625,241" stroke="#e8604a" stroke-width="2"/>
+        <text x="630" y="258" font-size="10.5" fill="#e8604a" text-anchor="middle">allowlist, web ports only: 403</text>
+      </g>
+
+      <!-- row 4: DNS -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="298">DNS query with data in the name</text>
+        <line x1="238" y1="294" x2="466" y2="294" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="480" cy="294" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M475,289 L485,299 M485,289 L475,299" stroke="#e8604a" stroke-width="2"/>
+        <text x="480" y="316" font-size="10.5" fill="#e8604a" text-anchor="middle">port 53 only for the proxy; stub off</text>
+        <text x="630" y="316" font-size="10.5" fill="#9aa5b6" text-anchor="middle">(the proxy resolves names itself)</text>
+      </g>
+
+      <!-- row 5: reach the Mac -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="356">Connect to your Mac (host.lima.internal)</text>
+        <line x1="238" y1="352" x2="466" y2="352" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="480" cy="352" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M475,347 L485,357 M485,347 L475,357" stroke="#e8604a" stroke-width="2"/>
+        <text x="480" y="374" font-size="10.5" fill="#e8604a" text-anchor="middle">host rejected, for the proxy too</text>
+        <text x="630" y="374" font-size="10.5" fill="#9aa5b6" text-anchor="middle">(CONNECT to the host: 403 or 502)</text>
+      </g>
+
+      <!-- row 6: listen for the Mac -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="414">Listen and wait for your Mac to connect</text>
+        <line x1="238" y1="410" x2="771" y2="410" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="785" cy="410" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M780,405 L790,415 M790,405 L780,415" stroke="#e8604a" stroke-width="2"/>
+        <text x="785" y="432" font-size="10.5" fill="#e8604a" text-anchor="middle">no port forwarded unless listed</text>
+      </g>
+
+      <!-- row 7: files -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="472">Read or write your files</text>
+        <line x1="238" y1="468" x2="771" y2="468" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="785" cy="468" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M780,463 L790,473 M790,463 L780,473" stroke="#e8604a" stroke-width="2"/>
+        <text x="785" y="490" font-size="10.5" fill="#e8604a" text-anchor="middle">nothing mounted; nothing copied back</text>
+      </g>
+
+      <!-- row 8: change policy -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="530">Rewrite the policy or swap the proxy</text>
+        <line x1="238" y1="526" x2="316" y2="526" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="330" cy="526" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M325,521 L335,531 M335,521 L325,531" stroke="#e8604a" stroke-width="2"/>
+        <text x="330" y="548" font-size="10.5" fill="#e8604a" text-anchor="middle">root-only files; proxy SHA-checked</text>
+      </g>
+
+      <!-- row 9: become root -->
+      <g font-size="12.5" fill="#e4e8ee">
+        <text x="20" y="588">Become root: sudo, or a kernel bug</text>
+        <line x1="238" y1="584" x2="316" y2="584" stroke="#e4e8ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <circle cx="330" cy="584" r="9" fill="none" stroke="#e8604a" stroke-width="2"/>
+        <path d="M325,579 L335,589 M335,579 L325,589" stroke="#e8604a" stroke-width="2"/>
+        <text x="330" y="606" font-size="10.5" fill="#e8604a" text-anchor="middle">no sudo; io_uring, BPF, userns,</text>
+        <text x="330" y="619" font-size="10.5" fill="#e8604a" text-anchor="middle">AF_ALG off; patched at boot</text>
+        <!-- residual: if a kernel bug still works -->
+        <line x1="344" y1="584" x2="856" y2="584" stroke="#e4e8ee" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+        <text x="600" y="606" font-size="10.5" fill="#9aa5b6" text-anchor="middle">if a kernel bug still works: the firewall falls and the Mac's loopback is reachable</text>
+        <circle cx="870" cy="584" r="9" fill="#0d1117" stroke="#e8604a" stroke-width="2"/>
+        <path d="M865,579 L875,589 M875,579 L865,589" stroke="#e8604a" stroke-width="2"/>
+        <text x="960" y="588" font-size="10.5" fill="#9aa5b6" text-anchor="middle">your files stay out of reach</text>
+      </g>
+    </svg>

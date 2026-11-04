@@ -38,6 +38,7 @@ func init() {
 	upCmd.Flags().Bool("no-sync", false, "do not copy or clone the source into the VM")
 	upCmd.Flags().Bool("no-install", false, "do not install project dependencies")
 	upCmd.Flags().Bool("relock", false, "resolve toolchain versions again and rewrite the VM's mise.lock")
+	upCmd.Flags().Bool("no-security-updates", false, "set vm.security_updates: false in devkit.yaml before starting: skip Ubuntu's security pocket at boot (faster first boots, older guest)")
 	_ = upCmd.RegisterFlagCompletionFunc("network", completeValues(project.NetworkAllowlist, project.NetworkOpen, project.NetworkNone))
 }
 
@@ -53,6 +54,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Printf("Set network.mode to %s in %s\n", mode, configPath)
+	}
+	if off, _ := cmd.Flags().GetBool("no-security-updates"); off {
+		if err := setSecurityUpdates(configPath, false); err != nil {
+			return err
+		}
+		fmt.Printf("Set vm.security_updates to false in %s (the guest will no longer apply Ubuntu's security pocket at boot)\n", configPath)
 	}
 
 	cfg, err := loadConfig(cmd)
@@ -408,5 +415,33 @@ func setNetworkMode(path, mode string) error {
 		return fmt.Errorf("could not find network.mode in %s", path)
 	}
 	updated := modeLine.ReplaceAll(data, []byte("${1}"+mode))
+	return os.WriteFile(path, updated, 0o644)
+}
+
+var (
+	securityUpdatesLine = regexp.MustCompile(`(?m)^(\s*security_updates:\s*)(\S+)`)
+	diskLine            = regexp.MustCompile(`(?m)^(\s*disk_gb:.*)$`)
+)
+
+// setSecurityUpdates writes vm.security_updates into devkit.yaml, replacing
+// the line if present and otherwise adding it after disk_gb in the vm block.
+func setSecurityUpdates(path string, on bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	val := "false"
+	if on {
+		val = "true"
+	}
+	var updated []byte
+	switch {
+	case securityUpdatesLine.Match(data):
+		updated = securityUpdatesLine.ReplaceAll(data, []byte("${1}"+val))
+	case diskLine.Match(data):
+		updated = diskLine.ReplaceAll(data, []byte("${1}\n  security_updates: "+val))
+	default:
+		return fmt.Errorf("could not find the vm block in %s", path)
+	}
 	return os.WriteFile(path, updated, 0o644)
 }
