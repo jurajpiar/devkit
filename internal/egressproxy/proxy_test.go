@@ -315,13 +315,27 @@ func TestConnectTunnelsBothWaysToAnAllowedTarget(t *testing.T) {
 }
 
 func TestConnectWithoutAPortMeans443(t *testing.T) {
-	// "localhost" with no port is a web-port entry; a CONNECT that names no
-	// port is taken as :443, passes the policy, and fails to dial (nothing
-	// listens on 443 here), which shows the default port was applied.
-	_, _, logs, proxyAddr := startProxy(t, "localhost")
+	// "localhost" with no port is a web-port entry. A CONNECT that names no
+	// port must be decided and dialled as :443. The dial is intercepted, so
+	// the result does not depend on whether this machine serves HTTPS.
+	p, _, logs, proxyAddr := startProxy(t, "localhost")
+	var dialled []string
+	var mu sync.Mutex
+	p.dialTunnel = func(_ context.Context, _, addr string) (net.Conn, error) {
+		mu.Lock()
+		dialled = append(dialled, addr)
+		mu.Unlock()
+		return nil, fmt.Errorf("dial intercepted by the test")
+	}
 	status, _, _ := connect(t, proxyAddr, "localhost")
 	if !strings.HasPrefix(status, "502") {
-		t.Errorf("want 502 from a failed dial to localhost:443, got %s", status)
+		t.Errorf("want 502 from the intercepted dial, got %s", status)
+	}
+	mu.Lock()
+	got := strings.Join(dialled, ",")
+	mu.Unlock()
+	if got != "localhost:443" {
+		t.Errorf("a CONNECT without a port must dial :443, dialled %q", got)
 	}
 	if !strings.Contains(logs.String(), "ALLOWED CONNECT localhost:443") {
 		t.Errorf("the default port should be in the decision:\n%s", logs)
@@ -329,6 +343,11 @@ func TestConnectWithoutAPortMeans443(t *testing.T) {
 	status, _, _ = connect(t, proxyAddr, "localhost:22")
 	if !strings.HasPrefix(status, "403") {
 		t.Errorf("an explicit non-web port must be refused, got %s", status)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialled) != 1 {
+		t.Errorf("a refused CONNECT must never be dialled: %q", dialled)
 	}
 }
 

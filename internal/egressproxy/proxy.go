@@ -36,6 +36,9 @@ type Proxy struct {
 	audit    *AuditLogger
 	server   *http.Server
 	mu       sync.Mutex
+	// dialTunnel, when set, replaces the dialer for CONNECT targets; tests
+	// use it to observe the address chosen and to fail deterministically.
+	dialTunnel func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // NewProxy creates a new egress proxy
@@ -119,7 +122,11 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Establish connection to target
-	targetConn, err := p.dialer().DialContext(r.Context(), "tcp", host)
+	dial := p.dialer().DialContext
+	if p.dialTunnel != nil {
+		dial = p.dialTunnel
+	}
+	targetConn, err := dial(r.Context(), "tcp", host)
 	if err != nil {
 		p.audit.LogError(host, err)
 		http.Error(w, fmt.Sprintf("Failed to connect to %s: %v", host, err), http.StatusBadGateway)
