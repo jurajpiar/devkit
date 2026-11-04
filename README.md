@@ -129,19 +129,22 @@ through: the audited path to an allowed host.
 
 Each stop is asserted on a real VM by the end-to-end suite, and most were
 written red first: the escape succeeded, then the design changed until it
-failed.
+failed. The third column is the part that matters when you read this as an
+attacker: what it would still take to get through. Almost every answer is one
+of four things, root in the guest, a loosening you chose in `devkit.yaml`, an
+allowed host the attacker already controls, or a hypervisor escape.
 
-| Attempt | Stopped by | Proven by |
-|---|---|---|
-| Direct connection to the internet | Firewall: only uid `devkit-proxy` may egress | `direct connections bypassing the proxy are rejected` |
-| Proxy to another host, or to port 22 | Proxy: allowlist, ports 80 and 443 only | `allowed hosts are reachable on web ports only` |
-| DNS query with data in the name | Firewall: port 53 only for the proxy's account; resolver stub off | `DNS is not a side channel` |
-| Connect to your Mac | Firewall: host rejected for every account, the proxy included | `host is unreachable under every address form` |
-| Listen for your Mac to connect | Lima: forward nothing unless listed in `network.forward` | `guest listeners are not forwarded to the Mac unless configured` |
-| Read or write your files | Lima: `mounts: []`; devkit never copies out of the VM | `nothing from the VM lands on the host` |
-| Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | `policy files are root-only` |
-| Become root | No sudo; io_uring, unprivileged BPF, user namespaces and `AF_ALG` off; security pocket at boot | `unprivileged kernel attack surface is reduced`, `security updates are applied` |
-| Root reaches your Mac's loopback | Nothing inside the guest; only the hypervisor keeps your files safe | `TestRootInGuestReachesHost`, kept red on purpose |
+| Attack vector | Stopped by | Still possible only if | Proven by |
+|---|---|---|---|
+| Direct connection to the internet | Firewall: only uid `devkit-proxy` may egress | Root in the guest flushes the firewall, or you set `sudo: true` | `direct connections bypassing the proxy are rejected` |
+| Proxy to another host, or to port 22 | Proxy: allowlist, ports 80 and 443 only | You list the host or port in `network.allow` or use `open` mode; or the attacker controls an allowed host, which the policy trusts by design | `allowed hosts are reachable on web ports only` |
+| DNS query with data in the name | Firewall: port 53 only for the proxy's account; resolver stub off | You set `dns: resolvers`; or root in the guest; an allowed host the attacker controls makes DNS unnecessary anyway | `DNS is not a side channel` |
+| Connect to your Mac | Firewall: host rejected for every account, the proxy included | You set `allow_host: true`; or root in the guest, the one case the suite leaves red | `host is unreachable under every address form` |
+| Listen for your Mac to connect | Lima: forward nothing unless listed in `network.forward` | You list the port; or your IDE's own SSH tunnelling forwards it for you, which Lima never sees | `guest listeners are not forwarded to the Mac unless configured` |
+| Read or write your files | Lima: `mounts: []`; devkit never copies out of the VM | You use `source: mount` with `mount_writable: true`, or pull output across yourself; or a hypervisor escape | `nothing from the VM lands on the host` |
+| Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | Root in the guest; or the devkit binary or devkit.yaml on your Mac is tampered with, which is outside the sandbox entirely | `policy files are root-only` |
+| Become root | No sudo; io_uring, unprivileged BPF, user namespaces and `AF_ALG` off; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied` |
+| Root reaches your Mac's loopback services | Nothing inside the guest | The row above; your files still need a hypervisor escape on top | `TestRootInGuestReachesHost`, kept red on purpose |
 
 Where the picture ends, and the risks that remain, are in [SECURITY.md](SECURITY.md).
 
