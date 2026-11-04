@@ -150,11 +150,12 @@ mkdir -p /etc/devkit /var/log/devkit /var/lib/devkit {{.DropDir}}
 chmod 755 /var/log/devkit
 
 # ---- progress, for devkit up to show while Lima waits on these scripts ----
-# /run is fresh on every boot, so no line survives from an earlier one. Plain
-# step names only; nothing secret goes here, and the sandbox may read it.
+# Written to the serial console, which Lima records on the host in
+# serialv.log, so devkit up can follow it without running anything in the
+# guest (an SSH session as the sandbox user would execute files it can
+# write). Step names only, nothing secret.
 mkdir -p /run/devkit && chmod 755 /run/devkit
-: > /run/devkit/progress && chmod 644 /run/devkit/progress
-step() { printf '%s\n' "$*" >> /run/devkit/progress; }
+step() { printf 'devkit-progress: %s\n' "$*" > /dev/hvc0 2>/dev/null || true; }
 step "provisioning started"
 
 # ---- logind stall guard ----
@@ -573,8 +574,11 @@ HOST_IP="$(getent hosts host.lima.internal | awk '{print $1}' | head -n1)"
 # sandbox cannot add an address of its own to this list.
 DNS_IPS="$HOST_IP $(awk '/^nameserver/{print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null | grep -v '^127\.' || true)"
 modprobe nf_conntrack 2>/dev/null || true
+# Rebuild under a DROP policy, so the instant between flushing the old rules
+# and appending the new ones is closed rather than open; the final REJECT
+# rules below catch everything, and the policy goes back to ACCEPT after.
 for t in iptables ip6tables; do
-  $t -P OUTPUT ACCEPT 2>/dev/null || true
+  $t -P OUTPUT DROP 2>/dev/null || true
   $t -F OUTPUT 2>/dev/null || true
 done
 iptables -A OUTPUT -o lo -j ACCEPT
@@ -613,8 +617,52 @@ case "${MODE:-allowlist}" in
 esac
 iptables -A OUTPUT -j REJECT
 ip6tables -A OUTPUT -j REJECT 2>/dev/null || true
+for t in iptables ip6tables; do $t -P OUTPUT ACCEPT 2>/dev/null || true; done
+mkdir -p /run/devkit && date +%s > /run/devkit/firewall-at && chmod 644 /run/devkit/firewall-at
 EOF
 chmod 755 /usr/local/sbin/devkit-firewall
+
+# ---- boot hold: the sandbox user has no network until the firewall is up ----
+# The firewall above is applied by this script, which Lima runs late in boot.
+# Lima's own SSH sessions run as the sandbox user well before that, and sshd
+# and bash then read files that user can write (~/.ssh/rc, ~/.bashrc,
+# ~/.profile). Code planted there in an earlier session would get unfiltered
+# network on every reboot. This unit runs on every later boot before sshd
+# starts and rejects all new outbound traffic from the sandbox user until the
+# firewall replaces it. Root, which only runs devkit's own provisioning, keeps
+# the network it needs for downloads. The first boot needs no hold: nothing of
+# the sandbox's exists on a fresh disk.
+SANDBOX_UID="$(id -u "$DEVKIT_USER")"
+cat > /usr/local/sbin/devkit-boot-hold <<EOF
+#!/bin/sh
+modprobe nf_conntrack 2>/dev/null || true
+for t in iptables ip6tables; do
+  \$t -P OUTPUT ACCEPT 2>/dev/null || true
+  \$t -F OUTPUT 2>/dev/null || true
+  \$t -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+  \$t -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+  \$t -A OUTPUT -m owner --uid-owner $SANDBOX_UID -j REJECT 2>/dev/null || true
+done
+EOF
+chmod 755 /usr/local/sbin/devkit-boot-hold
+cat > /etc/systemd/system/devkit-boot-hold.service <<'EOF'
+[Unit]
+Description=devkit: no network for the sandbox user until the firewall is applied
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Before=network-pre.target ssh.socket ssh.service cloud-init-local.service sysinit.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/devkit-boot-hold
+
+[Install]
+WantedBy=sysinit.target
+EOF
+systemctl daemon-reload
+systemctl enable devkit-boot-hold.service >/dev/null 2>&1 || true
 
 # ---- egress proxy service ----
 cat > /etc/systemd/system/{{.EgressService}}.service <<EOF

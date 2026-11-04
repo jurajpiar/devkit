@@ -506,7 +506,7 @@ func TestStampIsPublishedLast(t *testing.T) {
 func TestProgressSteps(t *testing.T) {
 	s, _ := System(params(nil))
 	for _, want := range []string{
-		": > /run/devkit/progress && chmod 644 /run/devkit/progress",
+		"step() { printf 'devkit-progress: %s\\n' \"$*\" > /dev/hvc0 2>/dev/null || true; }",
 		`step "applying Ubuntu security updates (can take a minute)"`,
 		`step "applying the firewall"`,
 		"step \"done\"\necho \"devkit: provisioning done",
@@ -518,5 +518,25 @@ func TestProgressSteps(t *testing.T) {
 	// Steps must appear in the order they run.
 	if strings.Index(s, `step "provisioning started"`) > strings.Index(s, `step "applying the firewall"`) {
 		t.Error("progress steps out of order")
+	}
+}
+
+func TestBootHold(t *testing.T) {
+	s, _ := System(params(nil))
+	for _, want := range []string{
+		`SANDBOX_UID="$(id -u "$DEVKIT_USER")"`,
+		"-m owner --uid-owner $SANDBOX_UID -j REJECT",
+		"Before=network-pre.target ssh.socket ssh.service cloud-init-local.service sysinit.target",
+		"systemctl enable devkit-boot-hold.service",
+		"$t -P OUTPUT DROP",
+		"date +%s > /run/devkit/firewall-at",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("system script missing %q", want)
+		}
+	}
+	// The firewall must go back to an ACCEPT policy only after its final REJECT.
+	if strings.Index(s, "iptables -A OUTPUT -j REJECT") > strings.Index(s, "$t -P OUTPUT ACCEPT 2>/dev/null || true; done") {
+		t.Error("policy restored before the final REJECT")
 	}
 }
