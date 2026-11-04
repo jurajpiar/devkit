@@ -77,3 +77,20 @@ func TestVersionAndCheckInstalled(t *testing.T) {
 		t.Errorf("without limactl, want ErrNotInstalled, got %v", err)
 	}
 }
+
+// A command spanning several lines, as devkit's install script does, is
+// recorded as one call with its argument intact.
+func TestFakeRecordsMultilineCommandsAsOneCall(t *testing.T) {
+	f := fakelima.Install(t)
+	cmd := "cd ~/workspace\nif [ -f package.json ]; then\n  npm ci\nfi"
+	if _, err := Exec(context.Background(), "devkit-a", cmd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Exec(context.Background(), "devkit-a", "echo two"); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.Calls()
+	if len(calls) != 2 || calls[0][len(calls[0])-1] != cmd || calls[1][0] != "shell" {
+		t.Errorf("want two calls with the multi-line command intact, got %q", calls)
+	}
+}

@@ -29,9 +29,10 @@ type Fake struct {
 }
 
 const script = `#!/bin/bash
-# fakelima: records argv, one call per line, fields separated by \x1f.
+# fakelima: records argv. Each argument ends with \x1f (unit separator) and
+# each call with \x1e (record separator), so arguments may contain newlines.
 d="$FAKELIMA_DIR"
-{ for a in "$@"; do printf '%s\x1f' "$a"; done; printf '\n'; } >> "$d/calls"
+{ for a in "$@"; do printf '%s\x1f' "$a"; done; printf '\x1e'; } >> "$d/calls"
 case "$1" in
   --version) echo "limactl version 2.2.1-fake"; exit 0 ;;
   list) cat "$d/list.json" 2>/dev/null; exit 0 ;;
@@ -103,11 +104,11 @@ func (f *Fake) Calls() [][]string {
 		return nil
 	}
 	var calls [][]string
-	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
-		if line == "" {
+	for _, rec := range strings.Split(string(data), "\x1e") {
+		if rec == "" {
 			continue
 		}
-		calls = append(calls, strings.Split(strings.TrimSuffix(line, "\x1f"), "\x1f"))
+		calls = append(calls, strings.Split(strings.TrimSuffix(rec, "\x1f"), "\x1f"))
 	}
 	return calls
 }
