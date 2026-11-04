@@ -414,3 +414,52 @@ func TestSchemePort(t *testing.T) {
 		}
 	}
 }
+
+// The proxy resolves names only through its configured upstreams, failing
+// over past a silent one: a name no other resolver knows reaches a local
+// server through a CONNECT tunnel and through plain HTTP.
+func TestProxyResolvesThroughItsUpstreamsWithFailover(t *testing.T) {
+	dns, stop := miniDNSAnswering(t, [4]byte{127, 0, 0, 1})
+	defer stop()
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0") // reads, never answers
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	echo := echoServer(t)
+	_, echoPort, _ := net.SplitHostPort(echo)
+	up := newUpstream(t, nil)
+	_, upPort, _ := net.SplitHostPort(up.hostPort())
+
+	logs := &syncLog{}
+	p := NewProxy(ProxyConfig{
+		AllowedHosts: []string{"only-here.test:" + echoPort, "only-here.test:" + upPort},
+		AuditLog:     true,
+		Logger:       log.New(logs, "", 0),
+		Resolvers:    []string{silent.LocalAddr().String(), dns},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(p.handleRequest))
+	defer srv.Close()
+	proxyAddr := strings.TrimPrefix(srv.URL, "http://")
+
+	status, conn, br := connect(t, proxyAddr, "only-here.test:"+echoPort)
+	if !strings.HasPrefix(status, "200") {
+		t.Fatalf("CONNECT by name should resolve through the upstreams: %s\n%s", status, logs)
+	}
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	io.WriteString(conn, "ping\n")
+	if got, _ := br.ReadString('\n'); got != "ping\n" {
+		t.Errorf("tunnel to the resolved address should work, got %q", got)
+	}
+
+	proxyURL, _ := url.Parse(srv.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 10 * time.Second}
+	resp, err := client.Get("http://only-here.test:" + upPort + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || up.hits.Load() != 1 {
+		t.Errorf("plain HTTP by name should resolve through the upstreams too: %d, hits %d", resp.StatusCode, up.hits.Load())
+	}
+}

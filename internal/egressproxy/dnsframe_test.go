@@ -11,6 +11,11 @@ import (
 // to prove the failover conn frames queries as UDP datagrams (no TCP length
 // prefix) and that a real resolver roundtrip works through it.
 func miniDNS(t *testing.T) (addr string, stop func()) {
+	return miniDNSAnswering(t, [4]byte{10, 1, 2, 3})
+}
+
+// miniDNSAnswering is miniDNS with a chosen A record, and it counts queries.
+func miniDNSAnswering(t *testing.T, ip [4]byte) (addr string, stop func()) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +52,7 @@ func miniDNS(t *testing.T) (addr string, stop func()) {
 			}
 			resp = append(resp, q[12:qend]...)
 			// answer: name pointer to 0x0c, type A, class IN, TTL 60, rdlen 4
-			resp = append(resp, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 10, 1, 2, 3)
+			resp = append(resp, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, ip[0], ip[1], ip[2], ip[3])
 			_, _ = pc.WriteTo(resp, from)
 		}
 	}()
