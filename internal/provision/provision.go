@@ -193,13 +193,17 @@ EOF
 cat > /etc/devkit/source.conf <<'EOF'
 SOURCE={{.Config.Source}}
 MOUNT_POINT={{if eq .Config.Source "mount"}}{{.MountPath}}{{end}}
+MOUNT_WRITABLE={{bool .Config.MountWritable}}
 EOF
 cat > /etc/devkit/egress.conf <<'EOF'
 EXTRA_ARGS=-allowed={{if eq .Config.Network.Mode "open"}}*{{else}}{{join .Config.Network.Allow ","}}{{end}}
 EOF
 echo "{{.EgressSHA256}}" > /etc/devkit/egress.sha256
-echo "{{.ProvisionID}}" > /etc/devkit/provision.id
-chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256 /etc/devkit/provision.id
+# The stamp is removed now and written back only when every step below has
+# succeeded (the script runs with set -e), so an aborted provisioning leaves
+# a VM that reports itself as predating the policy rather than current.
+rm -f /etc/devkit/provision.id
+chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256
 chown "$DEVKIT_USER" {{.DropDir}}
 chmod 700 {{.DropDir}}
 
@@ -674,6 +678,8 @@ else
 fi
 
 /usr/local/sbin/devkit-firewall
+echo "{{.ProvisionID}}" > /etc/devkit/provision.id
+chmod 644 /etc/devkit/provision.id
 echo "devkit: provisioning done (network=$MODE)"
 `
 

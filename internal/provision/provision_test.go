@@ -67,7 +67,8 @@ func TestSystemScriptAllowlist(t *testing.T) {
 		"$SECAPT -o APT::Update::Error-Mode=any update -q",
 		"date -u +%s > /var/lib/devkit/.security-updated",
 		"sort -V | tail -n1",
-		"> /etc/devkit/provision.id",
+		"rm -f /etc/devkit/provision.id",
+		"MOUNT_WRITABLE=0\n",
 		"kernel.io_uring_disabled = 2",
 		"sysctl -q -p /etc/sysctl.d/90-devkit.conf",
 		"install af_alg /bin/false",
@@ -476,6 +477,7 @@ func TestFingerprintStableAndPolicySensitive(t *testing.T) {
 		func(c *project.Config) { c.Network.DNS = project.DNSResolvers },
 		func(c *project.Config) { c.Network.Allow = append(c.Network.Allow, "example.com:8443") },
 		func(c *project.Config) { c.Network.Forward = []int{3000} },
+		func(c *project.Config) { c.Source = project.SourceMount; c.MountWritable = true },
 	} {
 		p := params(mod)
 		if got, _ := Fingerprint(p); got == a {
@@ -487,5 +489,16 @@ func TestFingerprintStableAndPolicySensitive(t *testing.T) {
 	c.EgressSHA256 = "deadbeefdeadbeef"
 	if got, _ := Fingerprint(c); got == a {
 		t.Error("fingerprint should change with the proxy hash")
+	}
+}
+
+func TestStampIsPublishedLast(t *testing.T) {
+	s, _ := System(params(nil))
+	rm := strings.Index(s, "rm -f /etc/devkit/provision.id")
+	fw := strings.Index(s, "/usr/local/sbin/devkit-firewall\n")
+	stamp := strings.Index(s, "> /etc/devkit/provision.id")
+	done := strings.Index(s, "provisioning done")
+	if !(rm > 0 && rm < fw && fw < stamp && stamp < done) {
+		t.Errorf("stamp must be removed first and written only after the firewall, just before done: rm=%d fw=%d stamp=%d done=%d", rm, fw, stamp, done)
 	}
 }
