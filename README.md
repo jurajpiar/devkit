@@ -218,6 +218,21 @@ work inside. A repository already in the VM is kept on later `sync`s, since it
 may hold commits the Mac has never seen. Files in that one commit arrive even
 if `exclude` names them.
 
+**Pushing from the VM.** The VM holds no credentials, and should not: a token
+or SSH agent inside is usable by every dependency that runs there. `devkit
+push` brings the work out instead. The VM writes a git bundle of the branch.
+Your Mac has git check every object in it (malformed trees such as one with a
+`.git` entry are refused), stores the branch as `refs/devkit/<project>/<branch>`,
+outside your branches and work tree, and shows the commits, their authors,
+the diffstat and any changed file that runs outside the VM: CI workflows, git
+and editor hooks, `.envrc`, `package.json` scripts, task runners. After you
+say yes it pushes with your normal git credentials. No git hooks run on the
+Mac: a pre-push hook such as husky's would run the project's own code there,
+and it already ran in the VM. The push never forces; `--force-with-lease`
+replaces the remote branch only if it is still where your Mac last saw it.
+Commits from the VM are unsigned; a branch that requires signatures needs
+them re-signed on the Mac.
+
 **Network modes**
 
 | `mode` | Outbound traffic | Use |
@@ -334,6 +349,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock` |
 | `devkit shell [cmd]` | Shell in the VM, or run a command |
 | `devkit sync` | Copy the directory again, or `git pull` |
+| `devkit push [branch]` | Review commits made in the VM and push them from your Mac with your own credentials. Flags: `--remote`, `--to`, `--yes`, `--force-with-lease` |
 | `devkit logs [-f] [-n N]` | Egress audit log |
 | `devkit connect` | IDE connection instructions |
 | `devkit down [name]` | Stop the VM, keep its disk |

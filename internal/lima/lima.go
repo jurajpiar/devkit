@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,10 +182,38 @@ func Shell(ctx context.Context, name, workdir string, args ...string) error {
 }
 
 // CopyTo copies a host file into the VM. There is deliberately no CopyFrom:
-// nothing the guest writes is ever placed on the host by devkit.
+// nothing the guest writes is ever placed on the host by devkit on its own.
+// The one exception is ReadGuestFile, used only by "devkit push".
 func CopyTo(ctx context.Context, name, src, dst string) error {
 	_, err := run(ctx, "copy", src, name+":"+dst)
 	return err
+}
+
+// ReadGuestFile streams a file from the VM into w and fails if it is larger
+// than max bytes. Its only caller is "devkit push", which reads a git bundle
+// into a private temporary file and has git check every object in it before
+// anything is stored; the bytes are untrusted.
+func ReadGuestFile(ctx context.Context, name, guestPath string, w io.Writer, max int64) error {
+	cmd := exec.CommandContext(ctx, "limactl", "shell", name, "--", "cat", "--", guestPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	n, copyErr := io.Copy(w, io.LimitReader(out, max+1))
+	if n > max {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("%s is larger than %d MiB", guestPath, max>>20)
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("read %s from the VM: %w: %s", guestPath, err, strings.TrimSpace(stderr.String()))
+	}
+	return copyErr
 }
 
 // PipeTar streams a tar archive from the host into a directory in the VM.

@@ -32,9 +32,13 @@ the VM are available as a convenience, not as a protection layer.
 home-directory mount is never created. `source: mount` is the explicit opt-in,
 read-only unless `mount_writable: true`.
 
-**Nothing comes back.** devkit copies files into the VM (`source: copy`, the
-proxy binary) and never out of it. There is no guest-to-host copy in the code
-and toolchain lockfiles stay in the VM. The end-to-end suite has a hostile
+**Nothing comes back on its own.** devkit copies files into the VM (`source:
+copy`, the proxy binary) and never out of it, with one exception you start
+yourself: `devkit push` reads a git bundle of one branch, capped in size, into
+a private temporary file, and git checks every object before storing it under
+`refs/devkit/`, never in your branches or work tree. Nothing is pushed until
+you confirm, and no git hooks run on the Mac. Toolchain lockfiles stay in the
+VM. The end-to-end suite has a hostile
 workspace rewrite every file devkit might be tempted to bring back and checks
 that the project directory on the host is byte-for-byte unchanged.
 
