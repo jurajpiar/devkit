@@ -274,6 +274,15 @@ func TestPushFromAClonedProject(t *testing.T) {
 	if gitIn(t, fork2, "rev-parse", "main") != want {
 		t.Error("fork2 should get the commit the Mac already holds")
 	}
+
+	// A branch that does not exist on the remote yet is not "nothing to
+	// push", even though the Mac holds every commit.
+	if out, err := runDevkit(t, "", "push", "--yes", "--to", "release"); err != nil {
+		t.Fatalf("push --to release: %v\n%s", err, out)
+	}
+	if gitIn(t, remote, "rev-parse", "release") != want {
+		t.Error("release should be created on origin")
+	}
 }
 
 func TestUpstreamScriptMovesOnlyTheConfiguredBranch(t *testing.T) {

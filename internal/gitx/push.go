@@ -414,10 +414,23 @@ func DeleteRef(ctx context.Context, repo, ref string) error {
 // credentials and no hooks. It returns "" when the branch does not exist
 // there.
 func RemoteTip(ctx context.Context, repo, remote, to string) (string, error) {
-	if strings.HasPrefix(remote, "-") || !ValidBranch(to) {
-		return "", fmt.Errorf("invalid remote or branch")
+	if !ValidBranch(to) {
+		return "", fmt.Errorf("invalid branch")
 	}
-	args := append(append([]string{"-C", repo}, noHooks...), "ls-remote", "--", remote, "refs/heads/"+to)
+	return remoteRef(ctx, repo, remote, "refs/heads/"+to)
+}
+
+// RemoteHead is the commit the remote's HEAD names, its default branch, or
+// "" when it has none.
+func RemoteHead(ctx context.Context, repo, remote string) (string, error) {
+	return remoteRef(ctx, repo, remote, "HEAD")
+}
+
+func remoteRef(ctx context.Context, repo, remote, name string) (string, error) {
+	if strings.HasPrefix(remote, "-") {
+		return "", fmt.Errorf("invalid remote")
+	}
+	args := append(append([]string{"-C", repo}, noHooks...), "ls-remote", "--", remote, name)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	cmd.Stdin, cmd.Stderr = os.Stdin, os.Stderr
@@ -426,7 +439,7 @@ func RemoteTip(ctx context.Context, repo, remote, to string) (string, error) {
 		return "", fmt.Errorf("git ls-remote %s: %w", remote, err)
 	}
 	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if f := strings.Fields(l); len(f) == 2 && f[1] == "refs/heads/"+to && ValidCommitID(f[0]) {
+		if f := strings.Fields(l); len(f) == 2 && f[1] == name && ValidCommitID(f[0]) {
 			return f[0], nil
 		}
 	}
