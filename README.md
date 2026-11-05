@@ -148,10 +148,57 @@ allowed host the attacker already controls, or a hypervisor escape.
 | Connect to your Mac | Firewall: host rejected for every account, the proxy included | You set `allow_host: true`; or root in the guest, the one case the suite leaves red | `host is unreachable under every address form`; `TestNetnsFirewall` |
 | Code planted in a login file (`~/.bashrc`, `~/.ssh/rc`) that runs during the next boot, before the firewall exists | Boot hold: until the firewall is applied, no new connection from the sandbox user or its container UIDs, loopback included, and no upstream DNS from systemd-resolved | Root in the guest, or `sudo: true` | `TestBootWindowIsClosed`; `TestNetnsFirewall` |
 | Listen for your Mac to connect | Lima: forward nothing unless listed in `network.forward` | You list the port; or your IDE's own SSH tunnelling forwards it for you, which Lima never sees | `guest listeners are not forwarded to the Mac unless configured` |
-| Read or write your files | Lima: `mounts: []`; devkit never copies out of the VM | You use `source: mount` with `mount_writable: true`, or pull output across yourself; or a hypervisor escape | `nothing from the VM lands on the host` |
+| Read or write your files | Lima: `mounts: []`; devkit never copies out of the VM on its own | You use `source: mount` with `mount_writable: true`, approve a `devkit push` and then merge its commits into your checkout, or pull output across yourself; or a hypervisor escape | `nothing from the VM lands on the host` |
+| Get code onto your remote, and from there into CI or your checkout | `devkit push` only: the VM holds no credentials; you review the commits, the changed files that run outside the VM are flagged, and nothing is pushed until you say yes | You approve it; the review is the gate, see "What git in the VM changes" below | `TestPushReviewsThenPushesWithHostCredentialsAndNoHooks`, `TestReviewShowsEveryCommitWhateverItsText`, `TestReviewShowsWhatAForcedPushRemoves` |
+| Exploit git on your Mac with a crafted bundle | devkit parses the header itself; `git index-pack --strict` checks every object; size capped at 512 MiB; no hooks run | A bug in git's own pack parsing, the code every `git fetch` from an untrusted remote runs | `TestImportRejectsAMaliciousTree`, `TestImportChecksObjectsEvenWhenTheRepoDisablesFsck` |
 | Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | Root in the guest; or the devkit binary or devkit.yaml on your Mac is tampered with, which is outside the sandbox entirely | `policy files are root-only` |
 | Become root | No sudo; io_uring, unprivileged BPF, user namespaces and `AF_ALG` off; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied` |
 | Root reaches your Mac's loopback services | Nothing inside the guest | The row above; your files still need a hypervisor escape on top | `TestRootInGuestReachesHost`, kept red on purpose |
+
+### What git in the VM changes
+
+Git in the VM, `devkit push` and `devkit clone` widen the attack surface in
+one deliberate place and narrow it in another. Before them, nothing the VM
+wrote could leave except to an allowed host.
+
+**Wider, by design.**
+- **Commits the VM wrote can reach your remote.** That is the point of `devkit
+  push`, and its only gate is your review. A malicious dependency can change
+  files that an agent then commits, and rely on a long diff to hide it. The
+  review lists every commit, the diffstat, the commits a forced push would
+  remove, and the changed files that run outside the VM. It cannot judge the
+  code for you.
+- **Authorship from the VM proves nothing.** The VM commits as you: it gets
+  your `user.name` and `user.email`, and can write any author it likes, so
+  the review's "other author" note catches only the careless case.
+- **Pushed commits run elsewhere.** CI runs them, with whatever secrets your
+  workflows expose to that branch. If you bring them into your checkout on
+  the Mac (`git merge refs/devkit/...`), your husky hooks, direnv, editor tasks
+  and npm scripts there run code the VM wrote. That is the risk of checking
+  out any untrusted pull request, and the one place where devkit's rule that
+  project code never runs on the Mac depends on you.
+
+**New on the Mac, and narrow.**
+- **Parsing untrusted bytes.** A bundle from the VM is read by devkit's
+  header parser and `git index-pack --strict`, the same code as any `git
+  fetch` from an untrusted remote, capped at 512 MiB. Text from the VM is
+  stripped of control characters and bidi overrides before it is shown.
+- **devkit runs git on your Mac.** In a copied project's directory (to build
+  the snapshot), and against your remotes (clone, sync, `ls-remote`, push),
+  with your own git config and credentials, as when you run git there
+  yourself, but with hooks disabled.
+
+**Narrower.**
+- **Cloning** is safer than `git clone`: bare, so no project file is written
+  out on the Mac; https and ssh only; no submodules, hooks or templates.
+- **Credentials stay out of the VM.** Without `devkit push`, the way to push
+  from the VM was a token or an agent inside it, usable by every dependency.
+
+**To keep the gate meaningful:** push to a feature branch and merge through a
+pull request with branch protection; don't expose CI secrets to branches from
+the VM; read the flagged files; and don't merge `refs/devkit/...` into your
+Mac's checkout and then run the project's tooling there unless you have read
+what it changes.
 
 Where the picture ends, and the risks that remain, are in [SECURITY.md](SECURITY.md).
 
