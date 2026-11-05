@@ -241,7 +241,8 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
   any GitHub repository it has credentials for. Keep the list tight and read
   the log.
 - **Credentials you bring in.** Nothing is copied into the VM except your
-  project directory (minus `exclude`) and your SSH public key. If you paste a
+  project directory (minus `exclude`), a one-commit `.git` built from it (no
+  history, hooks, config or credentials) and your SSH public key. If you paste a
   token into the sandbox, assume the sandbox has it.
 - **Hypervisor bugs.** A VM escape in Virtualization.framework would defeat
   everything here. There is no mitigation beyond keeping macOS updated.
