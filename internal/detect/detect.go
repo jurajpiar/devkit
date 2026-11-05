@@ -208,13 +208,18 @@ func bunVersion(dir string) string {
 // upper or exclusive bound ("<1.4", ">1.4") or a compound range, returns ""
 // so the caller falls back to its default rather than pinning a version the
 // constraint may exclude.
+// npm allows whitespace between an operator and its version (">= 24").
 func inclusiveBound(c string) string {
-	c = strings.TrimSpace(c)
-	if strings.ContainsAny(c, " |<") || (strings.HasPrefix(c, ">") && !strings.HasPrefix(c, ">=")) {
+	m := singleBound.FindStringSubmatch(c)
+	if m == nil {
 		return ""
 	}
-	return strings.TrimLeft(c, "^~>= ")
+	return m[1]
 }
+
+// singleBound matches one optional inclusive operator, optional whitespace,
+// and a version with no further comparators.
+var singleBound = regexp.MustCompile(`^\s*(?:>=|\^|~|=)?\s*([vV]?\d[^\s|<>=^~]*)\s*$`)
 
 // goVersion returns major.minor from the go directive in go.mod.
 func goVersion(dir string) string {

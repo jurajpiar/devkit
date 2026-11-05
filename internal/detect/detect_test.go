@@ -110,6 +110,9 @@ func TestScanBun(t *testing.T) {
 		{"engines.bun caret", map[string]string{"package.json": `{"engines":{"bun":"^1.4.0"}}`, "bun.lock": "{}"}, "1.4.0", true},
 		{"engines.bun upper bound is not a version", map[string]string{"package.json": `{"engines":{"bun":"<1.4.0"}}`, "bun.lock": "{}"}, "latest", true},
 		{"engines.bun exclusive lower bound", map[string]string{"package.json": `{"engines":{"bun":">1.4.0"}}`, "bun.lock": "{}"}, "latest", true},
+		{"engines.bun spaced tilde", map[string]string{"package.json": `{"engines":{"bun":"~ 1.4.0"}}`, "bun.lock": "{}"}, "1.4.0", true},
+		{"engines.bun spaced lower bound", map[string]string{"package.json": `{"engines":{"bun":">= 1.4.0"}}`, "bun.lock": "{}"}, "1.4.0", true},
+		{"engines.bun spaced range", map[string]string{"package.json": `{"engines":{"bun":">= 1.4.0 < 2"}}`, "bun.lock": "{}"}, "latest", true},
 		{"engines.bun range", map[string]string{"package.json": `{"engines":{"bun":">=1.4.0 <2"}}`, "bun.lock": "{}"}, "latest", true},
 		{"lockfile only", map[string]string{"package.json": `{}`, "bun.lock": "{}"}, "latest", true},
 		{"legacy binary lockfile", map[string]string{"package.json": `{}`, "bun.lockb": ""}, "latest", true},
@@ -147,7 +150,7 @@ func TestScanBun(t *testing.T) {
 }
 
 func TestScanNodeEnginesExclusiveBounds(t *testing.T) {
-	for engines, want := range map[string]string{"<20": "22", ">20": "22", ">=20 <23": "22", "^20.1": "20", ">=20.1": "20", "20.x": "20"} {
+	for engines, want := range map[string]string{"<20": "22", ">20": "22", ">=20 <23": "22", "^20.1": "20", ">=20.1": "20", "20.x": "20", ">= 24": "24", "^ 24.1": "24", " >=24 ": "24", ">= 20 <23": "22", "> 20": "22"} {
 		dir := t.TempDir()
 		write(t, dir, "package.json", `{"engines":{"node":"`+engines+`"}}`)
 		if v := Versions(Scan(dir))["node"]; v != want {
