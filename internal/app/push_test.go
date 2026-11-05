@@ -153,3 +153,23 @@ func TestPushDefaultsToTheSourceBranchsUpstream(t *testing.T) {
 		t.Error("origin must not receive it")
 	}
 }
+
+// A lease against a remote tip the Mac has not fetched would replace
+// commits the review cannot show; it is refused.
+func TestLeaseRefusedWhenTheRemoteTipIsNotLocal(t *testing.T) {
+	p := newPushFixture(t, "main")
+	other := t.TempDir()
+	gitIn(t, other, "clone", "-q", "-b", "main", p.remote, ".")
+	must(t, os.MkdirAll(filepath.Join(other, ".github", "workflows"), 0o755))
+	must(t, os.WriteFile(filepath.Join(other, ".github", "workflows", "guard.yml"), []byte("on: push\n"), 0o644))
+	gitIn(t, other, "add", ".")
+	gitIn(t, other, "-c", "user.name=o", "-c", "user.email=o@x", "commit", "-qm", "guard")
+	gitIn(t, other, "push", "-q", "origin", "main")
+	before := gitIn(t, p.remote, "rev-parse", "main")
+	if _, err := runDevkit(t, "", "push", "--yes", "--force-with-lease"); err == nil {
+		t.Error("a lease on an unfetched tip must be refused")
+	}
+	if gitIn(t, p.remote, "rev-parse", "main") != before {
+		t.Error("the remote changed")
+	}
+}

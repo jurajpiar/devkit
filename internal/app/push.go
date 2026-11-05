@@ -151,35 +151,53 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if dest == tip {
+		fmt.Printf("Nothing to push: %s %s is already at %s\n", remote, to, tip[:12])
+		return nil
+	}
+	lease, _ := cmd.Flags().GetBool("force-with-lease")
 	destLocal := ""
 	if dest != "" {
 		if c, err := gitx.RevParse(ctx, cwd, dest); err == nil && c == dest {
 			destLocal = dest
+		} else if lease {
+			// A lease would replace commits the review cannot show.
+			return fmt.Errorf("%s %s has commits this Mac has not fetched, so the review cannot show what --force-with-lease would remove; fetch them (git fetch %s %s) and push again", remote, to, remote, to)
 		} else {
-			fmt.Printf("Note: %s %s has commits this Mac has not fetched; without --force-with-lease git will refuse the push\n", remote, to)
+			fmt.Printf("Note: %s %s has commits this Mac has not fetched; git will refuse a push that does not contain them\n", remote, to)
 		}
 	}
-	base := gitx.ReviewBase(ctx, cwd, tip, remote, to)
-	if destLocal != "" {
-		if c, err := gitx.MergeBase(ctx, cwd, tip, destLocal); err == nil {
-			base = c
+	// The base is something the destination already has: where tip meets
+	// the destination branch, or for a new branch, the remote's default
+	// branch. With neither known locally, everything in tip is reviewed.
+	base := ""
+	switch {
+	case destLocal != "":
+		base, _ = gitx.MergeBase(ctx, cwd, tip, destLocal)
+	case dest != "":
+		base = gitx.ReviewBase(ctx, cwd, tip, remote, to)
+	default:
+		if head, err := gitx.RemoteHead(ctx, cwd, remote); err == nil && head != "" {
+			if c, err := gitx.RevParse(ctx, cwd, head); err == nil && c == head {
+				base, _ = gitx.MergeBase(ctx, cwd, tip, head)
+			}
 		}
+		fmt.Printf("%s does not exist on %s yet; the push creates it\n", to, remote)
 	}
 	r, err := gitx.Review(ctx, cwd, tip, base, destLocal)
 	if err != nil {
 		return err
 	}
-	if len(r.Commits) == 0 && len(r.Dropped) == 0 {
-		fmt.Printf("Nothing to push: %s adds no commits to %s/%s\n", branch, remote, to)
-		return nil
-	}
 	printReview(ctx, cwd, r, ref, remote, to)
 
 	yes, _ := cmd.Flags().GetBool("yes")
-	if !yes && !confirm(fmt.Sprintf("Push %d commit(s) to %s %s?", len(r.Commits), remote, to)) {
+	question := fmt.Sprintf("Push %d commit(s) to %s %s?", len(r.Commits), remote, to)
+	if len(r.Commits) == 0 && len(r.Dropped) == 0 {
+		question = fmt.Sprintf("Point %s %s at %s?", remote, to, tip[:12])
+	}
+	if !yes && !confirm(question) {
 		return fmt.Errorf("not pushed; the commits stay at %s", ref)
 	}
-	lease, _ := cmd.Flags().GetBool("force-with-lease")
 	expect := ""
 	if lease {
 		// Lease on the remote tip the review was computed against, never
@@ -207,7 +225,12 @@ func runPush(cmd *cobra.Command, args []string) error {
 func printReview(ctx context.Context, cwd string, r *gitx.ReviewSummary, ref, remote, to string) {
 	me := hostGitConfig(ctx, cwd, "user.email")
 	fmt.Printf("\nCommits from the VM for %s %s (stored at %s):\n", remote, to, ref)
-	for _, c := range r.Commits {
+	const show = 50
+	for i, c := range r.Commits {
+		if i == show {
+			fmt.Printf("  ... and %d more (git log %s)\n", len(r.Commits)-show, ref)
+			break
+		}
 		fmt.Printf("  %s %s <%s>  %s\n", c.ID[:12], reviewable(c.Author), reviewable(c.Email), reviewable(c.Subject))
 	}
 	for _, c := range r.Commits {
