@@ -203,9 +203,20 @@ network:
 
 | `source` | What happens | Notes |
 |---|---|---|
-| `copy` | The directory is copied into the VM on `up` and `sync` | Default. Host is never touched again. |
+| `copy` | The directory is copied into the VM on `up` and `sync` | Default. Host is never touched again. A git checkout gets a `.git` like a fresh clone's, see below. |
 | `git` | The repo is cloned inside the VM | Set `repo` and `branch`. `sync` pulls. |
 | `mount` | The directory is mounted read-only | Opt in. `mount_writable: true` lets the sandbox edit your files. |
+
+**Git in a copied project.** Your `.git` is never copied. When the directory
+is the top of a git checkout, the VM instead gets the `.git` a fresh clone
+would have: your current commit and branch, with `origin` pointing at your
+remote with any token stripped, and nothing else. No history, so a secret
+deleted in an earlier commit stays on the Mac; no other branches, tags, stash
+or reflog; no hooks; none of your `.git/config`. Uncommitted changes arrive as
+changes, so `git status`, `git diff`, `git commit` and tools such as husky
+work inside. A repository already in the VM is kept on later `sync`s, since it
+may hold commits the Mac has never seen. Files in that one commit arrive even
+if `exclude` names them.
 
 **Network modes**
 

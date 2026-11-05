@@ -38,6 +38,12 @@ case "$1" in
   list) cat "$d/list.json" 2>/dev/null; exit 0 ;;
   shell)
     cmd="${*: -1}"
+    # A command reading a tar stream gets its input saved, numbered like
+    # its call, so tests can unpack what would have reached the VM.
+    case "$cmd" in *"-xf -"*)
+      n="$(tr -cd '\036' < "$d/calls" | wc -c | tr -d ' ')"
+      cat > "$d/stdin.$n" ;;
+    esac
     for f in "$d"/shell.d/*; do
       [ -f "$f" ] || continue
       pat="$(head -n1 "$f")"
@@ -113,6 +119,20 @@ func (f *Fake) Calls() [][]string {
 	return calls
 }
 
+// Inputs returns, for each call in Calls order, the tar stream it was fed,
+// or nil.
+func (f *Fake) Inputs() [][]byte {
+	f.t.Helper()
+	calls := f.Calls()
+	in := make([][]byte, len(calls))
+	for i := range calls {
+		if data, err := os.ReadFile(filepath.Join(f.dir, fmt.Sprintf("stdin.%d", i+1))); err == nil {
+			in[i] = data
+		}
+	}
+	return in
+}
+
 // Verbs returns the first argument of every call, for checking sequences.
 func (f *Fake) Verbs() []string {
 	var v []string
@@ -125,4 +145,10 @@ func (f *Fake) Verbs() []string {
 }
 
 // Reset forgets the calls recorded so far.
-func (f *Fake) Reset() { os.Remove(filepath.Join(f.dir, "calls")) }
+func (f *Fake) Reset() {
+	os.Remove(filepath.Join(f.dir, "calls"))
+	old, _ := filepath.Glob(filepath.Join(f.dir, "stdin.*"))
+	for _, p := range old {
+		os.Remove(p)
+	}
+}

@@ -210,7 +210,10 @@ func syncSource(ctx context.Context, cfg *project.Config, cwd string) error {
 	switch cfg.Source {
 	case project.SourceCopy:
 		fmt.Printf("Copying %s into the VM\n", cwd)
-		return lima.PipeTar(ctx, name, cwd, ws, cfg.Exclude)
+		if err := lima.PipeTar(ctx, name, cwd, ws, cfg.Exclude); err != nil {
+			return err
+		}
+		return syncGit(ctx, name, cwd, ws)
 	case project.SourceGit:
 		out, _ := lima.Exec(ctx, name, fmt.Sprintf("test -d %s/.git && echo yes", ws))
 		if strings.TrimSpace(out) == "yes" {
