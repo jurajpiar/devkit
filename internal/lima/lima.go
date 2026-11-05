@@ -205,15 +205,19 @@ func ReadGuestFile(ctx context.Context, name, guestPath string, w io.Writer, max
 		return err
 	}
 	n, copyErr := io.Copy(w, io.LimitReader(out, max+1))
-	if n > max {
+	if copyErr != nil || n > max {
+		// Stop cat before waiting: nothing reads the pipe any more.
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		if copyErr != nil {
+			return copyErr
+		}
 		return fmt.Errorf("%s is larger than %d MiB", guestPath, max>>20)
 	}
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("read %s from the VM: %w: %s", guestPath, err, strings.TrimSpace(stderr.String()))
 	}
-	return copyErr
+	return nil
 }
 
 // PipeTar streams a tar archive from the host into a directory in the VM.

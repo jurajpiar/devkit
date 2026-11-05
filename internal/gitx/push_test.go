@@ -27,8 +27,9 @@ func vmRepo(t *testing.T) (host string, vm *Snapshot) {
 func bundleFromVM(t *testing.T, vmDir, branch string, bases ...string) (string, int) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "push.bundle")
-	cmd := exec.Command("bash", "-c", BundleScript(vmDir, branch, bases, out))
-	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=v", "GIT_AUTHOR_EMAIL=v@vm", "GIT_COMMITTER_NAME=v", "GIT_COMMITTER_EMAIL=v@vm")
+	// The app passes the workspace as "$HOME/workspace"; do the same.
+	cmd := exec.Command("bash", "-c", BundleScript("$HOME/"+filepath.Base(vmDir), branch, bases, out))
+	cmd.Env = append(os.Environ(), "HOME="+filepath.Dir(vmDir), "GIT_AUTHOR_NAME=v", "GIT_AUTHOR_EMAIL=v@vm", "GIT_COMMITTER_NAME=v", "GIT_COMMITTER_EMAIL=v@vm")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -124,7 +125,7 @@ func TestImportAndPushRunNoHostHooks(t *testing.T) {
 	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
 		t.Fatal(err)
 	}
-	if err := Push(context.Background(), host, remote, ref, "main", false, os.Stderr); err != nil {
+	if err := Push(context.Background(), host, remote, ref, "main", false, "", os.Stderr); err != nil {
 		t.Fatal(err)
 	}
 	if git(t, remote, "rev-parse", "main") != git(t, vm.Dir, "rev-parse", "HEAD") {
@@ -148,7 +149,7 @@ func TestPushRefusesANonFastForwardWithoutLease(t *testing.T) {
 	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
 		t.Fatal(err)
 	}
-	if err := Push(context.Background(), host, remote, ref, "main", false, os.Stderr); err == nil {
+	if err := Push(context.Background(), host, remote, ref, "main", false, "", os.Stderr); err == nil {
 		t.Error("a push that would drop the remote's commit must fail")
 	}
 }
@@ -210,4 +211,55 @@ func gitStdin(t *testing.T, dir, in string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return string(out)
+}
+
+func TestImportChecksObjectsEvenWhenTheRepoDisablesFsck(t *testing.T) {
+	host, vm := vmRepo(t)
+	git(t, host, "config", "transfer.fsckObjects", "false")
+	git(t, host, "config", "fetch.fsckObjects", "false")
+	blob := strings.TrimSpace(gitStdin(t, vm.Dir, "evil\n", "hash-object", "-w", "--stdin"))
+	tree := strings.TrimSpace(gitStdin(t, vm.Dir, "100644 blob "+blob+"\t..\n", "mktree"))
+	c := git(t, vm.Dir, "commit-tree", tree, "-p", "HEAD", "-m", "dotdot")
+	git(t, vm.Dir, "update-ref", "refs/heads/main", c)
+	b, _ := bundleFromVM(t, vm.Dir, "main", git(t, host, "rev-parse", "HEAD"))
+	if err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
+		t.Fatal("objects must be checked whatever the repository's config says")
+	}
+}
+
+func TestImportRefusesMissingPrerequisites(t *testing.T) {
+	host, vm := vmRepo(t)
+	commitIn(t, vm.Dir, "a.txt", "a\n", "a")
+	mid := git(t, vm.Dir, "rev-parse", "HEAD")
+	commitIn(t, vm.Dir, "b.txt", "b\n", "b")
+	// A bundle that assumes the host has a commit it does not.
+	b := filepath.Join(t.TempDir(), "x.bundle")
+	git(t, vm.Dir, "bundle", "create", "-q", b, "refs/heads/main", "^"+mid)
+	if err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
+		t.Error("a bundle whose prerequisites the host lacks must be refused")
+	}
+}
+
+func TestPushLeaseAgainstAnExpectedCommit(t *testing.T) {
+	// A bare copy, as devkit clone keeps, has no remote-tracking refs: the
+	// lease must name the commit the remote is expected to be at.
+	host, vm := vmRepo(t)
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	git(t, host, "clone", "-q", "--bare", "--no-local", host, remote)
+	was := git(t, host, "rev-parse", "HEAD")
+	git(t, vm.Dir, "commit", "-q", "--amend", "-m", "rewritten")
+	b, _ := bundleFromVM(t, vm.Dir, "main", git(t, host, "rev-parse", "HEAD~1"))
+	ref := QuarantineRef("proj", "main")
+	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := Push(context.Background(), host, remote, ref, "main", true, strings.Repeat("0", 39)+"1", os.Stderr); err == nil {
+		t.Error("a lease on the wrong commit must fail")
+	}
+	if err := Push(context.Background(), host, remote, ref, "main", true, was, os.Stderr); err != nil {
+		t.Errorf("a lease on the remote's commit should replace it: %v", err)
+	}
+	if git(t, remote, "rev-parse", "main") != git(t, vm.Dir, "rev-parse", "HEAD") {
+		t.Error("remote not replaced")
+	}
 }
