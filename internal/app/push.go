@@ -32,7 +32,7 @@ and shows what would be pushed: commits, authors, changed files, and the
 files among them that run in CI, your editor or your shell. After you
 confirm, your Mac pushes it with your normal git credentials. No git hooks
 run on the Mac; they ran in the VM. The push never forces; --force-with-lease
-replaces the remote branch only if it is still where your Mac last saw it.`,
+replaces the remote branch only if it is still where it was when you reviewed.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runPush,
 }
@@ -42,7 +42,7 @@ func init() {
 	pushCmd.Flags().String("remote", "", "remote to push to (default: the branch's upstream remote, or origin)")
 	pushCmd.Flags().String("to", "", "branch name on the remote (default: the same name)")
 	pushCmd.Flags().BoolP("yes", "y", false, "push without asking after showing the review")
-	pushCmd.Flags().Bool("force-with-lease", false, "replace the remote branch if it is still where your Mac last saw it")
+	pushCmd.Flags().Bool("force-with-lease", false, "replace the remote branch if it is still where it was when you reviewed")
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
@@ -96,7 +96,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 	remote, _ := cmd.Flags().GetString("remote")
 	if remote == "" {
-		remote = gitx.UpstreamRemote(ctx, cwd, to)
+		remote = gitx.UpstreamRemote(ctx, cwd, branch)
 	}
 	if strings.HasPrefix(remote, "-") {
 		return fmt.Errorf("invalid remote %q", remote)
@@ -110,52 +110,62 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("bundle in the VM: %w", err)
 	}
+	ref := gitx.QuarantineRef(cfg.Name, branch)
+	var tip string
 	switch exitOf(out) {
 	case "0":
 	case fmt.Sprint(gitx.ExitNothingToPush):
-		fmt.Printf("Nothing to push: %s in the VM has no commits your Mac lacks\n", branch)
-		return nil
+		// The Mac already holds every commit of the branch, for example
+		// after pushing it to another remote. No objects move; whether
+		// there is anything to push is decided against the destination
+		// below. The id the VM names counts only if the Mac has it.
+		c := tipOf(out)
+		if c == "" {
+			return fmt.Errorf("could not read %s's commit from the VM", branch)
+		}
+		if tip, err = gitx.RevParse(ctx, cwd, c); err != nil || tip != c {
+			return fmt.Errorf("the VM names a commit this Mac does not have")
+		}
+		if err := gitx.SetRef(ctx, cwd, ref, tip); err != nil {
+			return err
+		}
 	case fmt.Sprint(gitx.ExitNoBranch):
 		return fmt.Errorf("the VM has no branch %s", branch)
 	default:
 		return fmt.Errorf("could not bundle %s in the VM:\n%s", branch, reviewable(out))
 	}
-	defer func() { _, _ = lima.Exec(context.Background(), name, "rm -f "+shellQuote(guest)) }()
-
-	tmp, err := os.MkdirTemp("", "devkit-push-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	local := filepath.Join(tmp, "vm.bundle")
-	fh, err := os.OpenFile(local, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	readErr := lima.ReadGuestFile(ctx, name, guest, fh, maxBundle)
-	if cerr := fh.Close(); readErr == nil {
-		readErr = cerr
-	}
-	if readErr != nil {
-		return readErr
-	}
-
-	ref := gitx.QuarantineRef(cfg.Name, branch)
-	// From here on everything uses tip, the commit that was checked: ref
-	// is shared, and another devkit push could move it.
-	tip, err := gitx.ImportBundle(ctx, cwd, local, branch, ref)
-	if err != nil {
-		return err
+	if tip == "" {
+		// From here on everything uses tip, the commit that was checked:
+		// ref is shared, and another devkit push could move it.
+		if tip, err = importFromVM(ctx, name, cwd, guest, branch, ref); err != nil {
+			return err
+		}
 	}
 	// In a bare copy, refs/heads/<to> mirrors origin only; another remote
 	// has no record there.
 	tracksOrigin := bare && remote == "origin"
-	dest, _ := gitx.RevParse(ctx, cwd, "refs/remotes/"+remote+"/"+to)
-	if tracksOrigin {
-		dest, _ = gitx.RevParse(ctx, cwd, "refs/heads/"+to)
+	// Review against where the destination is now, asked of the remote
+	// itself: cached tracking refs may be stale or, for another remote,
+	// absent. The same commit is the lease's expectation below.
+	dest, err := gitx.RemoteTip(ctx, cwd, remote, to)
+	if err != nil {
+		return err
+	}
+	destLocal := ""
+	if dest != "" {
+		if c, err := gitx.RevParse(ctx, cwd, dest); err == nil && c == dest {
+			destLocal = dest
+		} else {
+			fmt.Printf("Note: %s %s has commits this Mac has not fetched; without --force-with-lease git will refuse the push\n", remote, to)
+		}
 	}
 	base := gitx.ReviewBase(ctx, cwd, tip, remote, to)
-	r, err := gitx.Review(ctx, cwd, tip, base, dest)
+	if destLocal != "" {
+		if c, err := gitx.MergeBase(ctx, cwd, tip, destLocal); err == nil {
+			base = c
+		}
+	}
+	r, err := gitx.Review(ctx, cwd, tip, base, destLocal)
 	if err != nil {
 		return err
 	}
@@ -171,8 +181,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 	lease, _ := cmd.Flags().GetBool("force-with-lease")
 	expect := ""
-	if lease && tracksOrigin {
-		// No remote-tracking refs in a bare copy: lease on what it holds.
+	if lease {
+		// Lease on the remote tip the review was computed against, never
+		// on whatever a background fetch may have moved it to since.
 		expect = dest
 	}
 	if err := gitx.Push(ctx, cwd, remote, tip, to, lease, expect, os.Stdout); err != nil {
@@ -234,6 +245,41 @@ func reviewable(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// importFromVM reads the bundle the VM wrote into a private temp file and
+// imports it as ref, returning the checked tip.
+func importFromVM(ctx context.Context, name, repo, guest, branch, ref string) (string, error) {
+	defer func() { _, _ = lima.Exec(context.Background(), name, "rm -f "+shellQuote(guest)) }()
+	tmp, err := os.MkdirTemp("", "devkit-push-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	local := filepath.Join(tmp, "vm.bundle")
+	fh, err := os.OpenFile(local, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	readErr := lima.ReadGuestFile(ctx, name, guest, fh, maxBundle)
+	if cerr := fh.Close(); readErr == nil {
+		readErr = cerr
+	}
+	if readErr != nil {
+		return "", readErr
+	}
+	return gitx.ImportBundle(ctx, repo, local, branch, ref)
+}
+
+// tipOf reads the "devkit-tip=<id>" line the bundle script prints when the
+// Mac already has every commit; "" unless it is a commit id.
+func tipOf(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "devkit-tip="); ok && gitx.ValidCommitID(v) {
+			return v
+		}
+	}
+	return ""
 }
 
 // exitOf reads the "devkit-exit=N" line the wrapped script ends with.

@@ -98,15 +98,18 @@ func runClone(cmd *cobra.Command, args []string) error {
 	if dir == "" || dir == "." || dir == ".." || strings.HasPrefix(dir, "-") {
 		return fmt.Errorf("invalid directory %q", dir)
 	}
-	if _, err := os.Lstat(dir); err == nil {
-		return fmt.Errorf("%s already exists", dir)
-	}
+	// Resolve first, then create the directory exclusively: cleanup on
+	// failure may only ever remove a directory this run made. "x/.." or
+	// "./" resolve to a directory that exists and are refused.
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(abs, project.LockDir), 0o755); err != nil {
-		return err
+	if _, err := os.Lstat(abs); err == nil {
+		return fmt.Errorf("%s already exists", abs)
+	}
+	if err := os.Mkdir(abs, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", abs, err)
 	}
 	ok := false
 	defer func() {
@@ -114,6 +117,9 @@ func runClone(cmd *cobra.Command, args []string) error {
 			_ = os.RemoveAll(abs)
 		}
 	}()
+	if err := os.Mkdir(filepath.Join(abs, project.LockDir), 0o755); err != nil {
+		return err
+	}
 
 	branch, _ := cmd.Flags().GetString("branch")
 	fmt.Printf("Cloning %s on your Mac (bare: nothing is checked out here)\n", url)
@@ -155,7 +161,10 @@ func runClone(cmd *cobra.Command, args []string) error {
 func syncUpstream(ctx context.Context, cfg *project.Config, dir, ws string) error {
 	repo := bareRepo(dir)
 	b := cfg.Branch
-	staging := "refs/devkit/upstream/" + b
+	// Each sync stages under its own ref, so a concurrent one cannot change
+	// what this one delivers and records.
+	staging := "refs/devkit/upstream/" + b + "-" + randHex()
+	defer func() { _ = gitx.DeleteRef(context.Background(), repo, staging) }()
 	old, err := gitx.RevParse(ctx, repo, "refs/heads/"+b)
 	if err != nil {
 		return err
@@ -197,17 +206,18 @@ git update-ref refs/remotes/origin/%s %s && echo "origin/%s moved back upstream;
 	if err := lima.CopyTo(ctx, name, local, guest); err != nil {
 		return err
 	}
-	if err := lima.ExecStream(ctx, name, upstreamScript(ws, guest, b)); err != nil {
+	if err := lima.ExecStream(ctx, name, upstreamScript(ws, guest, b, staging)); err != nil {
 		return fmt.Errorf("the VM did not take the new commits; the next devkit sync retries: %w", err)
 	}
-	return gitx.SetBranch(ctx, repo, b, staging)
+	return gitx.SetBranch(ctx, repo, b, cur)
 }
 
 // upstreamScript is what the VM runs to take a sync bundle: fetch it into
-// origin/<branch>, then fast-forward <branch> and nothing else. ws is a
+// origin/<branch>, then fast-forward <branch> and nothing else. The bundle
+// carries the commit under staging. ws is a
 // devkit constant expanded in double quotes; b passed ValidBranch.
-func upstreamScript(ws, guest, b string) string {
-	src := shellQuote("+refs/devkit/upstream/" + b + ":refs/remotes/origin/" + b)
+func upstreamScript(ws, guest, b, staging string) string {
+	src := shellQuote("+" + staging + ":refs/remotes/origin/" + b)
 	qb := shellQuote(b)
 	return fmt.Sprintf(`cd "%s" || exit 1
 git fetch -q %s %s; st=$?

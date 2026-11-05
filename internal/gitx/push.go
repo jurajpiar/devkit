@@ -59,7 +59,8 @@ func QuarantineRef(project, branch string) string {
 // BundleScript is the shell the VM runs to write a bundle of branch to out,
 // leaving out every commit the host is known to have: the snapshot's
 // shallow boundary and the given host commits the VM also has. It exits
-// ExitNoBranch or ExitNothingToPush instead of writing an empty bundle.
+// ExitNoBranch, or ExitNothingToPush after printing "devkit-tip=<id>" when
+// the host already has every commit, instead of writing an empty bundle.
 // ws is a shell word expanded inside double quotes, such as
 // "$HOME/workspace", and must come from devkit, never from the VM. branch
 // must have passed ValidBranch; bases that are not commit ids are dropped.
@@ -79,10 +80,10 @@ for c in $(cat .git/shallow 2>/dev/null) %s; do
   if git cat-file -e "$c^{commit}" 2>/dev/null; then neg="$neg ^$c"; fi
 done
 # shellcheck disable=SC2086
-if [ -z "$(git rev-list -1 %s $neg)" ]; then exit %d; fi
+if [ -z "$(git rev-list -1 %s $neg)" ]; then echo "devkit-tip=$(git rev-parse %s)"; exit %d; fi
 # shellcheck disable=SC2086
 git bundle create -q %s %s $neg
-`, ws, ref, ExitNoBranch, strings.Join(known, " "), ref, ExitNothingToPush, shq(out), ref)
+`, ws, ref, ExitNoBranch, strings.Join(known, " "), ref, ref, ExitNothingToPush, shq(out), ref)
 }
 
 // ImportBundle stores branch from a bundle the VM wrote as ref. It does not
@@ -389,4 +390,45 @@ func SetBranch(ctx context.Context, repo, branch, ref string) error {
 	}
 	_, err := run(ctx, repo, append(append([]string{}, noHooks...), "update-ref", "refs/heads/"+branch, ref)...)
 	return err
+}
+
+// SetRef points ref, outside refs/heads, at commit, without hooks.
+func SetRef(ctx context.Context, repo, ref, commit string) error {
+	if !strings.HasPrefix(ref, "refs/devkit/") || !ValidCommitID(commit) {
+		return fmt.Errorf("invalid ref update")
+	}
+	_, err := run(ctx, repo, append(append([]string{}, noHooks...), "update-ref", ref, commit)...)
+	return err
+}
+
+// DeleteRef removes one of devkit's own refs, without hooks.
+func DeleteRef(ctx context.Context, repo, ref string) error {
+	if !strings.HasPrefix(ref, "refs/devkit/") {
+		return fmt.Errorf("invalid ref")
+	}
+	_, err := run(ctx, repo, append(append([]string{}, noHooks...), "update-ref", "-d", ref)...)
+	return err
+}
+
+// RemoteTip asks remote where branch to is now, with the host's own
+// credentials and no hooks. It returns "" when the branch does not exist
+// there.
+func RemoteTip(ctx context.Context, repo, remote, to string) (string, error) {
+	if strings.HasPrefix(remote, "-") || !ValidBranch(to) {
+		return "", fmt.Errorf("invalid remote or branch")
+	}
+	args := append(append([]string{"-C", repo}, noHooks...), "ls-remote", "--", remote, "refs/heads/"+to)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Stdin, cmd.Stderr = os.Stdin, os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git ls-remote %s: %w", remote, err)
+	}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[1] == "refs/heads/"+to && ValidCommitID(f[0]) {
+			return f[0], nil
+		}
+	}
+	return "", nil
 }

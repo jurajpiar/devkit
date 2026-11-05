@@ -133,3 +133,23 @@ func TestPushRefusesAHostileBranchName(t *testing.T) {
 		t.Errorf("no quarantine ref expected: %s", out)
 	}
 }
+
+// The default remote is the pushed branch's upstream, not the --to
+// branch's.
+func TestPushDefaultsToTheSourceBranchsUpstream(t *testing.T) {
+	p := newPushFixture(t, "main")
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	gitIn(t, p.host, "clone", "-q", "--bare", "--no-local", p.remote, fork)
+	gitIn(t, p.host, "remote", "add", "fork", fork)
+	gitIn(t, p.host, "config", "branch.main.remote", "fork")
+	gitIn(t, p.host, "config", "branch.release.remote", "origin")
+	if out, err := runDevkit(t, "", "push", "--yes", "--to", "release"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	if gitIn(t, fork, "rev-parse", "release") != p.vmHead {
+		t.Error("main tracks fork, so its push goes to fork")
+	}
+	if out, _ := exec.Command("git", "-C", p.remote, "rev-parse", "-q", "--verify", "release").Output(); len(out) != 0 {
+		t.Error("origin must not receive it")
+	}
+}

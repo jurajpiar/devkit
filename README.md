@@ -240,7 +240,7 @@ and editor hooks, `.envrc`, `package.json` scripts, task runners. After you
 say yes it pushes with your normal git credentials. No git hooks run on the
 Mac: a pre-push hook such as husky's would run the project's own code there,
 and it already ran in the VM. The push never forces; `--force-with-lease`
-replaces the remote branch only if it is still where your Mac last saw it.
+replaces the remote branch only if it is still where it was when you reviewed.
 Commits from the VM are unsigned; a branch that requires signatures needs
 them re-signed on the Mac.
 
