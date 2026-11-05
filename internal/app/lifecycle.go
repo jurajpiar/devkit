@@ -132,7 +132,7 @@ var shellCmd = &cobra.Command{
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Copy the current directory into the VM again (or git pull)",
+	Short: "Copy the current directory into the VM again, or bring in new upstream commits",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireLima(); err != nil {
 			return err
@@ -146,6 +146,13 @@ var syncCmd = &cobra.Command{
 		}
 		warnIfStale(cmd.Context(), cfg)
 		cwd, _ := os.Getwd()
+		if cfg.Source == project.SourceGit && isDir(bareRepo(cwd)) {
+			ws := "$HOME/" + provision.WorkspaceDir
+			if err := syncSource(cmd.Context(), cfg, cwd); err != nil {
+				return err
+			}
+			return syncUpstream(cmd.Context(), cfg, cwd, ws)
+		}
 		if cfg.Source == project.SourceGit {
 			return lima.ExecStream(cmd.Context(), cfg.VMName(), "git -C \"$HOME/"+provision.WorkspaceDir+"\" pull --ff-only")
 		}

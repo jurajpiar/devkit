@@ -59,29 +59,38 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s already exists (use --force to overwrite)", path)
 	}
 
-	cfg := project.Default()
 	cwd, _ := os.Getwd()
-	cfg.Name, _ = cmd.Flags().GetString("name")
-	if cfg.Name == "" {
-		cfg.Name = slug(filepath.Base(cwd))
-	}
-
+	cfg := project.Default()
 	if len(args) == 1 {
 		cfg.Source = project.SourceGit
 		cfg.Repo = args[0]
-		if n, _ := cmd.Flags().GetString("name"); n == "" {
-			cfg.Name = slug(repoName(args[0]))
-		}
 	}
-
-	cfg.Network.Mode, _ = cmd.Flags().GetString("network")
-
-	// Seed toolchains, registries and packages from what the directory uses.
 	// A git source has nothing to scan on the host.
 	var ecos []detect.Ecosystem
 	if cfg.Source != project.SourceGit {
 		ecos = detect.Scan(cwd)
 	}
+	if err := writeProjectConfig(cmd, cfg, cwd, path, ecos); err != nil {
+		return err
+	}
+	fmt.Println("Next: devkit up")
+	return nil
+}
+
+// writeProjectConfig fills cfg from the flags and the detected ecosystems
+// and writes it to path. dir is the project directory on the host.
+func writeProjectConfig(cmd *cobra.Command, cfg *project.Config, dir, path string, ecos []detect.Ecosystem) error {
+	cfg.Name, _ = cmd.Flags().GetString("name")
+	if cfg.Name == "" {
+		cfg.Name = slug(filepath.Base(dir))
+		if cfg.Repo != "" {
+			cfg.Name = slug(repoName(cfg.Repo))
+		}
+	}
+
+	cfg.Network.Mode, _ = cmd.Flags().GetString("network")
+
+	// Seed toolchains, registries and packages from what the project uses.
 	cfg.Tools.Manager, _ = cmd.Flags().GetString("toolchain")
 	cfg.Tools.Versions = detect.Versions(ecos)
 	if node, _ := cmd.Flags().GetString("node"); node != "" {
@@ -92,7 +101,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		project.ManagerHosts[cfg.Tools.Manager]...), detect.Hosts(ecos)...)
 	switch cfg.Tools.Manager {
 	case project.ManagerNix:
-		flakePath := filepath.Join(cwd, "flake.nix")
+		flakePath := filepath.Join(dir, "flake.nix")
 		if _, err := os.Stat(flakePath); err != nil && cfg.Source != project.SourceGit {
 			if err := os.WriteFile(flakePath, []byte(renderFlake(cfg.Tools.Versions)), 0o644); err != nil {
 				return err
@@ -116,7 +125,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Wrote %s\n\n", path)
 	fmt.Printf("  name:       %s\n  source:     %s\n  toolchains: %s\n  network:    %s\n  ssh port:   %d\n\n",
 		cfg.Name, cfg.Source, describeTools(cfg), cfg.Network.Mode, cfg.SSHPort)
-	fmt.Println("Next: devkit up")
 	return nil
 }
 

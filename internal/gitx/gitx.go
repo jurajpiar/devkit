@@ -36,7 +36,12 @@ func (s *Snapshot) Close() error { return os.RemoveAll(s.Dir) }
 // directory, or a subdirectory whose .git would describe files that were
 // never copied.
 func TakeSnapshot(ctx context.Context, src string) (*Snapshot, error) {
-	top, err := run(ctx, src, "rev-parse", "--show-toplevel")
+	// A bare repository (devkit clone's host copy) is its own top level.
+	topArg := "--show-toplevel"
+	if bare, _ := run(ctx, src, "rev-parse", "--is-bare-repository"); bare == "true" {
+		topArg = "--absolute-git-dir"
+	}
+	top, err := run(ctx, src, "rev-parse", topArg)
 	if err != nil || !sameDir(top, src) {
 		return nil, nil
 	}
@@ -98,7 +103,9 @@ func TakeSnapshot(ctx context.Context, src string) (*Snapshot, error) {
 	return s, nil
 }
 
-var scpLike = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$`)
+// scpLike is git's user@host:path form. Neither host nor path may start
+// with "-", which ssh would read as an option.
+var scpLike = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~][A-Za-z0-9._~/-]*$`)
 
 // SanitizeURL returns a remote URL with any password or token removed, or
 // "" for anything that is not a network remote (local paths, file://, and

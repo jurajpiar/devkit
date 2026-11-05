@@ -14,13 +14,17 @@ import (
 // host's current commit and branch, and nothing else (see package gitx).
 // A repository already in the VM is kept, because it may hold commits made
 // there that the host has never seen.
-func syncGit(ctx context.Context, name, cwd, ws string, excludes []string) error {
+//
+// repo is the host repository: the project directory for source: copy, or
+// devkit clone's bare copy for source: git. With checkout the VM writes the
+// files out itself; a copied project already has them.
+func syncGit(ctx context.Context, name, repo, ws string, checkout bool, excludes []string) error {
 	out, _ := lima.Exec(ctx, name, fmt.Sprintf(`test -e "%s/.git" && echo yes`, ws))
 	if strings.TrimSpace(out) == "yes" {
 		fmt.Println("Keeping the VM's own git repository")
 		return nil
 	}
-	snap, err := gitx.TakeSnapshot(ctx, cwd)
+	snap, err := gitx.TakeSnapshot(ctx, repo)
 	if err != nil {
 		return err
 	}
@@ -34,11 +38,14 @@ func syncGit(ctx context.Context, name, cwd, ws string, excludes []string) error
 	// Rebuild the index from HEAD and leave the copied files as they are,
 	// so uncommitted host changes show as changes.
 	script := fmt.Sprintf(`cd "%s" || exit 1`, ws)
-	if snap.Head != "" {
+	switch {
+	case snap.Head != "" && checkout:
+		script += " && git reset -q --hard"
+	case snap.Head != "":
 		script += " && git reset -q && { " + skipExcludedScript(excludes) + "; }"
 	}
 	for _, k := range []string{"user.name", "user.email"} {
-		if v := hostGitConfig(ctx, cwd, k); v != "" {
+		if v := hostGitConfig(ctx, repo, k); v != "" {
 			script += fmt.Sprintf(" && git config %s %s", k, shellQuote(v))
 		}
 	}

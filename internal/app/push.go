@@ -54,15 +54,22 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Source != project.SourceCopy {
-		return fmt.Errorf("devkit push works with source: copy; with source: %s, push from where the repository lives", cfg.Source)
-	}
 	if err := mustBeRunning(cmd, cfg); err != nil {
 		return err
 	}
-	cwd, _ := os.Getwd()
-	if !gitx.IsTopLevel(ctx, cwd) {
-		return fmt.Errorf("%s is not the top of a git checkout", cwd)
+	dir, _ := os.Getwd()
+	// The host repository: the project itself when copied, devkit clone's
+	// bare copy for source: git.
+	cwd, bare := dir, false
+	switch {
+	case cfg.Source == project.SourceCopy:
+		if !gitx.IsTopLevel(ctx, cwd) {
+			return fmt.Errorf("%s is not the top of a git checkout", cwd)
+		}
+	case cfg.Source == project.SourceGit && isDir(bareRepo(dir)):
+		cwd, bare = bareRepo(dir), true
+	default:
+		return fmt.Errorf("devkit push needs source: copy, or a project made by devkit clone")
 	}
 	name := cfg.VMName()
 	ws := "$HOME/" + provision.WorkspaceDir
@@ -153,10 +160,26 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not pushed; the commits stay at %s", ref)
 	}
 	lease, _ := cmd.Flags().GetBool("force-with-lease")
-	if err := gitx.Push(ctx, cwd, remote, ref, to, lease, "", os.Stdout); err != nil {
+	expect := ""
+	if lease && bare {
+		// No remote-tracking refs in a bare copy: lease on what it holds.
+		expect, _ = gitx.RevParse(ctx, cwd, "refs/heads/"+to)
+	}
+	if err := gitx.Push(ctx, cwd, remote, ref, to, lease, expect, os.Stdout); err != nil {
 		return err
 	}
-	fmt.Printf("Pushed. On this Mac the commits are at %s; bring them into your checkout with: git merge --ff-only %s\n", ref, ref)
+	if bare {
+		// The bare copy stands in for the remote: record what it now has,
+		// so the next push and sync start from here.
+		if err := gitx.SetBranch(ctx, cwd, to, ref); err != nil {
+			return err
+		}
+	}
+	if bare {
+		fmt.Printf("Pushed %s to %s %s\n", branch, remote, to)
+	} else {
+		fmt.Printf("Pushed. On this Mac the commits are at %s; bring them into your checkout with: git merge --ff-only %s\n", ref, ref)
+	}
 	return nil
 }
 

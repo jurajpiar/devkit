@@ -283,3 +283,15 @@ func firstLine(dir, name, def string) string {
 	}
 	return def
 }
+
+// MarkerFiles are the top-level files detection reads, for callers that
+// have to fetch them before Scan can look (devkit clone reads them from
+// git objects instead of checking the repository out on the host).
+var MarkerFiles = []string{
+	"package.json", ".nvmrc", ".node-version", "bun.lock", "bun.lockb", ".bun-version", "bunfig.toml",
+	"go.mod", "Cargo.toml", "rust-toolchain.toml", "rust-toolchain",
+	"pyproject.toml", "requirements.txt", "setup.py", "Pipfile", ".python-version",
+	"Gemfile", ".ruby-version", "pom.xml", "build.gradle", "build.gradle.kts", ".java-version",
+	"foundry.toml", "hardhat.config.js", "hardhat.config.ts",
+	"CMakeLists.txt", "meson.build", "configure.ac",
+}

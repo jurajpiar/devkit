@@ -204,7 +204,7 @@ network:
 | `source` | What happens | Notes |
 |---|---|---|
 | `copy` | The directory is copied into the VM on `up` and `sync` | Default. Host is never touched again. A git checkout gets a `.git` like a fresh clone's, see below. |
-| `git` | The repo is cloned inside the VM | Set `repo` and `branch`. `sync` pulls. |
+| `git` | Made by `devkit clone <url>`: your Mac clones bare, the VM checks out | Private repos work with your own credentials; the files are never written out on the Mac. `sync` fetches on the Mac and fast-forwards the VM. A `devkit.yaml` from `devkit init <url>` has no Mac-side clone; the VM then clones a public repo through the proxy. |
 | `mount` | The directory is mounted read-only | Opt in. `mount_writable: true` lets the sandbox edit your files. |
 
 **Git in a copied project.** Your `.git` is never copied. When the directory
@@ -217,6 +217,17 @@ changes, so `git status`, `git diff`, `git commit` and tools such as husky
 work inside. A repository already in the VM is kept on later `sync`s, since it
 may hold commits the Mac has never seen. Files in that one commit arrive even
 if `exclude` names them.
+
+**Cloning.** `devkit clone https://github.com/org/repo` (or just `devkit
+github.com/org/repo`) makes `repo/` holding `devkit.yaml` and a bare,
+one-commit clone in `.devkit/repo.git`, fetched with your own git credentials
+so private repositories work. Bare means none of the project's files are
+written out on your Mac, which rules out the class of git bugs that run code
+on checkout; the VM checks out on `devkit up`. Languages are detected from
+marker files read out of git objects. Only https and ssh are accepted, for the
+clone and any redirect; `git://`, which GitHub no longer serves, is rewritten
+to `https://`. `devkit sync` fetches new upstream commits on the Mac and
+hands them to the VM, which never talks to the remote itself.
 
 **Pushing from the VM.** The VM holds no credentials, and should not: a token
 or SSH agent inside is usable by every dependency that runs there. `devkit
@@ -345,10 +356,11 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 
 | Command | Description |
 |---|---|
+| `devkit clone <url> [dir]`, `devkit <url>` | New project from a repository, without checking it out on the Mac. `git://` becomes `https://`. Flags: `--branch`, `--name`, `--toolchain`, `--node`, `--network` |
 | `devkit init [repo-url]` | Write `devkit.yaml`. Flags: `--name`, `--toolchain`, `--node`, `--network`, `--force` |
 | `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock` |
 | `devkit shell [cmd]` | Shell in the VM, or run a command |
-| `devkit sync` | Copy the directory again, or `git pull` |
+| `devkit sync` | Copy the directory again; for a cloned project, fetch upstream on the Mac and fast-forward the VM |
 | `devkit push [branch]` | Review commits made in the VM and push them from your Mac with your own credentials. Flags: `--remote`, `--to`, `--yes`, `--force-with-lease` |
 | `devkit logs [-f] [-n N]` | Egress audit log |
 | `devkit connect` | IDE connection instructions |
