@@ -14,7 +14,7 @@ import (
 // host's current commit and branch, and nothing else (see package gitx).
 // A repository already in the VM is kept, because it may hold commits made
 // there that the host has never seen.
-func syncGit(ctx context.Context, name, cwd, ws string) error {
+func syncGit(ctx context.Context, name, cwd, ws string, excludes []string) error {
 	out, _ := lima.Exec(ctx, name, fmt.Sprintf(`test -e "%s/.git" && echo yes`, ws))
 	if strings.TrimSpace(out) == "yes" {
 		fmt.Println("Keeping the VM's own git repository")
@@ -35,7 +35,7 @@ func syncGit(ctx context.Context, name, cwd, ws string) error {
 	// so uncommitted host changes show as changes.
 	script := fmt.Sprintf(`cd "%s" || exit 1`, ws)
 	if snap.Head != "" {
-		script += " && git reset -q"
+		script += " && git reset -q && { " + skipExcludedScript(excludes) + "; }"
 	}
 	for _, k := range []string{"user.name", "user.email"} {
 		if v := hostGitConfig(ctx, cwd, k); v != "" {
@@ -68,4 +68,25 @@ func hostGitConfig(ctx context.Context, dir, key string) string {
 		return ""
 	}
 	return v
+}
+
+// skipExcludedScript marks tracked files that exclude kept out of the copy
+// as skip-worktree, so git in the VM treats them as unchanged rather than
+// deleted. Only files missing from the work tree and matching an exclude
+// pattern are marked; any other missing file is a real deletion.
+func skipExcludedScript(excludes []string) string {
+	var specs []string
+	for _, e := range excludes {
+		e = strings.Trim(e, "/")
+		if e == "" || e == ".git" {
+			continue
+		}
+		for _, form := range []string{"**/%s", "**/%s/**"} {
+			specs = append(specs, shellQuote(":(glob)"+fmt.Sprintf(form, e)))
+		}
+	}
+	if len(specs) == 0 {
+		return "true"
+	}
+	return "git ls-files -d -z -- " + strings.Join(specs, " ") + " | git update-index -z --skip-worktree --stdin"
 }

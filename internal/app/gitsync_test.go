@@ -162,3 +162,28 @@ func TestCopySyncOfAPlainDirectorySendsNoGit(t *testing.T) {
 		t.Fatalf("got %d streams, want only the working tree", len(streams))
 	}
 }
+
+// Tracked files that exclude kept out of the copy must not show as deleted,
+// or a routine "git commit -a" in the VM would delete them upstream.
+func TestExcludedTrackedFilesAreNotDeletions(t *testing.T) {
+	dir, _ := hostRepo(t)
+	for _, f := range []string{"vendor/lib/a.go", "web/dist/app.js", "debug.log", "keep.txt"} {
+		must(t, os.MkdirAll(filepath.Join(dir, filepath.Dir(f)), 0o755))
+		must(t, os.WriteFile(filepath.Join(dir, f), []byte("x\n"), 0o644))
+	}
+	gitIn(t, dir, "add", "-f", ".")
+	gitIn(t, dir, "commit", "-qm", "tracked build output")
+	// What the VM sees: the excluded paths missing, and one real
+	// uncommitted deletion.
+	for _, p := range []string{"vendor", "web/dist", "debug.log", "keep.txt"} {
+		must(t, os.RemoveAll(filepath.Join(dir, p)))
+	}
+	cmd := exec.Command("bash", "-c", skipExcludedScript(project.DefaultExclude))
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if st := gitIn(t, dir, "status", "--porcelain"); st != "D keep.txt" {
+		t.Errorf("status = %q, want only the real deletion", st)
+	}
+}
