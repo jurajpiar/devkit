@@ -98,6 +98,16 @@ if [ -z "$old" ]; then
 elif [ "$old" != %[5]s ]; then
   # The configured user changed: the database and what is in it follow, or
   # migrations would fail against objects the new role does not own.
+  # REASSIGN OWNED also moves shared objects, so first refuse, changing
+  # nothing, when the old role owns another database or a tablespace.
+  if [ "$old" != "$(id -un)" ]; then
+    others="$("$PG/psql" -h "$SOCK" -p "$PORT" -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = '$old') AND datname <> '%[4]s'")"
+    spaces="$("$PG/psql" -h "$SOCK" -p "$PORT" -d postgres -tAc "SELECT count(*) FROM pg_tablespace WHERE spcowner = (SELECT oid FROM pg_roles WHERE rolname = '$old')")"
+    if [ "$others" != 0 ] || [ "$spaces" != 0 ]; then
+      echo "Role $old also owns other databases or tablespaces, so %[4]s was left with $old. Change their ownership by hand, or keep user: $old" >&2
+      exit 1
+    fi
+  fi
   "$PG/psql" -h "$SOCK" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -q <<EOF
 ALTER DATABASE "%[4]s" OWNER TO "%[5]s";
 EOF
