@@ -261,6 +261,19 @@ func TestPushFromAClonedProject(t *testing.T) {
 	if gitIn(t, bare, "rev-parse", "refs/heads/main") != want {
 		t.Error("the host copy should record what was pushed, so the next review starts there")
 	}
+
+	// The Mac now has the commit, so the VM has nothing new to send; a
+	// push to a destination that still lacks it must go ahead anyway.
+	fork2 := filepath.Join(t.TempDir(), "fork2.git")
+	gitIn(t, bare, "clone", "-q", "--bare", "--no-local", upstream, fork2)
+	gitIn(t, bare, "remote", "add", "fork2", fork2)
+	f.OnShell(want, "devkit-tip="+want+"\ndevkit-exit=4", 0)
+	if out, err := runDevkit(t, "", "push", "--yes", "--remote", "fork2"); err != nil {
+		t.Fatalf("push to fork2: %v\n%s", err, out)
+	}
+	if gitIn(t, fork2, "rev-parse", "main") != want {
+		t.Error("fork2 should get the commit the Mac already holds")
+	}
 }
 
 func TestUpstreamScriptMovesOnlyTheConfiguredBranch(t *testing.T) {
@@ -275,7 +288,7 @@ func TestUpstreamScriptMovesOnlyTheConfiguredBranch(t *testing.T) {
 	gitIn(t, up, "update-ref", "refs/devkit/upstream/main", "HEAD")
 	b := filepath.Join(t.TempDir(), "u.bundle")
 	gitIn(t, up, "bundle", "create", "-q", b, "refs/devkit/upstream/main", "^"+base)
-	cmd := exec.Command("bash", "-c", upstreamScript("$HOME/"+filepath.Base(vm), b, "main"))
+	cmd := exec.Command("bash", "-c", upstreamScript("$HOME/"+filepath.Base(vm), b, "main", "refs/devkit/upstream/main"))
 	cmd.Env = append(os.Environ(), "HOME="+filepath.Dir(vm))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -341,5 +354,51 @@ func TestSyncAfterUpstreamRewinds(t *testing.T) {
 	}
 	if gitIn(t, bare, "rev-parse", "refs/heads/main") != start {
 		t.Error("the Mac's copy should record the rewind")
+	}
+}
+
+// A target that cleans to an existing directory must be refused before
+// anything is created, so cleanup can never remove a directory clone did
+// not make.
+func TestCloneNeverTargetsAnExistingDirectory(t *testing.T) {
+	fakeHome(t)
+	allowLocalClones(t)
+	up := upstreamRepo(t)
+	parent := t.TempDir()
+	inDir(t, parent)
+	sentinel := filepath.Join(parent, "mine.txt")
+	must(t, os.WriteFile(sentinel, []byte("keep"), 0o644))
+	for _, target := range []string{"missing/..", "./", "missing/../.", parent} {
+		if _, err := runDevkit(t, "", "clone", "file://"+up, target); err == nil {
+			t.Errorf("clone into %q should be refused", target)
+		}
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatal("the current directory was touched")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "devkit.yaml")); err == nil {
+		t.Error("nothing may be written into an existing directory")
+	}
+}
+
+func TestSyncLeavesNoStagingRefs(t *testing.T) {
+	f, _ := fakeHome(t)
+	dir, upstream := clonedProject(t)
+	cfg, err := project.Load(filepath.Join(dir, "devkit.yaml"))
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(upstream, "later.txt"), []byte("l\n"), 0o644))
+	gitIn(t, upstream, "add", ".")
+	gitIn(t, upstream, "commit", "-qm", "later")
+	f.SetInstances(fakelima.Instance{Name: cfg.VMName(), Status: "Running"})
+	f.OnShell(`/.git" && echo yes`, "yes", 0)
+	if out, err := runDevkit(t, "", "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	bare := filepath.Join(dir, project.LockDir, "repo.git")
+	if refs := gitIn(t, bare, "for-each-ref", "refs/devkit/upstream"); refs != "" {
+		t.Errorf("each sync stages under its own ref and removes it: %s", refs)
+	}
+	if gitIn(t, bare, "rev-parse", "refs/heads/main") != gitIn(t, upstream, "rev-parse", "HEAD") {
+		t.Error("the delivered commit should be recorded")
 	}
 }

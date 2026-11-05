@@ -199,3 +199,12 @@ func IsAncestor(ctx context.Context, repo, a, b string) bool {
 	_, err := run(ctx, repo, "merge-base", "--is-ancestor", a, b)
 	return err == nil
 }
+
+// MergeBase returns the best common ancestor of a and b.
+func MergeBase(ctx context.Context, repo, a, b string) (string, error) {
+	c, err := run(ctx, repo, "merge-base", a, b)
+	if err != nil || !ValidCommitID(c) {
+		return "", fmt.Errorf("no common ancestor")
+	}
+	return c, nil
+}
