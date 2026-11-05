@@ -60,6 +60,13 @@ func TestServicesValidation(t *testing.T) {
 		"password dollar":    "services:\n  postgres:\n    password: \"$(id)\"\n",
 		"password at":        "services:\n  postgres:\n    password: \"a@b\"\n",
 		"duplicate":          "services: [postgres, postgres]\n",
+		"proxy port":         "services:\n  postgres:\n    port: 3128\n",
+		"pg_ role":           "services:\n  postgres:\n    user: pg_app\n",
+		"public role":        "services:\n  postgres:\n    user: public\n",
+		"none role":          "services:\n  postgres:\n    user: none\n",
+		"current_user role":  "services:\n  postgres:\n    user: current_user\n",
+		"postgres database":  "services:\n  postgres:\n    database: postgres\n",
+		"template database":  "services:\n  postgres:\n    database: template1\n",
 	} {
 		if _, err := Parse([]byte(base + yml)); err == nil {
 			t.Errorf("%s: should be refused", name)

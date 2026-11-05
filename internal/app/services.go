@@ -92,8 +92,21 @@ fi
 "$PG/psql" -h "$SOCK" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -q <<'SQL'
 %[3]s
 SQL
-if [ -z "$("$PG/psql" -h "$SOCK" -p "$PORT" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '%[4]s'")" ]; then
+old="$("$PG/psql" -h "$SOCK" -p "$PORT" -d postgres -tAc "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = '%[4]s'")"
+if [ -z "$old" ]; then
   "$PG/createdb" -h "$SOCK" -p "$PORT" -O %[5]s %[4]s
+elif [ "$old" != %[5]s ]; then
+  # The configured user changed: the database and what is in it follow, or
+  # migrations would fail against objects the new role does not own.
+  "$PG/psql" -h "$SOCK" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -q <<EOF
+ALTER DATABASE "%[4]s" OWNER TO "%[5]s";
+EOF
+  if [ "$old" != "$(id -un)" ]; then
+    "$PG/psql" -h "$SOCK" -p "$PORT" -d %[4]s -v ON_ERROR_STOP=1 -q <<EOF
+REASSIGN OWNED BY "$old" TO "%[5]s";
+EOF
+  fi
+  echo "Database %[4]s now belongs to %[5]s (was $old)"
 fi
 echo "PostgreSQL 16 on 127.0.0.1:$PORT: %[6]s"
 `, pgBin, pg.Port, role, pg.Database, pg.User, pg.URL())

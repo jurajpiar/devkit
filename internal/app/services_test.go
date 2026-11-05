@@ -32,6 +32,10 @@ func TestPostgresScript(t *testing.T) {
 		`CREATE ROLE "vaults" LOGIN PASSWORD 'password'`,
 		`-O vaults vaults`,
 		"postgres://vaults:password@127.0.0.1:5433/vaults",
+		// An existing database follows a changed user: it and everything
+		// in it end up owned by the configured role.
+		`ALTER DATABASE "vaults" OWNER TO "vaults"`,
+		`REASSIGN OWNED BY "$old" TO "vaults"`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script missing %q", want)
