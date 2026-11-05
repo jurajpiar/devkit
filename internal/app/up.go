@@ -135,6 +135,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// Services are local to the VM, so they start in every network mode.
+	if err := startServices(ctx, cfg); err != nil {
+		return err
+	}
 	if !noInstall && cfg.Network.Mode != project.NetworkNone {
 		fmt.Println("Installing dependencies")
 		if err := lima.ExecStream(ctx, name, installScript(cfg)); err != nil {

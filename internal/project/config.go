@@ -65,6 +65,8 @@ type Config struct {
 	// would otherwise pick from the files in the workspace. It runs as the
 	// sandbox user, inside the dev shell when manager is nix.
 	Install string `yaml:"install,omitempty"`
+	// Services run inside the VM as the sandbox user; see Services.
+	Services Services `yaml:"services,omitempty"`
 }
 
 // Tools lists what gets installed into the VM.
@@ -201,6 +203,7 @@ func (c *Config) applyDefaults() {
 	if c.Network.Allow == nil {
 		c.Network.Allow = append([]string(nil), DefaultAllow...)
 	}
+	c.Services.applyDefaults()
 	if c.Exclude == nil {
 		c.Exclude = append([]string(nil), DefaultExclude...)
 	}
@@ -272,6 +275,9 @@ var (
 
 // Validate checks the config for mistakes a user could make.
 func (c *Config) Validate() error {
+	if err := c.Services.validate(); err != nil {
+		return err
+	}
 	if !nameRe.MatchString(c.Name) {
 		return fmt.Errorf("name %q must be lowercase letters, digits and dashes (max 41 chars)", c.Name)
 	}
@@ -364,4 +370,14 @@ func (c *Config) VMName() string {
 // SSHHost is the Host alias written to ~/.ssh/config.
 func (c *Config) SSHHost() string {
 	return "devkit-" + c.Name
+}
+
+// AptPackages are the packages root installs: tools.packages plus those the
+// enabled services need.
+func (c *Config) AptPackages() []string {
+	pkgs := append([]string(nil), c.Tools.Packages...)
+	if c.Services.Postgres != nil {
+		pkgs = append(pkgs, PostgresPackage)
+	}
+	return pkgs
 }
