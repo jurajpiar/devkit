@@ -61,8 +61,13 @@ func TakeSnapshot(ctx context.Context, src string) (*Snapshot, error) {
 	if initBranch == "" {
 		initBranch = "main"
 	}
+	// The snapshot must hash objects as the source does.
+	format, err := run(ctx, top, "rev-parse", "--show-object-format")
+	if err != nil || (format != "sha1" && format != "sha256") {
+		return fail(fmt.Errorf("unknown object format %q", format))
+	}
 	// No template: no sample hooks, no info/exclude from the host's git.
-	if _, err := run(ctx, dir, "-c", "init.templateDir=", "init", "-q", "-b", initBranch); err != nil {
+	if _, err := run(ctx, dir, "-c", "init.templateDir=", "init", "-q", "--object-format="+format, "-b", initBranch); err != nil {
 		return fail(err)
 	}
 	// The VM's filesystem is case-sensitive and not HFS+; the host's

@@ -86,8 +86,8 @@ func CloneBare(ctx context.Context, rawURL, branch, dst string, out io.Writer) e
 }
 
 // ExtractFiles writes the named top-level files of rev into dst, reading
-// them from git objects. Only regular files up to 1 MiB are written, under
-// the given names; symlinks, directories, nested paths and missing names
+// them from git objects. Only regular files are written, under the given
+// names, and one larger than 1 MiB is written empty; symlinks, directories, nested paths and missing names
 // are skipped. Callers pass a fixed list, never names from the repository.
 func ExtractFiles(ctx context.Context, repo, rev string, names []string, dst string) error {
 	for _, n := range names {
@@ -104,13 +104,18 @@ func ExtractFiles(ctx context.Context, repo, rev string, names []string, dst str
 			continue
 		}
 		size, err := run(ctx, repo, "cat-file", "-s", f[2])
-		if n, err2 := strconv.Atoi(size); err != nil || err2 != nil || n > maxMarker {
+		sz, err2 := strconv.Atoi(size)
+		if err != nil || err2 != nil {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, "git", "-C", repo, "cat-file", "blob", f[2])
-		body, err := cmd.Output()
-		if err != nil {
-			return err
+		// An oversized marker still counts as present; only its content
+		// is left unread.
+		var body []byte
+		if sz <= maxMarker {
+			cmd := exec.CommandContext(ctx, "git", "-C", repo, "cat-file", "blob", f[2])
+			if body, err = cmd.Output(); err != nil {
+				return err
+			}
 		}
 		fh, err := os.OpenFile(filepath.Join(dst, n), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
@@ -184,4 +189,13 @@ func BundleRange(ctx context.Context, repo, ref, exclude, out string) error {
 	}
 	_, err := run(ctx, repo, "bundle", "create", "-q", out, ref, "^"+exclude)
 	return err
+}
+
+// IsAncestor reports whether commit a is an ancestor of (or equal to) b.
+func IsAncestor(ctx context.Context, repo, a, b string) bool {
+	if !ValidCommitID(a) || !ValidCommitID(b) {
+		return false
+	}
+	_, err := run(ctx, repo, "merge-base", "--is-ancestor", a, b)
+	return err == nil
 }

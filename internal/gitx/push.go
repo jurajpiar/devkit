@@ -93,27 +93,27 @@ git bundle create -q %s %s $neg
 // object (refusing, among others, trees with a .git or .. entry, the shape
 // of past checkout exploits). Only then is ref set, after a connectivity
 // check, and no hooks run.
-func ImportBundle(ctx context.Context, repo, bundle, branch, ref string) error {
+func ImportBundle(ctx context.Context, repo, bundle, branch, ref string) (string, error) {
 	if !ValidBranch(branch) {
-		return fmt.Errorf("invalid branch name")
+		return "", fmt.Errorf("invalid branch name")
 	}
 	f, err := os.Open(bundle)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer f.Close()
 	r := bufio.NewReader(f)
 	h, err := readBundleHeader(r)
 	if err != nil {
-		return fmt.Errorf("not a usable git bundle: %w", err)
+		return "", fmt.Errorf("not a usable git bundle: %w", err)
 	}
 	if len(h.refs) != 1 || h.refs[0][1] != "refs/heads/"+branch {
-		return fmt.Errorf("the bundle must carry refs/heads/%s and nothing else", branch)
+		return "", fmt.Errorf("the bundle must carry refs/heads/%s and nothing else", branch)
 	}
 	tip := h.refs[0][0]
 	for _, p := range h.prereqs {
 		if _, err := run(ctx, repo, "cat-file", "-e", p+"^{commit}"); err != nil {
-			return fmt.Errorf("the bundle builds on %s, which this repository does not have", p[:12])
+			return "", fmt.Errorf("the bundle builds on %s, which this repository does not have", p[:12])
 		}
 	}
 	pack := exec.CommandContext(ctx, "git", append(append([]string{"-C", repo}, noHooks...), "index-pack", "--strict", "--fix-thin", "--stdin")...)
@@ -121,16 +121,16 @@ func ImportBundle(ctx context.Context, repo, bundle, branch, ref string) error {
 	var perr bytes.Buffer
 	pack.Stderr = &perr
 	if err := pack.Run(); err != nil {
-		return fmt.Errorf("refused the VM's commits: %s", strings.TrimSpace(perr.String()))
+		return "", fmt.Errorf("refused the VM's commits: %s", strings.TrimSpace(perr.String()))
 	}
 	walk := append([]string{"rev-list", "--objects", "--quiet", tip, "--not"}, h.prereqs...)
 	if _, err := run(ctx, repo, append(walk, "--all")...); err != nil {
-		return fmt.Errorf("the VM's commits are incomplete: %w", err)
+		return "", fmt.Errorf("the VM's commits are incomplete: %w", err)
 	}
 	if _, err := run(ctx, repo, append(append([]string{}, noHooks...), "update-ref", ref, tip)...); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return tip, nil
 }
 
 type bundleHeader struct {
@@ -191,7 +191,7 @@ func readBundleHeader(r *bufio.Reader) (*bundleHeader, error) {
 	}
 }
 
-// Push sends ref to branch to on remote with the host's own credentials and
+// Push sends ref (a commit id or ref) to branch to on remote with the host's own credentials and
 // no hooks. It never forces; lease allows replacing the remote branch only
 // if it is still at expect, or, with expect empty, where the remote-tracking
 // ref says it is. A bare copy has no remote-tracking refs, so it passes the
@@ -223,44 +223,55 @@ type Commit struct {
 	ID, Author, Email, Subject string
 }
 
-// ReviewSummary is what a push would add on top of base.
+// ReviewSummary is what a push of tip would change on the remote.
 type ReviewSummary struct {
+	// Commits are those tip adds over base.
 	Commits []Commit
+	// Dropped are commits on the remote branch that tip does not contain:
+	// a lease push removes them.
+	Dropped []Commit
 	Stat    string
 	// Sensitive lists changed files that run outside the VM: in CI, in the
 	// editor, or in your shell on the host.
 	Sensitive []string
 }
 
-// Review describes the commits in ref that base does not have. An empty
-// base means everything in ref.
-func Review(ctx context.Context, repo, ref, base string) (*ReviewSummary, error) {
-	rng := ref
-	from := base
-	if base != "" {
-		rng = base + ".." + ref
-	} else {
-		empty, err := run(ctx, repo, "hash-object", "-t", "tree", os.DevNull)
-		if err != nil {
-			return nil, err
-		}
-		from = empty
-	}
-	log, err := run(ctx, repo, "log", "--format=%H%x1f%an%x1f%ae%x1f%s%x1e", rng)
-	if err != nil {
-		return nil, err
+// Review describes pushing tip. Commits are those in tip but not base (all
+// of tip when base is empty). dest is the remote branch's tip as last seen,
+// or empty: when tip does not contain it, its commits are listed as
+// dropped and the diff is taken against dest, so files a forced push
+// removes are shown too.
+func Review(ctx context.Context, repo, tip, base, dest string) (*ReviewSummary, error) {
+	if !ValidCommitID(tip) || (base != "" && !ValidCommitID(base)) || (dest != "" && !ValidCommitID(dest)) {
+		return nil, fmt.Errorf("invalid commit id")
 	}
 	r := &ReviewSummary{}
-	for _, rec := range strings.Split(log, "\x1e") {
-		f := strings.Split(strings.TrimSpace(rec), "\x1f")
-		if len(f) == 4 {
-			r.Commits = append(r.Commits, Commit{ID: f[0], Author: f[1], Email: f[2], Subject: f[3]})
-		}
+	var err error
+	rng := []string{tip}
+	if base != "" {
+		rng = append(rng, "^"+base)
 	}
-	if r.Stat, err = run(ctx, repo, "diff", "--stat", from, ref); err != nil {
+	if r.Commits, err = commits(ctx, repo, rng...); err != nil {
 		return nil, err
 	}
-	names, err := run(ctx, repo, "diff", "--name-only", "-z", from, ref)
+	from := base
+	if dest != "" {
+		if _, err := run(ctx, repo, "merge-base", "--is-ancestor", dest, tip); err != nil {
+			if r.Dropped, err = commits(ctx, repo, dest, "^"+tip); err != nil {
+				return nil, err
+			}
+			from = dest
+		}
+	}
+	if from == "" {
+		if from, err = run(ctx, repo, "hash-object", "-t", "tree", os.DevNull); err != nil {
+			return nil, err
+		}
+	}
+	if r.Stat, err = run(ctx, repo, "diff", "--stat", from, tip); err != nil {
+		return nil, err
+	}
+	names, err := run(ctx, repo, "diff", "--name-only", "-z", from, tip)
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +281,39 @@ func Review(ctx context.Context, repo, ref, base string) (*ReviewSummary, error)
 		}
 	}
 	return r, nil
+}
+
+// commits lists the commits in a revision range. The ids come from
+// rev-list and are authoritative; the text fields are read one per line,
+// which is safe because neither commit headers nor subjects can hold a
+// newline, and any record that does not line up with its id fails the
+// whole review rather than dropping a commit from view.
+func commits(ctx context.Context, repo string, rng ...string) ([]Commit, error) {
+	ids, err := run(ctx, repo, append([]string{"rev-list"}, rng...)...)
+	if err != nil {
+		return nil, err
+	}
+	if ids == "" {
+		return nil, nil
+	}
+	want := strings.Split(ids, "\n")
+	text, err := run(ctx, repo, append([]string{"log", "--format=%H%n%an%n%ae%n%s"}, rng...)...)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) != 4*len(want) {
+		return nil, fmt.Errorf("could not read the commits' text; inspect them with git log")
+	}
+	out := make([]Commit, len(want))
+	for i, id := range want {
+		rec := lines[4*i : 4*i+4]
+		if !ValidCommitID(id) || rec[0] != id {
+			return nil, fmt.Errorf("could not read the commits' text; inspect them with git log")
+		}
+		out[i] = Commit{ID: id, Author: rec[1], Email: rec[2], Subject: rec[3]}
+	}
+	return out, nil
 }
 
 var sensitiveDirs = []string{
@@ -343,6 +387,6 @@ func SetBranch(ctx context.Context, repo, branch, ref string) error {
 	if !ValidBranch(branch) {
 		return fmt.Errorf("invalid branch %q", branch)
 	}
-	_, err := run(ctx, repo, "update-ref", "refs/heads/"+branch, ref)
+	_, err := run(ctx, repo, append(append([]string{}, noHooks...), "update-ref", "refs/heads/"+branch, ref)...)
 	return err
 }

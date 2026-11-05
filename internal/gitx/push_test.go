@@ -56,7 +56,7 @@ func TestBundleImportsIntoQuarantine(t *testing.T) {
 		t.Fatalf("bundle script exited %d: %s", code, b)
 	}
 	ref := QuarantineRef("proj", "main")
-	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
 		t.Fatal(err)
 	}
 	if git(t, host, "rev-parse", ref) != git(t, vm.Dir, "rev-parse", "HEAD") {
@@ -88,7 +88,7 @@ func TestImportRejectsAMaliciousTree(t *testing.T) {
 		t.Fatalf("bundle: %d %s", code, b)
 	}
 	ref := QuarantineRef("proj", "main")
-	if err := ImportBundle(context.Background(), host, b, "main", ref); err == nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", ref); err == nil {
 		t.Fatal("a tree with a .git entry must be refused")
 	}
 	if out, _ := exec.Command("git", "-C", host, "show-ref", ref).Output(); len(out) != 0 {
@@ -102,10 +102,10 @@ func TestImportRejectsUnexpectedRefs(t *testing.T) {
 	git(t, vm.Dir, "tag", "sneaky")
 	b := filepath.Join(t.TempDir(), "x.bundle")
 	git(t, vm.Dir, "bundle", "create", "-q", b, "refs/heads/main", "refs/tags/sneaky", "^"+git(t, host, "rev-parse", "HEAD"))
-	if err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
 		t.Error("a bundle carrying more than the named branch must be refused")
 	}
-	if err := ImportBundle(context.Background(), host, b, "other", QuarantineRef("proj", "other")); err == nil {
+	if _, err := ImportBundle(context.Background(), host, b, "other", QuarantineRef("proj", "other")); err == nil {
 		t.Error("a bundle for another branch must be refused")
 	}
 }
@@ -122,7 +122,7 @@ func TestImportAndPushRunNoHostHooks(t *testing.T) {
 	commitIn(t, vm.Dir, "b.txt", "b\n", "b")
 	b, _ := bundleFromVM(t, vm.Dir, "main", git(t, host, "rev-parse", "HEAD"))
 	ref := QuarantineRef("proj", "main")
-	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
 		t.Fatal(err)
 	}
 	if err := Push(context.Background(), host, remote, ref, "main", false, "", os.Stderr); err != nil {
@@ -146,7 +146,7 @@ func TestPushRefusesANonFastForwardWithoutLease(t *testing.T) {
 	commitIn(t, vm.Dir, "vm.txt", "v\n", "from the vm")
 	b, _ := bundleFromVM(t, vm.Dir, "main", git(t, host, "rev-parse", "HEAD"), git(t, host, "rev-parse", "HEAD~1"))
 	ref := QuarantineRef("proj", "main")
-	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
 		t.Fatal(err)
 	}
 	if err := Push(context.Background(), host, remote, ref, "main", false, "", os.Stderr); err == nil {
@@ -164,10 +164,10 @@ func TestReviewFlagsFilesThatRunOutsideTheVM(t *testing.T) {
 	commitIn(t, vm.Dir, "src/app.ts", "x\n", "code")
 	b, _ := bundleFromVM(t, vm.Dir, "main", base)
 	ref := QuarantineRef("proj", "main")
-	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
 		t.Fatal(err)
 	}
-	r, err := Review(context.Background(), host, ref, base)
+	r, err := Review(context.Background(), host, git(t, host, "rev-parse", ref), base, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestImportChecksObjectsEvenWhenTheRepoDisablesFsck(t *testing.T) {
 	c := git(t, vm.Dir, "commit-tree", tree, "-p", "HEAD", "-m", "dotdot")
 	git(t, vm.Dir, "update-ref", "refs/heads/main", c)
 	b, _ := bundleFromVM(t, vm.Dir, "main", git(t, host, "rev-parse", "HEAD"))
-	if err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
 		t.Fatal("objects must be checked whatever the repository's config says")
 	}
 }
@@ -235,7 +235,7 @@ func TestImportRefusesMissingPrerequisites(t *testing.T) {
 	// A bundle that assumes the host has a commit it does not.
 	b := filepath.Join(t.TempDir(), "x.bundle")
 	git(t, vm.Dir, "bundle", "create", "-q", b, "refs/heads/main", "^"+mid)
-	if err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main")); err == nil {
 		t.Error("a bundle whose prerequisites the host lacks must be refused")
 	}
 }
@@ -250,7 +250,7 @@ func TestPushLeaseAgainstAnExpectedCommit(t *testing.T) {
 	git(t, vm.Dir, "commit", "-q", "--amend", "-m", "rewritten")
 	b, _ := bundleFromVM(t, vm.Dir, "main", git(t, host, "rev-parse", "HEAD~1"))
 	ref := QuarantineRef("proj", "main")
-	if err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
+	if _, err := ImportBundle(context.Background(), host, b, "main", ref); err != nil {
 		t.Fatal(err)
 	}
 	if err := Push(context.Background(), host, remote, ref, "main", true, strings.Repeat("0", 39)+"1", os.Stderr); err == nil {
@@ -261,5 +261,83 @@ func TestPushLeaseAgainstAnExpectedCommit(t *testing.T) {
 	}
 	if git(t, remote, "rev-parse", "main") != git(t, vm.Dir, "rev-parse", "HEAD") {
 		t.Error("remote not replaced")
+	}
+}
+
+func TestImportReturnsTheCheckedTip(t *testing.T) {
+	host, vm := vmRepo(t)
+	commitIn(t, vm.Dir, "a.txt", "a\n", "a")
+	b, _ := bundleFromVM(t, vm.Dir, "main", git(t, host, "rev-parse", "HEAD"))
+	tip, err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main"))
+	if err != nil || tip != git(t, vm.Dir, "rev-parse", "HEAD") {
+		t.Errorf("tip = %q, %v; want the bundle's commit", tip, err)
+	}
+}
+
+// Commit fields come from the VM. Separator characters in a subject or
+// author must not hide a commit from the review.
+func TestReviewShowsEveryCommitWhateverItsText(t *testing.T) {
+	host, vm := vmRepo(t)
+	base := git(t, host, "rev-parse", "HEAD")
+	commitIn(t, vm.Dir, "a.txt", "a\n", "visible")
+	write(t, vm.Dir, "b.txt", "b\n")
+	git(t, vm.Dir, "add", "b.txt")
+	git(t, vm.Dir, "-c", "user.name=x\x1fy\x1ez", "commit", "-qm", "hidden\x1e\x1fsubject")
+	b, _ := bundleFromVM(t, vm.Dir, "main", base)
+	tip, err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Review(context.Background(), host, tip, base, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Commits) != 2 {
+		t.Fatalf("review shows %d commits, the push carries 2", len(r.Commits))
+	}
+	for _, c := range r.Commits {
+		if !ValidCommitID(c.ID) {
+			t.Errorf("bad id %q", c.ID)
+		}
+	}
+}
+
+// With a lease, the push replaces the remote branch: the review must show
+// what it removes, not just what it adds.
+func TestReviewShowsWhatAForcedPushRemoves(t *testing.T) {
+	host, vm := vmRepo(t)
+	base := git(t, host, "rev-parse", "HEAD")
+	commitIn(t, host, ".github/workflows/guard.yml", "on: push\n", "B: add a CI guard")
+	dest := git(t, host, "rev-parse", "HEAD")
+	commitIn(t, vm.Dir, "c.txt", "c\n", "C")
+	b, _ := bundleFromVM(t, vm.Dir, "main", base)
+	tip, err := ImportBundle(context.Background(), host, b, "main", QuarantineRef("proj", "main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Review(context.Background(), host, tip, base, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Dropped) != 1 || r.Dropped[0].Subject != "B: add a CI guard" {
+		t.Errorf("dropped = %+v, want the remote's commit B", r.Dropped)
+	}
+	if len(r.Sensitive) != 1 || r.Sensitive[0] != ".github/workflows/guard.yml" {
+		t.Errorf("the removed workflow should be flagged: %v", r.Sensitive)
+	}
+	if !strings.Contains(r.Stat, "guard.yml") {
+		t.Errorf("the diffstat should be against the remote's tip:\n%s", r.Stat)
+	}
+}
+
+func TestSetBranchRunsNoHooks(t *testing.T) {
+	host, _ := repo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	write(t, host, ".git/hooks/reference-transaction", "#!/bin/sh\ntouch "+marker+"\n")
+	if err := SetBranch(context.Background(), host, "other2", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a host hook ran")
 	}
 }

@@ -235,6 +235,22 @@ func TestPushFromAClonedProject(t *testing.T) {
 	f.OnShell("git bundle create", "devkit-exit=0", 0)
 	f.OnShell("devkit-push-", string(data), 0)
 
+	// A push to another remote, such as a fork, must not move the cached
+	// origin branch.
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	gitIn(t, bare, "clone", "-q", "--bare", "--no-local", remote, fork)
+	gitIn(t, bare, "remote", "add", "fork", fork)
+	before := gitIn(t, bare, "rev-parse", "refs/heads/main")
+	if out, err := runDevkit(t, "", "push", "--yes", "--remote", "fork"); err != nil {
+		t.Fatalf("push to fork: %v\n%s", err, out)
+	}
+	if gitIn(t, fork, "rev-parse", "main") != gitIn(t, vm, "rev-parse", "HEAD") {
+		t.Error("the fork should have the VM's commit")
+	}
+	if gitIn(t, bare, "rev-parse", "refs/heads/main") != before {
+		t.Error("a push to a fork must leave the cached origin branch alone")
+	}
+
 	if out, err := runDevkit(t, "", "push", "--yes"); err != nil {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
@@ -291,5 +307,39 @@ func TestFailedHandOverKeepsTheMacsBranch(t *testing.T) {
 	}
 	if gitIn(t, bare, "rev-parse", "refs/heads/main") != before {
 		t.Error("the Mac's branch must stay where the VM is, so the next sync retries")
+	}
+}
+
+// An upstream branch that moved back has no new commits to bundle. Sync
+// must record the move, not fail on an empty bundle forever after.
+func TestSyncAfterUpstreamRewinds(t *testing.T) {
+	f, _ := fakeHome(t)
+	dir, upstream := clonedProject(t)
+	cfg, err := project.Load(filepath.Join(dir, "devkit.yaml"))
+	must(t, err)
+	bare := filepath.Join(dir, project.LockDir, "repo.git")
+	start := gitIn(t, upstream, "rev-parse", "HEAD")
+	must(t, os.WriteFile(filepath.Join(upstream, "later.txt"), []byte("l\n"), 0o644))
+	gitIn(t, upstream, "add", ".")
+	gitIn(t, upstream, "commit", "-qm", "later")
+	f.SetInstances(fakelima.Instance{Name: cfg.VMName(), Status: "Running"})
+	f.OnShell(`/.git" && echo yes`, "yes", 0)
+	if out, err := runDevkit(t, "", "sync"); err != nil {
+		t.Fatalf("first sync: %v\n%s", err, out)
+	}
+	gitIn(t, upstream, "reset", "-q", "--hard", start)
+	f.Reset()
+	if out, err := runDevkit(t, "", "sync"); err != nil {
+		t.Fatalf("sync after a rewind: %v\n%s", err, out)
+	}
+	calls := f.Calls()
+	if hasVerb(calls, "copy") {
+		t.Error("a rewind has no commits to send")
+	}
+	if !mentions(calls, "update-ref refs/remotes/origin/main "+start) {
+		t.Error("the VM's origin/main should move back")
+	}
+	if gitIn(t, bare, "rev-parse", "refs/heads/main") != start {
+		t.Error("the Mac's copy should record the rewind")
 	}
 }
