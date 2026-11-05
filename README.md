@@ -222,6 +222,7 @@ tools:
   packages: [pkg-config]  # extra apt packages
 
 # install: make deps    # replaces the lockfile-based install devkit picks
+# services: [postgres]  # PostgreSQL 16 in the VM, no Docker; see Services
 
 vm:
   cpus: 4
@@ -341,6 +342,31 @@ nothing else: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install
 --frozen`, `bundle install`, and so on. Set `install:` when the guess is wrong.
 A Node project without a lockfile gets `npm install` and a reminder to commit
 the result.
+
+**Services** run databases inside the VM without a container engine and
+without anything on your Mac. `services: [postgres]` gives Ubuntu's
+PostgreSQL 16 with a role and database `dev`, password `dev`, on port 5432:
+`postgres://dev:dev@127.0.0.1:5432/dev`. Set any of them per project:
+
+```yaml
+services:
+  postgres:
+    port: 5433
+    user: vaults
+    password: password
+    database: vaults
+```
+
+Root installs the package at provisioning and tells Ubuntu not to create a
+cluster of its own. The cluster belongs to the sandbox user, lives in
+`~/.local/share/devkit/postgres`, and runs as a systemd user unit that starts
+at boot. It listens only on the VM's 127.0.0.1, so nothing outside the VM can
+reach it unless you add the port to `network.forward`, and it makes no
+connections of its own. The sandbox user administers it over a local socket
+(`psql -h $XDG_RUNTIME_DIR -p 5433 -d postgres`); the app logs in over TCP as
+the role above. The password is for development inside the VM: the only
+thing that can reach the port is the sandbox itself. Remove the service from
+`devkit.yaml` and the next `devkit up` stops it and keeps the data.
 
 **Containers** are opt-in. With `containers: true` the VM gets rootless
 containerd and `nerdctl` for databases and services.
