@@ -105,6 +105,24 @@ func TestPostgresService(t *testing.T) {
 		}
 	})
 
+	t.Run("a user change never re-owns another database", func(t *testing.T) {
+		if _, err := s.shell(fmt.Sprintf("%s/psql -h $XDG_RUNTIME_DIR -p 5433 -d postgres -c 'CREATE DATABASE other OWNER vaults2'", pg)); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, cfgPath, strings.Replace(withPG, "user: vaults", "user: vaults3", 1))
+		if out, err := s.run("up", "--no-install"); err == nil || !strings.Contains(out, "also owns") {
+			t.Errorf("up should refuse and say why:\n%s", out)
+		}
+		got, _ := s.shell(fmt.Sprintf("%s/psql -h $XDG_RUNTIME_DIR -p 5433 -d postgres -tAc \"SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'other'\"", pg))
+		if strings.TrimSpace(got) != "vaults2" {
+			t.Errorf("the other database's owner changed: %q", got)
+		}
+		got, _ = s.shell(fmt.Sprintf("%s/psql -h $XDG_RUNTIME_DIR -p 5433 -d postgres -tAc \"SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'vaults'\"", pg))
+		if strings.TrimSpace(got) != "vaults2" {
+			t.Errorf("a refused change must leave the configured database alone too: %q", got)
+		}
+	})
+
 	t.Run("removing the service stops it and keeps the data", func(t *testing.T) {
 		writeFile(t, cfgPath, string(cfg))
 		s.mustRun("up", "--no-install")

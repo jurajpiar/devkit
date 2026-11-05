@@ -36,6 +36,10 @@ func TestPostgresScript(t *testing.T) {
 		// in it end up owned by the configured role.
 		`ALTER DATABASE "vaults" OWNER TO "vaults"`,
 		`REASSIGN OWNED BY "$old" TO "vaults"`,
+		// REASSIGN also moves shared objects; refuse when the old role owns
+		// any outside this database rather than re-own them silently.
+		"FROM pg_database WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = '$old') AND datname <> 'vaults'",
+		"FROM pg_tablespace WHERE spcowner = (SELECT oid FROM pg_roles WHERE rolname = '$old')",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script missing %q", want)
