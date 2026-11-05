@@ -44,6 +44,14 @@ func Scan(dir string) []Ecosystem {
 			Hosts: []string{"registry.npmjs.org", "registry.yarnpkg.com", "nodejs.org"},
 		})
 	}
+	if exists("package.json") && usesBun(dir, exists) {
+		// Bun sits beside node, not instead of it: tools such as vite and
+		// vitest still start through node shebangs.
+		out = append(out, Ecosystem{
+			Name: "bun", Tool: "bun", Version: bunVersion(dir),
+			Hosts: []string{"registry.npmjs.org"},
+		})
+	}
 	if exists("go.mod") {
 		out = append(out, Ecosystem{
 			Name: "go", Tool: "go", Version: goVersion(dir),
@@ -151,6 +159,47 @@ func nodeVersion(dir string) string {
 		}
 	}
 	return "22"
+}
+
+// packageJSON holds the package.json fields detection reads.
+type packageJSON struct {
+	PackageManager string `json:"packageManager"`
+	Engines        struct {
+		Bun string `json:"bun"`
+	} `json:"engines"`
+}
+
+func readPackageJSON(dir string) packageJSON {
+	var pkg packageJSON
+	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		_ = json.Unmarshal(data, &pkg)
+	}
+	return pkg
+}
+
+// usesBun reports a Bun project: a Bun lockfile, a .bun-version, or
+// packageManager naming bun.
+func usesBun(dir string, exists func(...string) bool) bool {
+	return exists("bun.lock", "bun.lockb", ".bun-version") ||
+		strings.HasPrefix(readPackageJSON(dir).PackageManager, "bun@")
+}
+
+// bunVersion reads .bun-version, then packageManager ("bun@1.4.4", with or
+// without corepack's "+sha512..." suffix), then engines.bun, else latest.
+// Only a leading dotted number is kept, so another manager's "pnpm@9" or a
+// crafted value never reaches devkit.yaml.
+func bunVersion(dir string) string {
+	pkg := readPackageJSON(dir)
+	for _, s := range []string{
+		firstLine(dir, ".bun-version", ""),
+		strings.TrimPrefix(pkg.PackageManager, "bun@"),
+		strings.TrimLeft(pkg.Engines.Bun, "^~>=< "),
+	} {
+		if v := leadingVersion.FindStringSubmatch(strings.TrimSpace(s)); v != nil {
+			return v[1]
+		}
+	}
+	return "latest"
 }
 
 // goVersion returns major.minor from the go directive in go.mod.

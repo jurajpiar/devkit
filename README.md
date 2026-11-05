@@ -267,6 +267,9 @@ containerd and `nerdctl` for databases and services.
 picks `mise` unless `--toolchain` or `DEVKIT_TOOLCHAIN` says otherwise, and
 seeds versions from the files it finds: `.nvmrc`, `engines.node`, `go.mod`,
 `rust-toolchain.toml`, `.python-version`, `.ruby-version`, `.java-version`.
+A Bun project, one with `bun.lock`, `.bun-version` or `packageManager:
+"bun@..."`, gets Bun beside Node, and its dependencies install with
+`bun install --frozen-lockfile`.
 
 | | `mise` | `nix` | `none` |
 |---|---|---|---|

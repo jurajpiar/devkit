@@ -95,3 +95,53 @@ func TestScanPolyglot(t *testing.T) {
 		t.Errorf("pkg-config should be listed once, got %d in %v", count, pk)
 	}
 }
+
+func TestScanBun(t *testing.T) {
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{"packageManager", map[string]string{"package.json": `{"packageManager":"bun@1.4.4"}`}, "1.4.4"},
+		{"packageManager with corepack hash", map[string]string{"package.json": `{"packageManager":"bun@1.4.4+sha512.abc"}`}, "1.4.4"},
+		{".bun-version wins", map[string]string{"package.json": `{"packageManager":"bun@1.4.4"}`, ".bun-version": "1.3.2\n"}, "1.3.2"},
+		{"engines.bun", map[string]string{"package.json": `{"engines":{"bun":">=1.4.0"}}`, "bun.lock": "{}"}, "1.4.0"},
+		{"lockfile only", map[string]string{"package.json": `{}`, "bun.lock": "{}"}, "latest"},
+		{"legacy binary lockfile", map[string]string{"package.json": `{}`, "bun.lockb": ""}, "latest"},
+		{"hostile version is not copied", map[string]string{"package.json": `{"packageManager":"bun@$(id)"}`}, "latest"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for n, body := range c.files {
+				write(t, dir, n, body)
+			}
+			ecos := Scan(dir)
+			v := Versions(ecos)
+			if v["bun"] != c.want {
+				t.Errorf("bun = %q, want %q", v["bun"], c.want)
+			}
+			// Bun projects still run tools that expect node (vitest, vite's
+			// bin scripts), and bun install uses the npm registry.
+			if v["node"] == "" {
+				t.Error("node should still be detected beside bun")
+			}
+			hosts := map[string]bool{}
+			for _, h := range Hosts(ecos) {
+				hosts[h] = true
+			}
+			if !hosts["registry.npmjs.org"] {
+				t.Error("bun needs the npm registry")
+			}
+		})
+	}
+}
+
+func TestScanNoBunForPlainNode(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"packageManager":"pnpm@9.1.0"}`)
+	write(t, dir, "pnpm-lock.yaml", "")
+	if _, ok := Versions(Scan(dir))["bun"]; ok {
+		t.Error("a pnpm project must not get bun")
+	}
+}
