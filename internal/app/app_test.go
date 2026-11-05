@@ -199,6 +199,7 @@ func TestInstallScript(t *testing.T) {
 		`cd "$HOME/workspace" 2>/dev/null || exit 0`,
 		"pnpm install --frozen-lockfile", "yarn install --frozen-lockfile", "npm ci",
 		"go mod download", "cargo fetch --locked", "uv sync --frozen", "bundle install",
+		"bun install --frozen-lockfile",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("install script missing %q", want)
@@ -239,10 +240,10 @@ func TestShellScript(t *testing.T) {
 }
 
 func TestRenderFlake(t *testing.T) {
-	f := renderFlake(map[string]string{"node": "22", "go": "1.27", "python": "3.12", "ruby": "3.3.6", "java": "21", "rust": "latest"})
+	f := renderFlake(map[string]string{"bun": "1.4.4", "node": "22", "go": "1.27", "python": "3.12", "ruby": "3.3.6", "java": "21", "rust": "latest"})
 	for _, want := range []string{
 		`inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"`,
-		"packages = with pkgs; [ go_1_27 jdk21 nodejs_22 python312 ruby_3_3 cargo rustc rustfmt clippy ];",
+		"packages = with pkgs; [ bun go_1_27 jdk21 nodejs_22 python312 ruby_3_3 cargo rustc rustfmt clippy ];",
 		`"aarch64-linux" "x86_64-linux"`,
 	} {
 		if !strings.Contains(f, want) {

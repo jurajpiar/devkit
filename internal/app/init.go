@@ -239,6 +239,8 @@ func nixAttrs(tool, version string) []string {
 		return []string{"jdk" + major}
 	case "rust":
 		return []string{"cargo", "rustc", "rustfmt", "clippy"}
+	case "bun":
+		return []string{"bun"}
 	}
 	return nil
 }

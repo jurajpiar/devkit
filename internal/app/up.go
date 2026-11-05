@@ -301,7 +301,9 @@ func installScript(cfg *project.Config) string {
 const genericInstall = `if [ -f package.json ]; then
   if   [ -f pnpm-lock.yaml ]; then command -v pnpm >/dev/null || corepack enable; pnpm install --frozen-lockfile
   elif [ -f yarn.lock ];      then command -v yarn >/dev/null || corepack enable; yarn install --frozen-lockfile
-  elif [ -f bun.lockb ] || [ -f bun.lock ]; then echo "bun lockfile found but bun is not installed; skipping"
+  elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+    if command -v bun >/dev/null; then bun install --frozen-lockfile
+    else echo "bun lockfile found but bun is not installed (add bun to tools.versions); skipping"; fi
   elif [ -f package-lock.json ]; then npm ci
   else echo "no lockfile; running npm install (commit the lockfile it writes)"; npm install; fi
 elif [ -f go.sum ];           then go mod download
