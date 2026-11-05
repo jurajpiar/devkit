@@ -35,8 +35,8 @@ func allowLocalClones(t *testing.T) {
 		return cmd.Run()
 	}
 	oldF := fetchUpstream
-	fetchUpstream = func(ctx context.Context, repo, branch string, out io.Writer) error {
-		cmd := exec.CommandContext(ctx, "git", "-C", repo, "fetch", "-q", "--no-tags", "origin", "+refs/heads/"+branch+":refs/heads/"+branch)
+	fetchUpstream = func(ctx context.Context, repo, branch, ref string, out io.Writer) error {
+		cmd := exec.CommandContext(ctx, "git", "-C", repo, "fetch", "-q", "--no-tags", "origin", "+refs/heads/"+branch+":"+ref)
 		cmd.Stdout, cmd.Stderr = out, out
 		return cmd.Run()
 	}
@@ -110,14 +110,19 @@ func TestRootTakesARepositoryURL(t *testing.T) {
 	parent := t.TempDir()
 	inDir(t, parent)
 	up := upstreamRepo(t)
-	if out, err := runDevkit(t, "", "file://"+up); err != nil {
+	if out, err := runDevkit(t, "", "file://"+up, "--branch", "main", "--network", "open"); err != nil {
 		t.Fatalf("devkit <url>: %v\n%s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(parent, filepath.Base(up), "devkit.yaml")); err != nil {
 		t.Errorf("devkit <url> should clone into the repository's name: %v", err)
 	}
-	if _, err := runDevkit(t, "", "upp"); err == nil || !strings.Contains(err.Error(), "unknown command") {
-		t.Errorf("a typo should still be an unknown command, got %v", err)
+	cfg, err := project.Load(filepath.Join(parent, filepath.Base(up), "devkit.yaml"))
+	if err != nil || cfg.Network.Mode != project.NetworkOpen {
+		t.Errorf("flags given to devkit <url> should apply: %v %+v", err, cfg)
+	}
+	_, err = runDevkit(t, "", "upp")
+	if err == nil || !strings.Contains(err.Error(), "unknown command") || !strings.Contains(err.Error(), "did you mean up") {
+		t.Errorf("a typo should still be an unknown command with suggestions, got %v", err)
 	}
 }
 
@@ -239,5 +244,52 @@ func TestPushFromAClonedProject(t *testing.T) {
 	}
 	if gitIn(t, bare, "rev-parse", "refs/heads/main") != want {
 		t.Error("the host copy should record what was pushed, so the next review starts there")
+	}
+}
+
+func TestUpstreamScriptMovesOnlyTheConfiguredBranch(t *testing.T) {
+	up := upstreamRepo(t)
+	base := gitIn(t, up, "rev-parse", "HEAD")
+	vm := t.TempDir()
+	gitIn(t, vm, "clone", "-q", "--no-local", up, ".")
+	gitIn(t, vm, "switch", "-q", "-c", "feature")
+	must(t, os.WriteFile(filepath.Join(up, "new.txt"), []byte("n\n"), 0o644))
+	gitIn(t, up, "add", ".")
+	gitIn(t, up, "commit", "-qm", "upstream moved")
+	gitIn(t, up, "update-ref", "refs/devkit/upstream/main", "HEAD")
+	b := filepath.Join(t.TempDir(), "u.bundle")
+	gitIn(t, up, "bundle", "create", "-q", b, "refs/devkit/upstream/main", "^"+base)
+	cmd := exec.Command("bash", "-c", upstreamScript("$HOME/"+filepath.Base(vm), b, "main"))
+	cmd.Env = append(os.Environ(), "HOME="+filepath.Dir(vm))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if gitIn(t, vm, "rev-parse", "feature") != base {
+		t.Error("the checked-out feature branch must not move")
+	}
+	if gitIn(t, vm, "rev-parse", "main") != gitIn(t, up, "rev-parse", "HEAD") {
+		t.Errorf("main should fast-forward to origin/main:\n%s", out)
+	}
+}
+
+func TestFailedHandOverKeepsTheMacsBranch(t *testing.T) {
+	f, _ := fakeHome(t)
+	dir, upstream := clonedProject(t)
+	cfg, err := project.Load(filepath.Join(dir, "devkit.yaml"))
+	must(t, err)
+	bare := filepath.Join(dir, project.LockDir, "repo.git")
+	before := gitIn(t, bare, "rev-parse", "refs/heads/main")
+	must(t, os.WriteFile(filepath.Join(upstream, "later.txt"), []byte("l\n"), 0o644))
+	gitIn(t, upstream, "add", ".")
+	gitIn(t, upstream, "commit", "-qm", "later")
+	f.SetInstances(fakelima.Instance{Name: cfg.VMName(), Status: "Running"})
+	f.OnShell(`/.git" && echo yes`, "yes", 0)
+	f.OnShell("refs/remotes/origin/main", "could not apply", 1)
+	if _, err := runDevkit(t, "", "sync"); err == nil {
+		t.Fatal("a failed hand-over should fail sync")
+	}
+	if gitIn(t, bare, "rev-parse", "refs/heads/main") != before {
+		t.Error("the Mac's branch must stay where the VM is, so the next sync retries")
 	}
 }

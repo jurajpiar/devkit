@@ -41,25 +41,37 @@ git:// is rewritten to https://. Also available as 'devkit <url>'.`,
 
 func init() {
 	rootCmd.AddCommand(cloneCmd)
-	cloneCmd.Flags().String("branch", "", "branch to clone (default: the remote's default branch)")
-	cloneCmd.Flags().String("name", "", "project name (default: repository name)")
-	cloneCmd.Flags().String("node", "", "Node.js major version to install (default: detected, or 22)")
-	cloneCmd.Flags().String("toolchain", envOr("DEVKIT_TOOLCHAIN", project.ManagerMise), "toolchain manager: mise, nix or none")
-	cloneCmd.Flags().String("network", project.NetworkAllowlist, "network mode: allowlist, open or none")
+	addCloneFlags(cloneCmd)
 
-	// "devkit <url>" is "devkit clone <url>"; anything else is still an
-	// unknown command.
+	// "devkit <url>" is "devkit clone <url>", with the same flags (hidden
+	// from the root's help); anything else is still an unknown command.
+	addCloneFlags(rootCmd)
+	for _, f := range []string{"branch", "name", "node", "toolchain", "network"} {
+		_ = rootCmd.Flags().MarkHidden(f)
+	}
 	rootCmd.Args = cobra.ArbitraryArgs
+	rootCmd.SuggestionsMinimumDistance = 2
 	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return cmd.Help()
 		}
 		if _, _, err := normalizeCloneURL(args[0]); err == nil && len(args) <= 2 {
-			cloneCmd.SetContext(cmd.Context())
-			return runClone(cloneCmd, args)
+			return runClone(cmd, args)
 		}
-		return fmt.Errorf("unknown command %q for \"devkit\"; run 'devkit --help'", args[0])
+		msg := fmt.Sprintf("unknown command %q for \"devkit\"", args[0])
+		if s := cmd.SuggestionsFor(args[0]); len(s) > 0 {
+			msg += "; did you mean " + strings.Join(s, ", ") + "?"
+		}
+		return fmt.Errorf("%s (run 'devkit --help')", msg)
 	}
+}
+
+func addCloneFlags(c *cobra.Command) {
+	c.Flags().String("branch", "", "branch to clone (default: the remote's default branch)")
+	c.Flags().String("name", "", "project name (default: repository name)")
+	c.Flags().String("node", "", "Node.js major version to install (default: detected, or 22)")
+	c.Flags().String("toolchain", envOr("DEVKIT_TOOLCHAIN", project.ManagerMise), "toolchain manager: mise, nix or none")
+	c.Flags().String("network", project.NetworkAllowlist, "network mode: allowlist, open or none")
 }
 
 // bareRepo is where devkit clone keeps the host's copy of a repository.
@@ -135,27 +147,29 @@ func runClone(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// syncUpstream fetches new commits of the configured branch into the host's
-// bare copy and hands them to the VM as a bundle, which the VM fetches into
-// origin/<branch> and fast-forwards to when it can. The VM never talks to
-// the remote.
+// syncUpstream fetches new commits of the configured branch on the Mac and
+// hands them to the VM as a bundle, which the VM fetches into
+// origin/<branch>; the VM never talks to the remote. The Mac fetches into a
+// staging ref and moves its own branch only once the VM has the commits, so
+// a failed hand-over is retried by the next sync.
 func syncUpstream(ctx context.Context, cfg *project.Config, dir, ws string) error {
 	repo := bareRepo(dir)
-	ref := "refs/heads/" + cfg.Branch
-	old, err := gitx.RevParse(ctx, repo, ref)
+	b := cfg.Branch
+	staging := "refs/devkit/upstream/" + b
+	old, err := gitx.RevParse(ctx, repo, "refs/heads/"+b)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Fetching %s on your Mac\n", cfg.Branch)
-	if err := fetchUpstream(ctx, repo, cfg.Branch, os.Stderr); err != nil {
+	fmt.Printf("Fetching %s on your Mac\n", b)
+	if err := fetchUpstream(ctx, repo, b, staging, os.Stderr); err != nil {
 		return err
 	}
-	cur, err := gitx.RevParse(ctx, repo, ref)
+	cur, err := gitx.RevParse(ctx, repo, staging)
 	if err != nil {
 		return err
 	}
 	if cur == old {
-		fmt.Printf("Up to date with origin/%s\n", cfg.Branch)
+		fmt.Printf("Up to date with origin/%s\n", b)
 		return nil
 	}
 	tmp, err := os.MkdirTemp("", "devkit-sync-")
@@ -164,7 +178,7 @@ func syncUpstream(ctx context.Context, cfg *project.Config, dir, ws string) erro
 	}
 	defer os.RemoveAll(tmp)
 	local := filepath.Join(tmp, "upstream.bundle")
-	if err := gitx.BundleRange(ctx, repo, ref, old, local); err != nil {
+	if err := gitx.BundleRange(ctx, repo, staging, old, local); err != nil {
 		return err
 	}
 	name := cfg.VMName()
@@ -172,13 +186,30 @@ func syncUpstream(ctx context.Context, cfg *project.Config, dir, ws string) erro
 	if err := lima.CopyTo(ctx, name, local, guest); err != nil {
 		return err
 	}
-	b := cfg.Branch
-	script := fmt.Sprintf(`cd "%s" || exit 1
-git fetch -q %s +refs/heads/%s:refs/remotes/origin/%s; st=$?
+	if err := lima.ExecStream(ctx, name, upstreamScript(ws, guest, b)); err != nil {
+		return fmt.Errorf("the VM did not take the new commits; the next devkit sync retries: %w", err)
+	}
+	return gitx.SetBranch(ctx, repo, b, staging)
+}
+
+// upstreamScript is what the VM runs to take a sync bundle: fetch it into
+// origin/<branch>, then fast-forward <branch> and nothing else. ws is a
+// devkit constant expanded in double quotes; b passed ValidBranch.
+func upstreamScript(ws, guest, b string) string {
+	src := shellQuote("+refs/devkit/upstream/" + b + ":refs/remotes/origin/" + b)
+	qb := shellQuote(b)
+	return fmt.Sprintf(`cd "%s" || exit 1
+git fetch -q %s %s; st=$?
 rm -f %s
-[ $st -eq 0 ] || { echo "could not apply the new commits; the VM's history may have diverged from origin/%s"; exit 1; }
-if git merge --ff-only -q origin/%s 2>/dev/null; then echo "Fast-forwarded to origin/%s"
-else echo "Fetched origin/%s; your branch has diverged or has local changes, merge or rebase it yourself"; fi`,
-		ws, shellQuote(guest), b, b, shellQuote(guest), b, b, b, b)
-	return lima.ExecStream(ctx, name, script)
+[ $st -eq 0 ] || { echo "could not apply the new commits"; exit 1; }
+cur="$(git symbolic-ref --short -q HEAD)"
+if [ "$cur" = %s ]; then
+  if git merge --ff-only -q origin/%s 2>/dev/null; then echo "Fast-forwarded %s to origin/%s"
+  else echo "Fetched origin/%s; %s has diverged or has local changes, merge or rebase it yourself"; fi
+elif git fetch -q . refs/remotes/origin/%s:refs/heads/%s 2>/dev/null; then
+  echo "Fast-forwarded %s to origin/%s; you are on $cur, which is unchanged"
+else
+  echo "Fetched origin/%s; %s has diverged, merge it yourself"
+fi
+`, ws, shellQuote(guest), src, shellQuote(guest), qb, b, b, b, b, b, b, b, b, b, b, b)
 }
