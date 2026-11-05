@@ -12,6 +12,8 @@ import (
 	"github.com/jurajpiar/devkit/internal/fakelima"
 	"github.com/jurajpiar/devkit/internal/lima"
 	"github.com/jurajpiar/devkit/internal/project"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // These tests run devkit's commands against a fake limactl (see
@@ -45,11 +47,23 @@ func runDevkit(t *testing.T, stdin string, args ...string) (string, error) {
 	rootCmd.SetArgs(args)
 	defer func() {
 		rootCmd.SetArgs(nil)
-		_ = rmCmd.Flags().Set("force", "false")
-		_ = rootCmd.PersistentFlags().Set("config", "devkit.yaml")
+		resetFlags(rootCmd)
 	}()
 	err := rootCmd.Execute()
 	return out.String(), err
+}
+
+// resetFlags returns every flag of c and its subcommands to its default.
+func resetFlags(c *cobra.Command) {
+	reset := func(f *pflag.Flag) {
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	}
+	c.Flags().VisitAll(reset)
+	c.PersistentFlags().VisitAll(reset)
+	for _, sub := range c.Commands() {
+		resetFlags(sub)
+	}
 }
 
 func hasCall(calls [][]string, want ...string) bool {

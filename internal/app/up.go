@@ -213,8 +213,13 @@ func syncSource(ctx context.Context, cfg *project.Config, cwd string) error {
 		if err := lima.PipeTar(ctx, name, cwd, ws, cfg.Exclude); err != nil {
 			return err
 		}
-		return syncGit(ctx, name, cwd, ws, cfg.Exclude)
+		return syncGit(ctx, name, cwd, ws, false, cfg.Exclude)
 	case project.SourceGit:
+		if isDir(bareRepo(cwd)) {
+			return syncGit(ctx, name, bareRepo(cwd), ws, true, nil)
+		}
+		// A devkit.yaml written by "devkit init <url>" before devkit clone:
+		// the VM clones a public repository itself, through the proxy.
 		out, _ := lima.Exec(ctx, name, fmt.Sprintf("test -d %s/.git && echo yes", ws))
 		if strings.TrimSpace(out) == "yes" {
 			fmt.Println("Repository already cloned; run 'devkit sync' to pull")
