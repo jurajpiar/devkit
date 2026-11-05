@@ -124,3 +124,32 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// An oversized marker still marks the ecosystem: its existence is kept as
+// an empty file, its content is not read.
+func TestExtractFilesKeepsOversizedMarkersAsEmpty(t *testing.T) {
+	upstream, _ := repo(t)
+	commitIn(t, upstream, "bun.lock", strings.Repeat("x", maxMarker+1), "big lockfile")
+	dst := t.TempDir()
+	if err := ExtractFiles(context.Background(), upstream, "HEAD", []string{"bun.lock"}, dst); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(dst, "bun.lock"))
+	if err != nil || st.Size() != 0 {
+		t.Errorf("want an empty placeholder: %v %v", st, err)
+	}
+}
+
+func TestSnapshotOfASHA256Repository(t *testing.T) {
+	src := t.TempDir()
+	git(t, src, "init", "-q", "--object-format=sha256", "-b", "main")
+	commitIn(t, src, "a.txt", "a\n", "one")
+	s, err := TakeSnapshot(context.Background(), src)
+	if err != nil || s == nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	defer s.Close()
+	if git(t, s.Dir, "rev-parse", "HEAD") != git(t, src, "rev-parse", "HEAD") {
+		t.Error("the snapshot should hold the SHA-256 commit")
+	}
+}

@@ -141,15 +141,25 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	ref := gitx.QuarantineRef(cfg.Name, branch)
-	if err := gitx.ImportBundle(ctx, cwd, local, branch, ref); err != nil {
-		return err
-	}
-	base := gitx.ReviewBase(ctx, cwd, ref, remote, to)
-	r, err := gitx.Review(ctx, cwd, ref, base)
+	// From here on everything uses tip, the commit that was checked: ref
+	// is shared, and another devkit push could move it.
+	tip, err := gitx.ImportBundle(ctx, cwd, local, branch, ref)
 	if err != nil {
 		return err
 	}
-	if len(r.Commits) == 0 {
+	// In a bare copy, refs/heads/<to> mirrors origin only; another remote
+	// has no record there.
+	tracksOrigin := bare && remote == "origin"
+	dest, _ := gitx.RevParse(ctx, cwd, "refs/remotes/"+remote+"/"+to)
+	if tracksOrigin {
+		dest, _ = gitx.RevParse(ctx, cwd, "refs/heads/"+to)
+	}
+	base := gitx.ReviewBase(ctx, cwd, tip, remote, to)
+	r, err := gitx.Review(ctx, cwd, tip, base, dest)
+	if err != nil {
+		return err
+	}
+	if len(r.Commits) == 0 && len(r.Dropped) == 0 {
 		fmt.Printf("Nothing to push: %s adds no commits to %s/%s\n", branch, remote, to)
 		return nil
 	}
@@ -161,17 +171,17 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 	lease, _ := cmd.Flags().GetBool("force-with-lease")
 	expect := ""
-	if lease && bare {
+	if lease && tracksOrigin {
 		// No remote-tracking refs in a bare copy: lease on what it holds.
-		expect, _ = gitx.RevParse(ctx, cwd, "refs/heads/"+to)
+		expect = dest
 	}
-	if err := gitx.Push(ctx, cwd, remote, ref, to, lease, expect, os.Stdout); err != nil {
+	if err := gitx.Push(ctx, cwd, remote, tip, to, lease, expect, os.Stdout); err != nil {
 		return err
 	}
-	if bare {
-		// The bare copy stands in for the remote: record what it now has,
-		// so the next push and sync start from here.
-		if err := gitx.SetBranch(ctx, cwd, to, ref); err != nil {
+	if tracksOrigin {
+		// The bare copy stands in for origin: record what it now has, so
+		// the next push and sync start from here.
+		if err := gitx.SetBranch(ctx, cwd, to, tip); err != nil {
 			return err
 		}
 	}
@@ -193,6 +203,12 @@ func printReview(ctx context.Context, cwd string, r *gitx.ReviewSummary, ref, re
 		if me != "" && c.Email != me {
 			fmt.Printf("\nNote: some commits name an author other than %s. Authorship in a commit is whatever the VM wrote.\n", me)
 			break
+		}
+	}
+	if len(r.Dropped) > 0 {
+		fmt.Printf("\nThe remote %s has commits this push does not contain. With --force-with-lease they are removed; without it git refuses:\n", to)
+		for _, c := range r.Dropped {
+			fmt.Printf("  %s %s <%s>  %s\n", c.ID[:12], reviewable(c.Author), reviewable(c.Email), reviewable(c.Subject))
 		}
 	}
 	fmt.Printf("\n%s\n", reviewable(r.Stat))

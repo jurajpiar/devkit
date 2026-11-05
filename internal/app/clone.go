@@ -172,6 +172,18 @@ func syncUpstream(ctx context.Context, cfg *project.Config, dir, ws string) erro
 		fmt.Printf("Up to date with origin/%s\n", b)
 		return nil
 	}
+	name := cfg.VMName()
+	if gitx.IsAncestor(ctx, repo, cur, old) {
+		// Upstream moved back: no new commits, only origin/<branch> moves.
+		// The VM's own branch is left alone.
+		script := fmt.Sprintf(`cd "%s" || exit 1
+git cat-file -e %s^{commit} 2>/dev/null || { echo "origin/%s moved back to a commit this VM does not have"; exit 1; }
+git update-ref refs/remotes/origin/%s %s && echo "origin/%s moved back upstream; your branches are unchanged"`, ws, cur, b, b, cur, b)
+		if err := lima.ExecStream(ctx, name, script); err != nil {
+			return err
+		}
+		return gitx.SetBranch(ctx, repo, b, cur)
+	}
 	tmp, err := os.MkdirTemp("", "devkit-sync-")
 	if err != nil {
 		return err
@@ -181,7 +193,6 @@ func syncUpstream(ctx context.Context, cfg *project.Config, dir, ws string) erro
 	if err := gitx.BundleRange(ctx, repo, staging, old, local); err != nil {
 		return err
 	}
-	name := cfg.VMName()
 	guest := "/tmp/devkit-sync-" + randHex() + ".bundle"
 	if err := lima.CopyTo(ctx, name, local, guest); err != nil {
 		return err
