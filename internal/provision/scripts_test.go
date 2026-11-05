@@ -25,7 +25,16 @@ func TestRenderedScriptsParse(t *testing.T) {
 	for _, mode := range []string{project.NetworkAllowlist, project.NetworkOpen, project.NetworkNone} {
 		for _, mgr := range []string{project.ManagerMise, project.ManagerNix, project.ManagerNone} {
 			for _, src := range []string{project.SourceCopy, project.SourceMount} {
-				p := params(func(c *project.Config) { c.Network.Mode = mode; c.Tools.Manager = mgr; c.Source = src })
+				p := params(func(c *project.Config) {
+					c.Network.Mode = mode
+					c.Tools.Manager = mgr
+					c.Source = src
+					// One manager's variants also carry a service, so its
+					// rendering is checked in every network mode.
+					if mgr == project.ManagerNone {
+						c.Services.Postgres = &project.Postgres{Port: 5433, User: "u", Password: "p", Database: "d"}
+					}
+				})
 				for kind, render := range map[string]func(Params) (string, error){"system": System, "user": User} {
 					s, err := render(p)
 					if err != nil {

@@ -338,7 +338,18 @@ rm -f /etc/profile.d/devkit-nix.sh
 
 # ---- extra packages (re-run only when the list changes) ----
 step "checking extra packages"
-WANT_PKGS="{{join .Config.Tools.Packages " "}}"
+WANT_PKGS="{{join .Config.AptPackages " "}}"
+{{- if .Config.Services.Postgres}}
+# services: postgres runs a cluster the sandbox user owns. Ubuntu's packaging
+# would also create and start one of its own, as the postgres account; tell
+# it not to, and stop one left by an earlier install.
+install -d -m 755 /etc/postgresql-common
+cat > /etc/postgresql-common/createcluster.conf <<'EOF'
+# Written by devkit: the sandbox user runs its own cluster.
+create_main_cluster = false
+EOF
+systemctl disable --now postgresql >/dev/null 2>&1 || true
+{{- end}}
 if [ -n "$WANT_PKGS" ] && [ "$(cat /var/lib/devkit/.packages 2>/dev/null || true)" != "$WANT_PKGS" ]; then
   $APT update
   $APT install -y --no-install-recommends $WANT_PKGS
