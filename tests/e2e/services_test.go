@@ -95,6 +95,16 @@ func TestPostgresService(t *testing.T) {
 		}
 	})
 
+	t.Run("a changed user takes over the database and its tables", func(t *testing.T) {
+		writeFile(t, cfgPath, strings.Replace(withPG, "user: vaults", "user: vaults2", 1))
+		s.mustRun("up", "--no-install")
+		got, err := s.shell(fmt.Sprintf("PGPASSWORD=password %s/psql -h 127.0.0.1 -p 5433 -U vaults2 -d vaults -tAc %q", pg,
+			"SELECT tableowner FROM pg_tables WHERE tablename = 'survives'"))
+		if err != nil || strings.TrimSpace(got) != "vaults2" {
+			t.Errorf("the table should belong to the new user: %q %v", got, err)
+		}
+	})
+
 	t.Run("removing the service stops it and keeps the data", func(t *testing.T) {
 		writeFile(t, cfgPath, string(cfg))
 		s.mustRun("up", "--no-install")

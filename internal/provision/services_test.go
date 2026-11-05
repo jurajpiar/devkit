@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -37,5 +38,13 @@ func TestNoServicesLeavesTheScriptAsItWas(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(s), "postgres") {
 		t.Error("without services nothing about them may appear, or every existing VM would read as stale")
+	}
+}
+
+// project refuses the proxy's port for services; it must be the port the
+// proxy really uses.
+func TestReservedProxyPortMatchesTheProxy(t *testing.T) {
+	if want := ":" + strconv.Itoa(project.ReservedProxyPort); !strings.HasSuffix(ProxyListen, want) {
+		t.Errorf("ProxyListen %s, project reserves %s", ProxyListen, want)
 	}
 }

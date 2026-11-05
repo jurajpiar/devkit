@@ -3,6 +3,7 @@ package project
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +27,16 @@ type Postgres struct {
 	Password string `yaml:"password,omitempty"`
 	Database string `yaml:"database,omitempty"`
 }
+
+// ReservedProxyPort is the guest port devkit's egress proxy listens on; a
+// service cannot take it.
+const ReservedProxyPort = 3128
+
+// pgReservedRoles cannot be created as login roles.
+var pgReservedRoles = map[string]bool{"public": true, "none": true, "current_user": true, "session_user": true, "current_role": true}
+
+// pgSystemDatabases belong to the cluster itself.
+var pgSystemDatabases = map[string]bool{"postgres": true, "template0": true, "template1": true}
 
 // PostgresPackage is the Ubuntu 24.04 package providing the server.
 const PostgresPackage = "postgresql-16"
@@ -121,11 +132,20 @@ func (s *Services) validate() error {
 	if p.Port < 1024 || p.Port > 65535 {
 		return fmt.Errorf("services: postgres port %d must be 1024-65535", p.Port)
 	}
+	if p.Port == ReservedProxyPort {
+		return fmt.Errorf("services: postgres port %d is devkit's egress proxy", p.Port)
+	}
 	if !pgIdent.MatchString(p.User) {
 		return fmt.Errorf("services: postgres user %q must be lowercase letters, digits and underscores", p.User)
 	}
+	if strings.HasPrefix(p.User, "pg_") || pgReservedRoles[p.User] {
+		return fmt.Errorf("services: postgres user %q is reserved by PostgreSQL", p.User)
+	}
 	if !pgIdent.MatchString(p.Database) {
 		return fmt.Errorf("services: postgres database %q must be lowercase letters, digits and underscores", p.Database)
+	}
+	if pgSystemDatabases[p.Database] {
+		return fmt.Errorf("services: postgres database %q belongs to the cluster; name your own", p.Database)
 	}
 	if !pgPassword.MatchString(p.Password) {
 		return fmt.Errorf("services: postgres password may use letters, digits and . _ ~ - only")
