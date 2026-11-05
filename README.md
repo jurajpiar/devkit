@@ -267,9 +267,11 @@ containerd and `nerdctl` for databases and services.
 picks `mise` unless `--toolchain` or `DEVKIT_TOOLCHAIN` says otherwise, and
 seeds versions from the files it finds: `.nvmrc`, `engines.node`, `go.mod`,
 `rust-toolchain.toml`, `.python-version`, `.ruby-version`, `.java-version`.
-A Bun project, one with `bun.lock`, `.bun-version` or `packageManager:
-"bun@..."`, gets Bun beside Node, and its dependencies install with
-`bun install --frozen-lockfile`.
+A Bun project, one with `bun.lock`, `.bun-version`, `bunfig.toml` or
+`packageManager: "bun@..."`, gets Bun, beside Node when it has a
+`package.json`, and its dependencies install with `bun install
+--frozen-lockfile`. An `engines` range seeds its lower bound only when that
+bound is inclusive, otherwise the default.
 
 | | `mise` | `nix` | `none` |
 |---|---|---|---|

@@ -98,17 +98,26 @@ func TestScanPolyglot(t *testing.T) {
 
 func TestScanBun(t *testing.T) {
 	cases := []struct {
-		name  string
-		files map[string]string
-		want  string
+		name     string
+		files    map[string]string
+		want     string
+		wantNode bool
 	}{
-		{"packageManager", map[string]string{"package.json": `{"packageManager":"bun@1.4.4"}`}, "1.4.4"},
-		{"packageManager with corepack hash", map[string]string{"package.json": `{"packageManager":"bun@1.4.4+sha512.abc"}`}, "1.4.4"},
-		{".bun-version wins", map[string]string{"package.json": `{"packageManager":"bun@1.4.4"}`, ".bun-version": "1.3.2\n"}, "1.3.2"},
-		{"engines.bun", map[string]string{"package.json": `{"engines":{"bun":">=1.4.0"}}`, "bun.lock": "{}"}, "1.4.0"},
-		{"lockfile only", map[string]string{"package.json": `{}`, "bun.lock": "{}"}, "latest"},
-		{"legacy binary lockfile", map[string]string{"package.json": `{}`, "bun.lockb": ""}, "latest"},
-		{"hostile version is not copied", map[string]string{"package.json": `{"packageManager":"bun@$(id)"}`}, "latest"},
+		{"packageManager", map[string]string{"package.json": `{"packageManager":"bun@1.4.4"}`}, "1.4.4", true},
+		{"packageManager with corepack hash", map[string]string{"package.json": `{"packageManager":"bun@1.4.4+sha512.abc"}`}, "1.4.4", true},
+		{".bun-version wins", map[string]string{"package.json": `{"packageManager":"bun@1.4.4"}`, ".bun-version": "1.3.2\n"}, "1.3.2", true},
+		{"engines.bun lower bound", map[string]string{"package.json": `{"engines":{"bun":">=1.4.0"}}`, "bun.lock": "{}"}, "1.4.0", true},
+		{"engines.bun caret", map[string]string{"package.json": `{"engines":{"bun":"^1.4.0"}}`, "bun.lock": "{}"}, "1.4.0", true},
+		{"engines.bun upper bound is not a version", map[string]string{"package.json": `{"engines":{"bun":"<1.4.0"}}`, "bun.lock": "{}"}, "latest", true},
+		{"engines.bun exclusive lower bound", map[string]string{"package.json": `{"engines":{"bun":">1.4.0"}}`, "bun.lock": "{}"}, "latest", true},
+		{"engines.bun range", map[string]string{"package.json": `{"engines":{"bun":">=1.4.0 <2"}}`, "bun.lock": "{}"}, "latest", true},
+		{"lockfile only", map[string]string{"package.json": `{}`, "bun.lock": "{}"}, "latest", true},
+		{"legacy binary lockfile", map[string]string{"package.json": `{}`, "bun.lockb": ""}, "latest", true},
+		{"bunfig.toml", map[string]string{"package.json": `{}`, "bunfig.toml": ""}, "latest", true},
+		{"hostile version is not copied", map[string]string{"package.json": `{"packageManager":"bun@$(id)"}`}, "latest", true},
+		// A script project run by bun directly has no manifest and needs no
+		// node.
+		{".bun-version without a manifest", map[string]string{".bun-version": "1.4.4\n"}, "1.4.4", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -121,10 +130,10 @@ func TestScanBun(t *testing.T) {
 			if v["bun"] != c.want {
 				t.Errorf("bun = %q, want %q", v["bun"], c.want)
 			}
-			// Bun projects still run tools that expect node (vitest, vite's
-			// bin scripts), and bun install uses the npm registry.
-			if v["node"] == "" {
-				t.Error("node should still be detected beside bun")
+			// Bun projects with a manifest still run tools that expect node
+			// (vitest, vite's bin scripts).
+			if _, ok := v["node"]; ok != c.wantNode {
+				t.Errorf("node detected = %v, want %v", ok, c.wantNode)
 			}
 			hosts := map[string]bool{}
 			for _, h := range Hosts(ecos) {
@@ -134,6 +143,16 @@ func TestScanBun(t *testing.T) {
 				t.Error("bun needs the npm registry")
 			}
 		})
+	}
+}
+
+func TestScanNodeEnginesExclusiveBounds(t *testing.T) {
+	for engines, want := range map[string]string{"<20": "22", ">20": "22", ">=20 <23": "22", "^20.1": "20", ">=20.1": "20", "20.x": "20"} {
+		dir := t.TempDir()
+		write(t, dir, "package.json", `{"engines":{"node":"`+engines+`"}}`)
+		if v := Versions(Scan(dir))["node"]; v != want {
+			t.Errorf("engines.node %q: got %q, want %q", engines, v, want)
+		}
 	}
 }
 

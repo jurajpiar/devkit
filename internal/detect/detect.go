@@ -44,9 +44,10 @@ func Scan(dir string) []Ecosystem {
 			Hosts: []string{"registry.npmjs.org", "registry.yarnpkg.com", "nodejs.org"},
 		})
 	}
-	if exists("package.json") && usesBun(dir, exists) {
-		// Bun sits beside node, not instead of it: tools such as vite and
-		// vitest still start through node shebangs.
+	if usesBun(dir, exists) {
+		// With a manifest, bun sits beside node, not instead of it: tools
+		// such as vite and vitest still start through node shebangs. A script
+		// project bun runs directly has no manifest and gets bun alone.
 		out = append(out, Ecosystem{
 			Name: "bun", Tool: "bun", Version: bunVersion(dir),
 			Hosts: []string{"registry.npmjs.org"},
@@ -154,7 +155,7 @@ func nodeVersion(dir string) string {
 		} `json:"engines"`
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil && json.Unmarshal(data, &pkg) == nil {
-		if v := majorOf(strings.TrimLeft(pkg.Engines.Node, "^~>=< ")); v != "" {
+		if v := majorOf(inclusiveBound(pkg.Engines.Node)); v != "" {
 			return v
 		}
 	}
@@ -177,10 +178,10 @@ func readPackageJSON(dir string) packageJSON {
 	return pkg
 }
 
-// usesBun reports a Bun project: a Bun lockfile, a .bun-version, or
-// packageManager naming bun.
+// usesBun reports a Bun project: a Bun lockfile, .bun-version, bunfig.toml,
+// or packageManager naming bun.
 func usesBun(dir string, exists func(...string) bool) bool {
-	return exists("bun.lock", "bun.lockb", ".bun-version") ||
+	return exists("bun.lock", "bun.lockb", ".bun-version", "bunfig.toml") ||
 		strings.HasPrefix(readPackageJSON(dir).PackageManager, "bun@")
 }
 
@@ -193,13 +194,26 @@ func bunVersion(dir string) string {
 	for _, s := range []string{
 		firstLine(dir, ".bun-version", ""),
 		strings.TrimPrefix(pkg.PackageManager, "bun@"),
-		strings.TrimLeft(pkg.Engines.Bun, "^~>=< "),
+		inclusiveBound(pkg.Engines.Bun),
 	} {
 		if v := leadingVersion.FindStringSubmatch(strings.TrimSpace(s)); v != nil {
 			return v[1]
 		}
 	}
 	return "latest"
+}
+
+// inclusiveBound returns the version an engines constraint itself admits:
+// "1.4", "=1.4", ">=1.4", "^1.4" and "~1.4" all admit 1.4. Anything else, an
+// upper or exclusive bound ("<1.4", ">1.4") or a compound range, returns ""
+// so the caller falls back to its default rather than pinning a version the
+// constraint may exclude.
+func inclusiveBound(c string) string {
+	c = strings.TrimSpace(c)
+	if strings.ContainsAny(c, " |<") || (strings.HasPrefix(c, ">") && !strings.HasPrefix(c, ">=")) {
+		return ""
+	}
+	return strings.TrimLeft(c, "^~>= ")
 }
 
 // goVersion returns major.minor from the go directive in go.mod.
