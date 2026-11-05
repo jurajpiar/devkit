@@ -72,14 +72,7 @@ func CloneBare(ctx context.Context, rawURL, branch, dst string, out io.Writer) e
 	if branch != "" && !ValidBranch(branch) {
 		return fmt.Errorf("invalid branch %q", branch)
 	}
-	args := []string{
-		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always",
-		"-c", "core.hooksPath=" + os.DevNull,
-	}
-	if allowFileProtocol {
-		args = append(args, "-c", "protocol.file.allow=always")
-	}
-	args = append(args, "clone", "--bare", "--depth", "1", "--no-tags", "--template=")
+	args := append(networkGit(), "clone", "--bare", "--depth", "1", "--no-tags", "--template=")
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
@@ -153,20 +146,28 @@ func RevParse(ctx context.Context, repo, rev string) (string, error) {
 	return c, nil
 }
 
-// FetchBare updates branch in a bare copy from its origin, with the same
-// transport limits as CloneBare and no hooks.
-func FetchBare(ctx context.Context, repo, branch string, out io.Writer) error {
-	if !ValidBranch(branch) {
-		return fmt.Errorf("invalid branch %q", branch)
-	}
-	args := []string{"-C", repo,
+// networkGit is the configuration every devkit git command that talks to a
+// remote runs with: https and ssh only, for the command and anything it is
+// redirected to, and no hooks.
+func networkGit() []string {
+	args := []string{
 		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always",
 		"-c", "core.hooksPath=" + os.DevNull,
 	}
 	if allowFileProtocol {
 		args = append(args, "-c", "protocol.file.allow=always")
 	}
-	args = append(args, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/"+branch+":refs/heads/"+branch)
+	return args
+}
+
+// FetchBare fetches branch from origin into ref of a bare copy, with the
+// same transport limits as CloneBare.
+func FetchBare(ctx context.Context, repo, branch, ref string, out io.Writer) error {
+	if !ValidBranch(branch) || !strings.HasPrefix(ref, "refs/") {
+		return fmt.Errorf("invalid branch %q", branch)
+	}
+	args := append(append([]string{"-C", repo}, networkGit()...),
+		"fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/"+branch+":"+ref)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, out, out
 	if err := cmd.Run(); err != nil {
