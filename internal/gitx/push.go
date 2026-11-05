@@ -1,6 +1,8 @@
 package gitx
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -58,8 +60,9 @@ func QuarantineRef(project, branch string) string {
 // leaving out every commit the host is known to have: the snapshot's
 // shallow boundary and the given host commits the VM also has. It exits
 // ExitNoBranch or ExitNothingToPush instead of writing an empty bundle.
-// branch must have passed ValidBranch; bases that are not commit ids are
-// dropped.
+// ws is a shell word expanded inside double quotes, such as
+// "$HOME/workspace", and must come from devkit, never from the VM. branch
+// must have passed ValidBranch; bases that are not commit ids are dropped.
 func BundleScript(ws, branch string, bases []string, out string) string {
 	var known []string
 	for _, b := range bases {
@@ -69,7 +72,7 @@ func BundleScript(ws, branch string, bases []string, out string) string {
 	}
 	ref := shq("refs/heads/" + branch)
 	return fmt.Sprintf(`set -e
-cd %s
+cd "%s"
 git rev-parse -q --verify %s >/dev/null || exit %d
 neg=""
 for c in $(cat .git/shallow 2>/dev/null) %s; do
@@ -79,48 +82,129 @@ done
 if [ -z "$(git rev-list -1 %s $neg)" ]; then exit %d; fi
 # shellcheck disable=SC2086
 git bundle create -q %s %s $neg
-`, shq(ws), ref, ExitNoBranch, strings.Join(known, " "), ref, ExitNothingToPush, shq(out), ref)
+`, ws, ref, ExitNoBranch, strings.Join(known, " "), ref, ExitNothingToPush, shq(out), ref)
 }
 
-// ImportBundle fetches branch from a bundle the VM wrote into ref, checking
-// every new object first (fsck rejects, among others, trees with a .git or
-// .. entry, the shape of past checkout exploits). The bundle must carry that
-// one branch and nothing else. No hooks run.
+// ImportBundle stores branch from a bundle the VM wrote as ref. It does not
+// lean on git fetch, whose object checking for bundles depends on the git
+// release and the repository's config: it reads the bundle's header itself,
+// requires exactly refs/heads/<branch> and prerequisites the host already
+// has, and feeds the pack to "git index-pack --strict", which checks every
+// object (refusing, among others, trees with a .git or .. entry, the shape
+// of past checkout exploits). Only then is ref set, after a connectivity
+// check, and no hooks run.
 func ImportBundle(ctx context.Context, repo, bundle, branch, ref string) error {
 	if !ValidBranch(branch) {
 		return fmt.Errorf("invalid branch name")
 	}
-	heads, err := run(ctx, repo, "bundle", "list-heads", bundle)
+	f, err := os.Open(bundle)
 	if err != nil {
-		return fmt.Errorf("not a readable git bundle: %w", err)
+		return err
 	}
-	lines := strings.Split(heads, "\n")
-	if len(lines) != 1 {
-		return fmt.Errorf("the bundle carries %d refs; only refs/heads/%s is accepted", len(lines), branch)
+	defer f.Close()
+	r := bufio.NewReader(f)
+	h, err := readBundleHeader(r)
+	if err != nil {
+		return fmt.Errorf("not a usable git bundle: %w", err)
 	}
-	f := strings.Fields(lines[0])
-	if len(f) != 2 || !ValidCommitID(f[0]) || f[1] != "refs/heads/"+branch {
-		return fmt.Errorf("the bundle does not carry refs/heads/%s", branch)
+	if len(h.refs) != 1 || h.refs[0][1] != "refs/heads/"+branch {
+		return fmt.Errorf("the bundle must carry refs/heads/%s and nothing else", branch)
 	}
-	args := append(append([]string{}, noHooks...),
-		"-c", "transfer.fsckObjects=true", "-c", "fetch.fsckObjects=true",
-		"fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-gc",
-		bundle, "+refs/heads/"+branch+":"+ref)
-	if _, err := run(ctx, repo, args...); err != nil {
-		return fmt.Errorf("refused the VM's commits: %w", err)
+	tip := h.refs[0][0]
+	for _, p := range h.prereqs {
+		if _, err := run(ctx, repo, "cat-file", "-e", p+"^{commit}"); err != nil {
+			return fmt.Errorf("the bundle builds on %s, which this repository does not have", p[:12])
+		}
+	}
+	pack := exec.CommandContext(ctx, "git", append(append([]string{"-C", repo}, noHooks...), "index-pack", "--strict", "--fix-thin", "--stdin")...)
+	pack.Stdin = r
+	var perr bytes.Buffer
+	pack.Stderr = &perr
+	if err := pack.Run(); err != nil {
+		return fmt.Errorf("refused the VM's commits: %s", strings.TrimSpace(perr.String()))
+	}
+	walk := append([]string{"rev-list", "--objects", "--quiet", tip, "--not"}, h.prereqs...)
+	if _, err := run(ctx, repo, append(walk, "--all")...); err != nil {
+		return fmt.Errorf("the VM's commits are incomplete: %w", err)
+	}
+	if _, err := run(ctx, repo, append(append([]string{}, noHooks...), "update-ref", ref, tip)...); err != nil {
+		return err
 	}
 	return nil
 }
 
+type bundleHeader struct {
+	prereqs []string
+	refs    [][2]string
+}
+
+// readBundleHeader parses a v2 or v3 bundle header up to the blank line
+// that precedes the pack. Capabilities other than the object format, such
+// as a partial-clone filter, are refused.
+func readBundleHeader(r *bufio.Reader) (*bundleHeader, error) {
+	line := func() (string, error) {
+		l, err := r.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("truncated header")
+		}
+		if len(l) > 4096 {
+			return "", fmt.Errorf("header line too long")
+		}
+		return strings.TrimSuffix(l, "\n"), nil
+	}
+	sig, err := line()
+	if err != nil {
+		return nil, err
+	}
+	if sig != "# v2 git bundle" && sig != "# v3 git bundle" {
+		return nil, fmt.Errorf("unknown signature")
+	}
+	h := &bundleHeader{}
+	for n := 0; ; n++ {
+		if n > 10000 {
+			return nil, fmt.Errorf("header too long")
+		}
+		l, err := line()
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case l == "":
+			return h, nil
+		case strings.HasPrefix(l, "@"):
+			if l != "@object-format=sha1" && l != "@object-format=sha256" {
+				return nil, fmt.Errorf("unsupported capability %q", l)
+			}
+		case strings.HasPrefix(l, "-"):
+			id, _, _ := strings.Cut(l[1:], " ")
+			if !ValidCommitID(id) {
+				return nil, fmt.Errorf("bad prerequisite")
+			}
+			h.prereqs = append(h.prereqs, id)
+		default:
+			id, name, ok := strings.Cut(l, " ")
+			if !ok || !ValidCommitID(id) {
+				return nil, fmt.Errorf("bad ref line")
+			}
+			h.refs = append(h.refs, [2]string{id, name})
+		}
+	}
+}
+
 // Push sends ref to branch to on remote with the host's own credentials and
 // no hooks. It never forces; lease allows replacing the remote branch only
-// if it is still where the host last saw it.
-func Push(ctx context.Context, repo, remote, ref, to string, lease bool, out io.Writer) error {
-	if strings.HasPrefix(remote, "-") || !ValidBranch(to) {
-		return fmt.Errorf("invalid remote or branch")
+// if it is still at expect, or, with expect empty, where the remote-tracking
+// ref says it is. A bare copy has no remote-tracking refs, so it passes the
+// commit it last saw.
+func Push(ctx context.Context, repo, remote, ref, to string, lease bool, expect string, out io.Writer) error {
+	if strings.HasPrefix(remote, "-") || !ValidBranch(to) || (expect != "" && !ValidCommitID(expect)) {
+		return fmt.Errorf("invalid remote, branch or lease")
 	}
 	args := append(append([]string{"-C", repo}, noHooks...), "push", "--no-verify")
-	if lease {
+	switch {
+	case lease && expect != "":
+		args = append(args, "--force-with-lease=refs/heads/"+to+":"+expect)
+	case lease:
 		args = append(args, "--force-with-lease=refs/heads/"+to)
 	}
 	args = append(args, remote, ref+":refs/heads/"+to)
@@ -234,7 +318,7 @@ func UpstreamRemote(ctx context.Context, repo, branch string) string {
 // out: HEAD and the remote-tracking tip of to.
 func KnownCommits(ctx context.Context, repo, remote, to string) []string {
 	var out []string
-	for _, rev := range []string{"HEAD", "refs/remotes/" + remote + "/" + to} {
+	for _, rev := range []string{"HEAD", "refs/remotes/" + remote + "/" + to, "refs/heads/" + to} {
 		if c, err := run(ctx, repo, "rev-parse", "-q", "--verify", rev+"^{commit}"); err == nil && ValidCommitID(c) {
 			out = append(out, c)
 		}
@@ -246,10 +330,19 @@ func KnownCommits(ctx context.Context, repo, remote, to string) []string {
 // meets the remote branch as last fetched, else where it meets HEAD, else
 // nothing (review everything).
 func ReviewBase(ctx context.Context, repo, ref, remote, to string) string {
-	for _, rev := range []string{"refs/remotes/" + remote + "/" + to, "HEAD"} {
+	for _, rev := range []string{"refs/remotes/" + remote + "/" + to, "refs/heads/" + to, "HEAD"} {
 		if c, err := run(ctx, repo, "merge-base", ref, rev); err == nil && ValidCommitID(c) {
 			return c
 		}
 	}
 	return ""
+}
+
+// SetBranch points refs/heads/branch at ref.
+func SetBranch(ctx context.Context, repo, branch, ref string) error {
+	if !ValidBranch(branch) {
+		return fmt.Errorf("invalid branch %q", branch)
+	}
+	_, err := run(ctx, repo, "update-ref", "refs/heads/"+branch, ref)
+	return err
 }

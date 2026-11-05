@@ -153,10 +153,10 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not pushed; the commits stay at %s", ref)
 	}
 	lease, _ := cmd.Flags().GetBool("force-with-lease")
-	if err := gitx.Push(ctx, cwd, remote, ref, to, lease, os.Stdout); err != nil {
+	if err := gitx.Push(ctx, cwd, remote, ref, to, lease, "", os.Stdout); err != nil {
 		return err
 	}
-	fmt.Printf("Pushed. On this Mac the commits are at %s (git switch -c %s %s to work on them here)\n", ref, branch, ref)
+	fmt.Printf("Pushed. On this Mac the commits are at %s; bring them into your checkout with: git merge --ff-only %s\n", ref, ref)
 	return nil
 }
 
