@@ -78,11 +78,11 @@ sequenceDiagram
     participant FW as Firewall<br/>in the VM
     participant Net as Internet
 
-    Mac->>Code: ssh (the only way in)
+    Mac->>Code: ssh, the way in (plus ports you list in network.forward)
 
     Code->>Proxy: fetch registry.npmjs.org
     Note over Proxy: on the list, logged ALLOWED
-    Proxy->>FW: connect as the proxy's user
+    Proxy->>FW: resolve the name and connect, as the proxy's user
     FW->>Net: accepted
     Net-->>Code: response
 
@@ -96,19 +96,22 @@ sequenceDiagram
     Code->>FW: connect to your Mac
     FW-->>Code: rejected
 
-    Code->>FW: DNS query
-    FW->>Net: accepted, to the VM's resolvers only
+    Code->>FW: DNS query, data hidden in the name
+    FW-->>Code: rejected, only the proxy resolves names
 ```
 
 Three things make this hold. The VM has no shared folders and no sudo, so the
 code sees an empty Ubuntu machine. A firewall written by root at boot lets
 only the proxy's own user open connections, so a program that ignores the
-proxy settings is rejected rather than let out. And the proxy decides by
+proxy settings is rejected rather than let out; on every restart, until that
+firewall is in place, a boot hold stops the sandbox opening any connection at
+all, loopback included. And the proxy decides by
 hostname and logs every attempt, which is what `devkit logs` shows. It does
-not inspect content; TLS passes through untouched. DNS is the one direct
-exception: the VM may query its configured resolvers, so a determined program
-can tunnel data through DNS. `none` mode closes that too by rejecting
-everything, DNS included.
+not inspect content; TLS passes through untouched. Names are the proxy's job
+too: by default the sandbox cannot send a DNS query at all, so a query name
+cannot carry data out. `dns: resolvers` reopens DNS to the whole VM, for tools
+that resolve a name before they use the proxy, and that channel with it.
+`none` mode rejects everything, DNS included.
 
 To see this for yourself rather than take it on trust, `examples/hostile-project`
 is a project whose code tries to break out and reports, line by line, whether
@@ -124,22 +127,26 @@ through: the audited path to an allowed host.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/escape-map-dark.svg">
-  <img alt="Nine escape attempts, each stopped at the layer that blocks it; only HTTPS to an allowed host on port 443 passes, logged" src="docs/escape-map-light.svg">
+  <img alt="Ten escape attempts, each stopped at the layer that blocks it, and the one allowed path: HTTPS to an allowed host on port 443, logged" src="docs/escape-map-light.svg">
 </picture>
 
-Each stop is asserted on a real VM by the end-to-end suite, and most were
-written red first: the escape succeeded, then the design changed until it
-failed. The third column is the part that matters when you read this as an
+Each stop is asserted by a test, most of them written red first: the escape
+succeeded, then the design changed until it failed. The end-to-end suite
+checks them on a real VM; the firewall rows are also checked in about a second
+by `TestNetnsFirewall`, which loads the real rules into Linux network
+namespaces, and the proxy rows by the proxy's unit tests. The third column is the part that matters when you read this as an
 attacker: what it would still take to get through. Almost every answer is one
 of four things, root in the guest, a loosening you chose in `devkit.yaml`, an
 allowed host the attacker already controls, or a hypervisor escape.
 
 | Attack vector | Stopped by | Still possible only if | Proven by |
 |---|---|---|---|
-| Direct connection to the internet | Firewall: only uid `devkit-proxy` may egress | Root in the guest flushes the firewall, or you set `sudo: true` | `direct connections bypassing the proxy are rejected` |
-| Proxy to another host, or to port 22 | Proxy: allowlist, ports 80 and 443 only | You list the host or port in `network.allow` or use `open` mode; or the attacker controls an allowed host, which the policy trusts by design | `allowed hosts are reachable on web ports only` |
-| DNS query with data in the name | Firewall: port 53 only for the proxy's account; resolver stub off | You set `dns: resolvers`; or root in the guest; an allowed host the attacker controls makes DNS unnecessary anyway | `DNS is not a side channel` |
-| Connect to your Mac | Firewall: host rejected for every account, the proxy included | You set `allow_host: true`; or root in the guest, the one case the suite leaves red | `host is unreachable under every address form` |
+| Direct connection to the internet | Firewall: only uid `devkit-proxy` may egress | Root in the guest flushes the firewall, or you set `sudo: true` | `direct connections bypassing the proxy are rejected`; `TestNetnsFirewall` |
+| Proxy to another host, or to port 22 | Proxy: allowlist, ports 80 and 443 only | You list the host or port in `network.allow` or use `open` mode; or the attacker controls an allowed host, which the policy trusts by design | `allowed hosts are reachable on web ports only`; `TestProxyRefusesConnectToNonWebPort`, `TestHTTPAllowsOnlyWebPortsWithoutAPortEntry` |
+| DNS query with data in the name | Firewall: port 53 only for the proxy's account; resolver stub off | You set `dns: resolvers`; or root in the guest; an allowed host the attacker controls makes DNS unnecessary anyway | `DNS is not a side channel`; `TestNetnsFirewall` |
+| Send from a source port the proxy just used, riding its tracked DNS flow | Firewall: connection state is trusted only for root and the proxy; every other account may only reply on connections made to it | Root in the guest, or `sudo: true` | `DNS cannot ride another account's tracked connections`; `TestNetnsFirewall` |
+| Connect to your Mac | Firewall: host rejected for every account, the proxy included | You set `allow_host: true`; or root in the guest, the one case the suite leaves red | `host is unreachable under every address form`; `TestNetnsFirewall` |
+| Code planted in a login file (`~/.bashrc`, `~/.ssh/rc`) that runs during the next boot, before the firewall exists | Boot hold: until the firewall is applied, no new connection from the sandbox user or its container UIDs, loopback included, and no upstream DNS from systemd-resolved | Root in the guest, or `sudo: true` | `TestBootWindowIsClosed`; `TestNetnsFirewall` |
 | Listen for your Mac to connect | Lima: forward nothing unless listed in `network.forward` | You list the port; or your IDE's own SSH tunnelling forwards it for you, which Lima never sees | `guest listeners are not forwarded to the Mac unless configured` |
 | Read or write your files | Lima: `mounts: []`; devkit never copies out of the VM | You use `source: mount` with `mount_writable: true`, or pull output across yourself; or a hypervisor escape | `nothing from the VM lands on the host` |
 | Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | Root in the guest; or the devkit binary or devkit.yaml on your Mac is tampered with, which is outside the sandbox entirely | `policy files are root-only` |
