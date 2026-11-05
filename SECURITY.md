@@ -248,6 +248,15 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
   project directory (minus `exclude`), a one-commit `.git` built from it (no
   history, hooks, config or credentials) and your SSH public key. If you paste a
   token into the sandbox, assume the sandbox has it.
+- **Commits you push from the VM.** `devkit push` is the one way VM-written
+  content leaves with your credentials, and your review is its only gate.
+  The VM commits under your git identity and can forge any author. Pushed
+  commits run in CI, and if you merge `refs/devkit/...` into your Mac's
+  checkout, its hooks, direnv and scripts run code the VM wrote. Push to a
+  feature branch behind branch protection, and read the files the review
+  flags. The bundle itself is checked by `git index-pack --strict` with no
+  hooks; a bug in git's pack parsing is the residual risk there. See "What
+  git in the VM changes" in the README.
 - **Hypervisor bugs.** A VM escape in Virtualization.framework would defeat
   everything here. There is no mitigation beyond keeping macOS updated.
 - **Resource use.** The VM is sized by `vm:`. Code inside can exhaust its own
