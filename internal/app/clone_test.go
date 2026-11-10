@@ -177,6 +177,7 @@ func TestGitSourceSyncBringsNewUpstreamCommits(t *testing.T) {
 	gitIn(t, upstream, "add", ".")
 	gitIn(t, upstream, "commit", "-qm", "later")
 	f.SetInstances(fakelima.Instance{Name: cfg.VMName(), Status: "Running"})
+	provisioned(f, "current")
 	f.OnShell(`/.git" && echo yes`, "yes", 0)
 	f.Reset()
 	if out, err := runDevkit(t, "", "sync"); err != nil {
@@ -322,6 +323,7 @@ func TestFailedHandOverKeepsTheMacsBranch(t *testing.T) {
 	gitIn(t, upstream, "add", ".")
 	gitIn(t, upstream, "commit", "-qm", "later")
 	f.SetInstances(fakelima.Instance{Name: cfg.VMName(), Status: "Running"})
+	provisioned(f, "current")
 	f.OnShell(`/.git" && echo yes`, "yes", 0)
 	f.OnShell("refs/remotes/origin/main", "could not apply", 1)
 	if _, err := runDevkit(t, "", "sync"); err == nil {
@@ -345,6 +347,7 @@ func TestSyncAfterUpstreamRewinds(t *testing.T) {
 	gitIn(t, upstream, "add", ".")
 	gitIn(t, upstream, "commit", "-qm", "later")
 	f.SetInstances(fakelima.Instance{Name: cfg.VMName(), Status: "Running"})
+	provisioned(f, "current")
 	f.OnShell(`/.git" && echo yes`, "yes", 0)
 	if out, err := runDevkit(t, "", "sync"); err != nil {
 		t.Fatalf("first sync: %v\n%s", err, out)
@@ -399,6 +402,7 @@ func TestSyncLeavesNoStagingRefs(t *testing.T) {
 	gitIn(t, upstream, "add", ".")
 	gitIn(t, upstream, "commit", "-qm", "later")
 	f.SetInstances(fakelima.Instance{Name: cfg.VMName(), Status: "Running"})
+	provisioned(f, "current")
 	f.OnShell(`/.git" && echo yes`, "yes", 0)
 	if out, err := runDevkit(t, "", "sync"); err != nil {
 		t.Fatalf("sync: %v\n%s", err, out)

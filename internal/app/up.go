@@ -419,7 +419,8 @@ func setSecurityUpdates(path string, on bool) error {
 // reconcileVM brings the Lima instance in line with the rendered config:
 // create it if it does not exist; if its stored config differs, stop it when
 // running and write the new config; then start it unless it is already
-// running with the current config. Provisioning runs on that start.
+// running with the current config. Provisioning runs on that start. A VM
+// whose provisioning did not finish is stopped, with an error.
 func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance) error {
 	renderedPath := filepath.Join(devkitHome(), "instances", name+".yaml")
 	if err := os.MkdirAll(filepath.Dir(renderedPath), 0o755); err != nil {
@@ -460,17 +461,18 @@ func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance
 		}
 	}
 
+	// Whether it starts now or was running already, a VM is used only once
+	// its provisioning has finished: otherwise it may have no firewall, and
+	// it is stopped instead.
+	serial := serialLog(name)
 	if inst == nil || !inst.Running() {
 		fmt.Printf("Starting VM %s\n", name)
+		from := fileSize(serial)
 		stopWatch := watchProvisioning(ctx, name)
 		err := lima.Start(ctx, name)
 		stopWatch()
-		if err != nil {
-			return err
-		}
-	} else {
-		fmt.Printf("VM %s is running\n", name)
+		return confirmProvisioned(ctx, name, err, serial, from)
 	}
-
-	return nil
+	fmt.Printf("VM %s is running\n", name)
+	return confirmProvisioned(ctx, name, nil, serial, 0)
 }

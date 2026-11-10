@@ -83,6 +83,23 @@ in DNS=proxy and none modes systemd-resolved itself is held, which closes
 lookups the sandbox asks of it over D-Bus. The first boot needs no hold:
 nothing of the sandbox's exists on a fresh disk.
 
+**A failed provisioning does not leave an open VM.** Provisioning removes its
+stamp (`/etc/devkit/provision.id`) when it starts and writes it back only
+after the firewall is applied. When `devkit up` finds a running VM without
+it, whether or not `limactl start` reported an error, it stops the VM, names
+the step that failed (the script reports it on the serial console) and exits
+non-zero, before anything is copied in or installed. `devkit shell` and
+`devkit sync` refuse such a VM. A VM someone starts by hand is held inside
+the guest instead: before any download, the script sets `IPAddressDeny=any`
+on the sandbox user's slice and on systemd-resolved, which systemd enforces
+per cgroup for every socket, loopback and interface-bound ones included, and
+it lifts that only once the firewall is in place. If provisioning fails, the
+hold stays until the VM shuts down. It starts when the script starts, not at
+boot, so on a VM that has never finished a first provisioning (and so has no
+boot-hold unit yet) Lima's early SSH sessions have the network every first
+boot has. The stamp is read over SSH as the sandbox user, whose shell startup
+files could print a false answer; the in-guest hold does not rely on it.
+
 **Connection state is trusted only for root and the proxy.** conntrack keys
 a flow by addresses and ports, not by the account that owns it, and an entry
 outlives its socket. A firewall that accepts "established" traffic before it

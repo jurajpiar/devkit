@@ -1,8 +1,8 @@
 // Package fakelima puts a stand-in limactl on PATH for tests. It records
 // every invocation, serves a canned instance list for "list --format json",
 // answers "shell" commands from patterns the test sets, and succeeds at
-// everything else (create, start, stop, delete, validate, copy). It lets the
-// code that drives Lima be tested without a VM.
+// everything else (create, start, stop, delete, validate, copy) unless a test
+// makes a verb fail. It lets the code that drives Lima be tested without a VM.
 package fakelima
 
 import (
@@ -33,6 +33,17 @@ const script = `#!/bin/bash
 # each call with \x1e (record separator), so arguments may contain newlines.
 d="$FAKELIMA_DIR"
 { for a in "$@"; do printf '%s\x1f' "$a"; done; printf '\x1e'; } >> "$d/calls"
+# A start appends what the test set as the guest's serial console output to
+# the instance's serialv.log, where Lima records it.
+last="${*: -1}"
+if [ "$1" = start ] && [ -f "$d/serial.$last" ]; then
+  mkdir -p "$LIMA_HOME/$last"
+  cat "$d/serial.$last" >> "$LIMA_HOME/$last/serialv.log"
+fi
+if [ -f "$d/fail.$1" ]; then
+  echo "fakelima: $1 failed" >&2
+  exit "$(cat "$d/fail.$1")"
+fi
 case "$1" in
   --version) echo "limactl version 2.2.1-fake"; exit 0 ;;
   list) cat "$d/list.json" 2>/dev/null; exit 0 ;;
@@ -98,6 +109,23 @@ func (f *Fake) OnShell(pattern, out string, code int) {
 	f.n++
 	body := fmt.Sprintf("%s\n%d\n%s", pattern, code, out)
 	if err := os.WriteFile(filepath.Join(f.dir, "shell.d", fmt.Sprintf("%03d", f.n)), []byte(body), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// Fail makes every call whose first argument is verb exit with code.
+func (f *Fake) Fail(verb string, code int) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.dir, "fail."+verb), []byte(fmt.Sprint(code)), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// OnStartSerial makes "limactl start" of the instance name append out to its
+// serialv.log, as Lima records the guest's serial console there.
+func (f *Fake) OnStartSerial(name, out string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.dir, "serial."+name), []byte(out), 0o644); err != nil {
 		f.t.Fatal(err)
 	}
 }

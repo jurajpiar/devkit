@@ -55,6 +55,10 @@ The first `devkit up` downloads the Ubuntu image (about 220 MB, checked
 against a pinned digest), provisions the machine and installs the toolchains,
 which takes a few minutes. After that, `up` takes seconds. Edit `devkit.yaml`
 and run `devkit up` again to apply changes; the VM restarts if it has to.
+If provisioning fails (a package that does not exist, a mirror that cannot be
+reached), `up` names the step that failed, stops the VM rather than leave it
+running without its firewall, and exits non-zero; fix the cause and run it
+again. `devkit shell` and `devkit sync` refuse a VM in that state.
 
 Shell completion comes from `devkit completion`:
 
