@@ -27,8 +27,12 @@ from its compose files and Dockerfiles (no Docker needed): pinned, unpinned,
 and unresolved where a variable has no value devkit can see. That part is a
 report and does not affect the exit status.
 
-Exit status is 1 when something stale was found, 2 when the audit could not
-run to a verdict.`,
+It also reports the kernel crash reports devkit found in the VM's serial
+console, from the boot after the first (see SECURITY.md); --ack-crashes
+acknowledges them and does nothing else.
+
+Exit status is 1 when something stale or an unacknowledged kernel crash
+report was found, 2 when the audit could not run to a verdict.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Preflight failures are not findings either: status 2, cause kept.
 		if err := requireLima(); err != nil {
@@ -38,8 +42,23 @@ run to a verdict.`,
 		if err != nil {
 			return &exitError{code: 2, msg: err.Error()}
 		}
+		if ack, _ := cmd.Flags().GetBool("ack-crashes"); ack {
+			// Needs no running VM: the reports are read on the Mac.
+			n, err := ackCrashes(cfg.VMName())
+			if err != nil {
+				return &exitError{code: 2, msg: fmt.Sprintf("could not acknowledge the kernel crash reports: %v", err)}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Acknowledged %d kernel crash report(s) of VM %s.\n", n, cfg.VMName())
+			return nil
+		}
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return &exitError{code: 2, msg: err.Error()}
+		}
+		// The kernel's crash reports, read on the Mac. A panicked guest
+		// cannot run the rest.
+		crashSt, crashed, crashErr := auditCrashes(cmd.OutOrStdout(), cfg.VMName(), true)
+		if crashSt.panicked(true) {
+			return &exitError{code: 1, msg: errPanicked(cfg.VMName()).Error()}
 		}
 		warnRunning(cmd.Context(), cfg)
 		script := "devkit-audit"
@@ -48,13 +67,23 @@ run to a verdict.`,
 		}
 		// Through shellScript so a Nix dev shell's node and keytool are on PATH.
 		err = lima.ExecStream(cmd.Context(), cfg.VMName(), shellScript(cfg, []string{script}))
-		switch auditExit(err) {
-		case auditClean:
-			return nil
-		case auditStale:
+		// An unacknowledged crash report is a finding whatever the trust
+		// audit says: 1.
+		switch v := auditExit(err); {
+		case v == auditStale && crashed:
+			return &exitError{code: 1, msg: "stale trust and unacknowledged kernel crash reports found"}
+		case v == auditStale:
 			return &exitError{code: 1, msg: "stale trust found"}
-		default:
+		case crashed && v == auditClean:
+			return &exitError{code: 1, msg: "unacknowledged kernel crash reports found"}
+		case crashed:
+			return &exitError{code: 1, msg: fmt.Sprintf("unacknowledged kernel crash reports found; the trust audit did not complete: %v", err)}
+		case v != auditClean:
 			return &exitError{code: 2, msg: fmt.Sprintf("audit did not complete: %v", err)}
+		case crashErr != nil:
+			return &exitError{code: 2, msg: fmt.Sprintf("could not read the kernel crash reports: %v", crashErr)}
+		default:
+			return nil
 		}
 	},
 }
@@ -98,4 +127,5 @@ func init() {
 	})
 	rootCmd.AddCommand(auditCmd)
 	auditCmd.Flags().Bool("deep", false, "scan every file in the workspace, including node_modules and vendored trees")
+	auditCmd.Flags().Bool("ack-crashes", false, "acknowledge the kernel crash reports found so far, and do nothing else")
 }

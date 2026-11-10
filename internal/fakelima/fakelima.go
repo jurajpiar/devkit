@@ -36,6 +36,11 @@ d="$FAKELIMA_DIR"
 # A start appends what the test set as the guest's serial console output to
 # the instance's serialv.log, where Lima records it.
 last="${*: -1}"
+# Like Lima, optionally: a start begins a new serial log.
+if [ "$1" = start ] && [ -f "$d/truncate.$last" ]; then
+  mkdir -p "$LIMA_HOME/$last"
+  : > "$LIMA_HOME/$last/serialv.log"
+fi
 if [ "$1" = start ] && [ -f "$d/serial.$last" ]; then
   mkdir -p "$LIMA_HOME/$last"
   cat "$d/serial.$last" >> "$LIMA_HOME/$last/serialv.log"
@@ -126,6 +131,16 @@ func (f *Fake) Fail(verb string, code int) {
 func (f *Fake) OnStartSerial(name, out string) {
 	f.t.Helper()
 	if err := os.WriteFile(filepath.Join(f.dir, "serial."+name), []byte(out), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// TruncateSerialOnStart makes "limactl start" of the instance name empty
+// its serialv.log first, as Lima does, before appending what OnStartSerial
+// set.
+func (f *Fake) TruncateSerialOnStart(name string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.dir, "truncate."+name), nil, 0o644); err != nil {
 		f.t.Fatal(err)
 	}
 }

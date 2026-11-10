@@ -147,6 +147,12 @@ func Stop(ctx context.Context, name string) error {
 	return stream(ctx, "stop", name)
 }
 
+// StopForce stops an instance without asking the guest to shut down, for
+// one whose kernel can no longer answer.
+func StopForce(ctx context.Context, name string) error {
+	return stream(ctx, "stop", "--force", name)
+}
+
 // Delete removes an instance and its disk.
 func Delete(ctx context.Context, name string, force bool) error {
 	args := []string{"delete", name}
