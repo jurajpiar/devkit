@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/jurajpiar/devkit/internal/project"
@@ -329,16 +330,83 @@ func crashStatePath(name string) string {
 	return filepath.Join(vmStateDir(name), crashStateFile)
 }
 
-func loadCrashState(name string) *crashState {
-	st := &crashState{}
-	if data, err := os.ReadFile(crashStatePath(name)); err == nil {
-		if json.Unmarshal(data, st) != nil {
-			*st = crashState{}
+// crashLockFile, beside the state, serialises the commands that read and
+// write it: an IDE session and a terminal can run devkit at once.
+const crashLockFile = "kernel-crashes.lock"
+
+// lockCrashState takes the advisory lock on the VM's crash state and
+// returns the function that releases it. The lock goes with the process
+// too, so a killed devkit never leaves it held.
+func lockCrashState(name string) (unlock func(), err error) {
+	if err := os.MkdirAll(vmStateDir(name), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(vmStateDir(name), crashLockFile), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+		if err != syscall.EINTR {
+			break
 		}
 	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
+}
+
+// updateCrashState runs fn on the VM's crash state under the lock and saves
+// the result, unless fn says there is nothing to save. A state that cannot
+// be locked is still updated, and the error says why it was not locked.
+func updateCrashState(name string, fn func(st *crashState) (save bool, err error)) (*crashState, error) {
+	unlock, lerr := lockCrashState(name)
+	if lerr == nil {
+		defer unlock()
+	} else {
+		lerr = fmt.Errorf("could not lock the kernel crash state: %w", lerr)
+	}
+	st, corrupt := readCrashState(name)
+	save, err := fn(st)
+	if save || corrupt {
+		if serr := saveCrashState(name, st); err == nil {
+			err = serr
+		}
+	}
+	return st, errors.Join(lerr, err)
+}
+
+// loadCrashState reads the VM's crash state without changing it.
+func loadCrashState(name string) *crashState {
+	st, _ := readCrashState(name)
 	return st
 }
 
+// readCrashState reads the VM's crash state. A state that cannot be parsed
+// would hide reports devkit can no longer know about: it is replaced by an
+// empty one, so the next scan reads the serial log from its start and finds
+// again the reports still in it, and devkit says so. corrupt reports that.
+func readCrashState(name string) (st *crashState, corrupt bool) {
+	st = &crashState{}
+	data, err := os.ReadFile(crashStatePath(name))
+	if err != nil {
+		return st, false
+	}
+	if err := json.Unmarshal(data, st); err != nil {
+		*st = crashState{}
+		fmt.Fprintf(crashStderr, "Warning: VM %s's saved kernel crash state is corrupt (%v); rescanning the serial log from its start. Reports acknowledged before may be shown again.\n", name, err)
+		return st, true
+	}
+	return st, false
+}
+
+// saveCrashState writes the state to a new file and renames it into place,
+// so a reader sees the old state or the new one, never part of one.
 func saveCrashState(name string, st *crashState) error {
 	if err := os.MkdirAll(vmStateDir(name), 0o700); err != nil {
 		return err
@@ -347,27 +415,39 @@ func saveCrashState(name string, st *crashState) error {
 	if err != nil {
 		return err
 	}
-	tmp := crashStatePath(name) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(vmStateDir(name), crashStateFile+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, crashStatePath(name))
+	_, err = tmp.Write(data)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), crashStatePath(name))
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+	}
+	return err
 }
 
 // scanCrashes brings the VM's crash state up to date with its serial log.
 // Failures are reported in the returned error, with the state as far as it
 // got.
 func scanCrashes(name string) (*crashState, error) {
-	st := loadCrashState(name)
-	if _, err := os.Stat(serialLog(name)); errors.Is(err, os.ErrNotExist) {
-		return st, nil // no log yet: nothing to scan, nothing to save
+	return updateCrashState(name, scanInto(name))
+}
+
+// scanInto is the update that scans the VM's serial log into a state.
+func scanInto(name string) func(st *crashState) (bool, error) {
+	return func(st *crashState) (bool, error) {
+		if _, err := os.Stat(serialLog(name)); errors.Is(err, os.ErrNotExist) {
+			return false, nil // no log yet: nothing to scan, nothing to save
+		}
+		// What was read before an error is kept.
+		return true, scanCrashLog(st, serialLog(name))
 	}
-	// What was read before an error is kept.
-	err := scanCrashLog(st, serialLog(name))
-	if serr := saveCrashState(name, st); err == nil {
-		err = serr
-	}
-	return st, err
 }
 
 // checkCrashes is for the commands that use a running VM: it warns about
@@ -404,23 +484,30 @@ func auditCrashes(w io.Writer, name string, running bool) (st *crashState, findi
 // Lima begins a new serial log then, which the next scan reads from its
 // start. Reports already found are not reported again.
 func expectNewCrashLog(name string) {
-	st := loadCrashState(name)
-	st.newLog()
-	_ = saveCrashState(name, st)
+	_, _ = updateCrashState(name, func(st *crashState) (bool, error) {
+		st.newLog()
+		return true, nil
+	})
 }
 
 // ackCrashes acknowledges every crash report found so far and returns how
 // many there were.
 func ackCrashes(name string) (int, error) {
-	st, err := scanCrashes(name)
+	n := 0
+	_, err := updateCrashState(name, func(st *crashState) (bool, error) {
+		if save, err := scanInto(name)(st); err != nil {
+			return save, err
+		}
+		n = len(st.Crashes)
+		// A report still collecting lines stays open, so its rest is not
+		// taken for a new crash.
+		st.Crashes = nil
+		return true, nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	n := len(st.Crashes)
-	// A report still collecting lines stays open, so its rest is not taken
-	// for a new crash.
-	st.Crashes = nil
-	return n, saveCrashState(name, st)
+	return n, nil
 }
 
 // panicked reports whether a VM Lima says is running has in fact a
@@ -495,3 +582,6 @@ func newCrashWarning(w io.Writer, name string, shown map[string]bool) bool {
 func errPanicked(name string) error {
 	return fmt.Errorf("the kernel of VM %s has panicked, so it will not respond; run 'devkit down', then 'devkit up'", name)
 }
+
+// crashStderr is where devkit says that a crash state was corrupt.
+var crashStderr io.Writer = os.Stderr
