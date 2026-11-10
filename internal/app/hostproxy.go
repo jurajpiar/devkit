@@ -134,9 +134,9 @@ func runHostProxy(cmd *cobra.Command, _ []string) error {
 		AllowedHosts: allow,
 		AuditLog:     true,
 		Logger:       logger,
-		// On the Mac: never a way into the Mac's own loopback, and the
+		// On the Mac: never a way into the Mac's own addresses, and the
 		// in-guest proxy (or apt) decides about redirects itself.
-		RefuseLoopback:  true,
+		RefuseLocal:     true,
 		ReturnRedirects: true,
 		Health:          health,
 	})

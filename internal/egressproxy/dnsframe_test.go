@@ -14,8 +14,14 @@ func miniDNS(t *testing.T) (addr string, stop func()) {
 	return miniDNSAnswering(t, [4]byte{10, 1, 2, 3})
 }
 
-// miniDNSAnswering is miniDNS with a chosen A record, and it counts queries.
+// miniDNSAnswering is miniDNS with a chosen A record.
 func miniDNSAnswering(t *testing.T, ip [4]byte) (addr string, stop func()) {
+	return miniDNSAnsweringAll(t, ip)
+}
+
+// miniDNSAnsweringAll answers any query for any name with one A record per
+// address in ips, in that order.
+func miniDNSAnsweringAll(t *testing.T, ips ...[4]byte) (addr string, stop func()) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -31,15 +37,15 @@ func miniDNSAnswering(t *testing.T, ip [4]byte) (addr string, stop func()) {
 			if n < 12 {
 				continue
 			}
-			// Reply: copy ID, set QR+RA, QDCOUNT=1, ANCOUNT=1, echo the
-			// question, then one A record for 10.1.2.3.
+			// Reply: copy ID, set QR+RA, QDCOUNT=1, ANCOUNT=len(ips), echo the
+			// question, then the A records.
 			resp := make([]byte, 0, 64)
-			resp = append(resp, q[0], q[1]) // ID
-			resp = append(resp, 0x81, 0x80) // QR=1, RD=1, RA=1
-			resp = append(resp, 0x00, 0x01) // QDCOUNT
-			resp = append(resp, 0x00, 0x01) // ANCOUNT
-			resp = append(resp, 0x00, 0x00) // NSCOUNT
-			resp = append(resp, 0x00, 0x00) // ARCOUNT
+			resp = append(resp, q[0], q[1])           // ID
+			resp = append(resp, 0x81, 0x80)           // QR=1, RD=1, RA=1
+			resp = append(resp, 0x00, 0x01)           // QDCOUNT
+			resp = append(resp, 0x00, byte(len(ips))) // ANCOUNT
+			resp = append(resp, 0x00, 0x00)           // NSCOUNT
+			resp = append(resp, 0x00, 0x00)           // ARCOUNT
 			// question section: from byte 12 up to and including QTYPE/QCLASS
 			qend := 12
 			for qend < n && q[qend] != 0 {
@@ -51,8 +57,10 @@ func miniDNSAnswering(t *testing.T, ip [4]byte) (addr string, stop func()) {
 				qend = n
 			}
 			resp = append(resp, q[12:qend]...)
-			// answer: name pointer to 0x0c, type A, class IN, TTL 60, rdlen 4
-			resp = append(resp, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, ip[0], ip[1], ip[2], ip[3])
+			// answers: name pointer to 0x0c, type A, class IN, TTL 60, rdlen 4
+			for _, ip := range ips {
+				resp = append(resp, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, ip[0], ip[1], ip[2], ip[3])
+			}
 			_, _ = pc.WriteTo(resp, from)
 		}
 	}()

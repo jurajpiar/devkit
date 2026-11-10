@@ -256,11 +256,11 @@ func TestUpstreamMustBeAnIPAddress(t *testing.T) {
 // On the Mac the proxy must not become a way into the Mac's own loopback: an
 // allowed name that resolves to 127.0.0.1 (DNS the attacker controls, or a
 // public name such as localtest.me in open mode) is refused at dial time.
-func TestRefuseLoopbackBlocksTheMacsOwnServices(t *testing.T) {
+func TestRefuseLocalBlocksTheMacsOwnServices(t *testing.T) {
 	echo := echoServer(t)
 	up := newUpstream(t, nil)
 	logs := &syncLog{}
-	p := serve(t, NewProxy(ProxyConfig{AllowedHosts: []string{echo, up.hostPort()}, AuditLog: true, Logger: log.New(logs, "", 0), RefuseLoopback: true}))
+	p := serve(t, NewProxy(ProxyConfig{AllowedHosts: []string{echo, up.hostPort()}, AuditLog: true, Logger: log.New(logs, "", 0), RefuseLocal: true}))
 	if status, _, _ := connect(t, p, echo); !strings.HasPrefix(status, "403") {
 		t.Errorf("CONNECT to loopback: want 403, got %s", status)
 	}
@@ -278,7 +278,7 @@ func TestRefuseLoopbackBlocksTheMacsOwnServices(t *testing.T) {
 	// Positive control: without the option the same targets are reached.
 	q := serve(t, NewProxy(ProxyConfig{AllowedHosts: []string{echo}, Logger: log.New(io.Discard, "", 0)}))
 	if status, _, _ := connect(t, q, echo); !strings.HasPrefix(status, "200") {
-		t.Errorf("control: CONNECT should work without RefuseLoopback, got %s", status)
+		t.Errorf("control: CONNECT should work without RefuseLocal, got %s", status)
 	}
 }
 
