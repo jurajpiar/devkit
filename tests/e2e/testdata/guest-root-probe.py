@@ -108,19 +108,52 @@ def udp_answer(host, port, timeout=4):
     except Exception as e:
         return False, type(e).__name__ + ": " + str(e)
 
-def icmp(host, timeout=4):
+def icmp_echo_request(ident, seq, payload):
+    """An ICMP echo request (type 8) with a valid checksum."""
+    body = struct.pack(">BBHHH", 8, 0, 0, ident, seq) + payload
+    csum = 0
+    for i in range(0, len(body), 2):
+        csum += (body[i] << 8) + (body[i + 1] if i + 1 < len(body) else 0)
+    csum = (csum >> 16) + (csum & 0xFFFF)
+    csum = ~(csum + (csum >> 16)) & 0xFFFF
+    return struct.pack(">BBHHH", 8, 0, csum, ident, seq) + payload
+
+def icmp_is_echo_reply(packet, src, ident, seq, payload):
+    """True when packet, as a raw IPv4 ICMP socket on Linux delivers it (the
+    IP header first, its length in the IHL field), is the echo reply to our
+    request: type 0 code 0, from src, with our identifier, sequence and
+    payload. Anything else, such as a router's Destination Unreachable for a
+    forwarded request, is not."""
+    if len(packet) < 20 or packet[0] >> 4 != 4:
+        return False
+    ihl = (packet[0] & 0x0F) * 4
+    if ihl < 20 or len(packet) < ihl + 8 or packet[9] != socket.IPPROTO_ICMP:
+        return False
+    if packet[12:16] != socket.inet_aton(src):
+        return False
+    typ, code, _, rid, rseq = struct.unpack(">BBHHH", packet[ihl:ihl + 8])
+    return (typ, code, rid, rseq) == (0, 0, ident, seq) and packet[ihl + 8:] == payload
+
+def icmp(host, timeout=4, ident=0x1234, seq=1, payload=b"devkit"):
+    """ok means host answered our echo request with its echo reply; every
+    other packet the raw socket sees until the timeout is ignored."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        s.settimeout(timeout)
-        body = struct.pack(">BBHHH", 8, 0, 0, 0x1234, 1) + b"devkit"
-        csum = 0
-        for i in range(0, len(body), 2):
-            csum += (body[i] << 8) + (body[i + 1] if i + 1 < len(body) else 0)
-        csum = ~((csum >> 16) + (csum & 0xFFFF)) & 0xFFFF
-        pkt = struct.pack(">BBHHH", 8, 0, csum, 0x1234, 1) + b"devkit"
-        s.sendto(pkt, (host, 0))
-        data, _ = s.recvfrom(128)
-        return True, f"{len(data)} bytes"
+        s.sendto(icmp_echo_request(ident, seq, payload), (host, 0))
+        deadline = time.monotonic() + timeout
+        ignored = 0
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False, f"no echo reply from {host}; {ignored} other packets ignored"
+            s.settimeout(left)
+            try:
+                data, _ = s.recvfrom(2048)
+            except socket.timeout:
+                continue
+            if icmp_is_echo_reply(data, host, ident, seq, payload):
+                return True, f"echo reply, {len(data)} bytes; {ignored} other packets ignored"
+            ignored += 1
     except Exception as e:
         return False, type(e).__name__ + ": " + str(e)
 
@@ -149,6 +182,8 @@ report("UDP (NTP) to 185.125.190.57:123", "fail", yes(ok), d)
 # Lima's network stack answers every echo itself (0 ms, even for TEST-NET
 # addresses), so a reply proves nothing left the Mac. The check is that an
 # unroutable address "answers" too: if it ever stops, ICMP is being forwarded.
+# Only the echo reply to this request counts, so a router's Destination
+# Unreachable for a forwarded one cannot pass for it.
 ok, d = icmp("203.0.113.1")
 report("ICMP echo is answered locally (TEST-NET-3 replies)", "ok", yes(ok), d)
 
