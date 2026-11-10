@@ -290,10 +290,15 @@ before the VM and stopped by `devkit down` and `devkit rm`. It applies the
 same allowlist and web-ports policy as the in-guest proxy, to the project's
 `network.allow` plus the hosts root's provisioning fetches from (Ubuntu's
 archive, ports and security hosts, and the toolchain manager's download
-hosts); in `open` mode it allows any host on the web ports. It refuses names
-that resolve to loopback or link-local addresses, so an allowed name cannot
-be pointed at the Mac's own services, and it hands redirects back to the
-in-guest proxy to decide. Its log, in `~/.devkit/<vm>/hostproxy.log`, is the
+hosts); in `open` mode it allows any host on the web ports. It refuses to
+dial any address of the Mac: loopback, link-local, and every address
+assigned to one of the Mac's interfaces at that moment (its LAN address, the
+VM network's gateway), IPv4 and IPv6. It checks after resolution, and refuses
+a name when any address it resolves to is one of these, so neither an IP
+literal in `open` mode nor an allowed name can be pointed at the Mac's own
+services. Other machines on the Mac's LAN are not refused by this; the
+allowlist decides about them as about any host. It hands redirects back to
+the in-guest proxy to decide. Its log, in `~/.devkit/<vm>/hostproxy.log`, is the
 authoritative record of what left, and `devkit logs` shows it. In the guest,
 root's apt and downloads and the in-guest proxy use it as their upstream, the
 proxy's account may reach only it, and no account may send a DNS query.

@@ -182,7 +182,7 @@ in-guest proxy stopped, as `TestHostEnforcement` checks with raw sockets:
 |---|---|---|
 | Direct connection to the internet, any port, IPv4 or IPv6 | Refused on the Mac: the host agent may not dial it | A host the host proxy allows (below) |
 | DNS query with data in the name, to any resolver or to Lima's own | No answer: the Mac's resolver socket is out of the host agent's reach | An allowed host the attacker controls makes DNS unnecessary anyway |
-| Connect to your Mac's loopback services | Refused on the Mac, except the host proxy and the VM's own SSH forward, which leads back into the guest | A gap in the profile or in Lima; the host proxy itself refuses names that resolve to loopback or link-local addresses |
+| Connect to your Mac's loopback services | Refused on the Mac, except the host proxy and the VM's own SSH forward, which leads back into the guest | A gap in the profile or in Lima; the host proxy itself refuses addresses of the Mac: loopback, link-local and any address on one of its interfaces, such as its LAN address, by IP or by a name that resolves to one |
 | Rewrite the in-guest policy or swap the in-guest proxy | Possible, and no longer enough: the host proxy's allowlist is outside the guest | You change `devkit.yaml` on the Mac |
 | Through the host proxy to another host or port | Refused by the host proxy, ports 80 and 443 only unless listed | The host is in `network.allow` or is one root's provisioning needs: Ubuntu's archive, ports and security hosts and the toolchain manager's download hosts; or `open` mode |
 

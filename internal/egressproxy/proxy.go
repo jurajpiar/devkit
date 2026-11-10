@@ -40,10 +40,15 @@ type ProxyConfig struct {
 	// It must be an IP address, so that not even the parent is looked up.
 	// Empty means dial targets directly.
 	Upstream string
-	// RefuseLoopback refuses to dial loopback, unspecified and link-local
-	// addresses, checked after resolution, so an allowed name cannot be
-	// pointed at the machine the proxy runs on. Set for the proxy on the Mac.
-	RefuseLoopback bool
+	// RefuseLocal refuses to dial any address of the machine the proxy runs
+	// on: loopback, unspecified and link-local addresses, and every address
+	// assigned to one of its interfaces (its LAN address, the VM network's
+	// gateway), IPv4 and IPv6, IPv4-mapped forms included. It is checked
+	// after resolution against the interface addresses of the moment, and a
+	// name is refused when any address it resolves to is, so neither an
+	// allowed name nor an IP literal (open mode) can be pointed at the
+	// machine's own services. Set for the proxy on the Mac.
+	RefuseLocal bool
 	// ReturnRedirects hands a plain-HTTP redirect back to the client instead
 	// of following it, so the client (an inner proxy with a narrower
 	// allowlist, or apt) decides about the new location itself.
@@ -86,13 +91,116 @@ func refuseWith(w http.ResponseWriter, msg string) {
 	http.Error(w, msg, http.StatusForbidden)
 }
 
-// errRefusedAddress is the dial error for an address RefuseLoopback covers.
-var errRefusedAddress = errors.New("refused: the name resolves to a loopback or link-local address")
+// errRefusedAddress is the dial error for an address RefuseLocal covers.
+var errRefusedAddress = errors.New("refused: the name resolves to a loopback, link-local or local interface address")
 
-// refusedAddress reports whether RefuseLoopback covers ip.
+// refusedMessage is the client-visible refusal for errRefusedAddress.
+func refusedMessage(host string) string {
+	return fmt.Sprintf("Blocked: %s resolves to a loopback, link-local or local interface address", host)
+}
+
+// refusedAddress reports whether ip is a loopback, unspecified or
+// link-local address, which RefuseLocal covers on any machine.
 func refusedAddress(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast()
+}
+
+// interfaceIPs lists the addresses assigned to this machine's interfaces.
+func interfaceIPs() ([]net.IP, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	var out []net.IP
+	for _, a := range addrs {
+		switch v := a.(type) {
+		case *net.IPNet:
+			out = append(out, v.IP)
+		case *net.IPAddr:
+			out = append(out, v.IP)
+		}
+	}
+	return out, nil
+}
+
+// refusedHere reports whether RefuseLocal covers ip: a loopback or
+// link-local address, or one assigned to an interface of this machine now.
+// The interface list is read at every check, since it changes as networks
+// come and go; when it cannot be read, every address is refused.
+func (p *Proxy) refusedHere(ip net.IP) bool {
+	if ip == nil || refusedAddress(ip) {
+		return true
+	}
+	list := p.localAddrs
+	if list == nil {
+		list = interfaceIPs
+	}
+	local, err := list()
+	if err != nil {
+		return true
+	}
+	for _, l := range local {
+		// Equal treats the 4-byte and IPv4-mapped 16-byte forms as one.
+		if l.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// dialTarget dials a client's target, host:port, for CONNECT and plain HTTP
+// alike (redirects included, as they go through the same transport). With
+// RefuseLocal it resolves the name itself, refuses it when any of its
+// addresses is covered, and dials only the checked addresses; the dialer's
+// Control checks each address again just before the connect.
+func (p *Proxy) dialTarget(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := p.dialer()
+	if !p.config.RefuseLocal {
+		return d.DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		r := d.Resolver
+		if r == nil {
+			r = net.DefaultResolver
+		}
+		found, err := r.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range found {
+			if a.Zone != "" {
+				return nil, errRefusedAddress // scoped: link-local
+			}
+			ips = append(ips, a.IP)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("%s: no addresses", host)
+	}
+	for _, ip := range ips {
+		if p.refusedHere(ip) {
+			return nil, errRefusedAddress
+		}
+	}
+	var first error
+	for _, ip := range ips {
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		if first == nil {
+			first = err
+		}
+	}
+	return nil, first
 }
 
 // errUpstreamRefused records that the parent proxy refused a request.
@@ -112,6 +220,9 @@ type Proxy struct {
 	// dialTunnel, when set, replaces the dialer for CONNECT targets; tests
 	// use it to observe the address chosen and to fail deterministically.
 	dialTunnel func(ctx context.Context, network, addr string) (net.Conn, error)
+	// localAddrs lists this machine's interface addresses for RefuseLocal;
+	// nil means interfaceIPs. Tests set fixed fake addresses.
+	localAddrs func() ([]net.IP, error)
 }
 
 // NewProxy creates a new egress proxy
@@ -218,7 +329,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		targetConn, fromTarget = conn, br
 	} else {
 		// Establish connection to target
-		dial := p.dialer().DialContext
+		dial := p.dialTarget
 		if p.dialTunnel != nil {
 			dial = p.dialTunnel
 		}
@@ -226,7 +337,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			p.audit.LogError(host, err)
 			if errors.Is(err, errRefusedAddress) {
-				refuseWith(w, fmt.Sprintf("Blocked: %s resolves to a loopback or link-local address", host))
+				refuseWith(w, refusedMessage(host))
 				return
 			}
 			http.Error(w, fmt.Sprintf("Failed to connect to %s: %v", host, err), http.StatusBadGateway)
@@ -371,7 +482,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		p.audit.LogError(host, err)
 		if errors.Is(err, errRefusedAddress) {
-			refuseWith(w, fmt.Sprintf("Blocked: %s resolves to a loopback or link-local address", host))
+			refuseWith(w, refusedMessage(host))
 			return
 		}
 		http.Error(w, fmt.Sprintf("Failed to forward request: %v", err), http.StatusBadGateway)
@@ -452,7 +563,7 @@ const resolvConf = "/run/systemd/resolve/resolv.conf"
 func (p *Proxy) dialer() *net.Dialer {
 	p.dialOnce.Do(func() {
 		p.dial = &net.Dialer{Timeout: 10 * time.Second}
-		if p.config.RefuseLoopback {
+		if p.config.RefuseLocal {
 			// Control sees each address after resolution, just before the
 			// connect, so a name re-pointed between check and dial is
 			// still caught.
@@ -461,7 +572,7 @@ func (p *Proxy) dialer() *net.Dialer {
 				if err != nil {
 					return err
 				}
-				if ip := net.ParseIP(host); ip == nil || refusedAddress(ip) {
+				if p.refusedHere(net.ParseIP(host)) {
 					return errRefusedAddress
 				}
 				return nil
@@ -736,7 +847,7 @@ func (p *Proxy) transport() *http.Transport {
 	p.trOnce.Do(func() {
 		p.tr = &http.Transport{
 			Proxy:               nil,
-			DialContext:         p.dialer().DialContext,
+			DialContext:         p.dialTarget,
 			MaxIdleConns:        32,
 			MaxIdleConnsPerHost: 4,
 			IdleConnTimeout:     30 * time.Second,
