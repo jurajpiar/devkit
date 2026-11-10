@@ -221,12 +221,7 @@ var logsCmd = &cobra.Command{
 			// The host proxy's log is the authoritative one: it sees every
 			// request that leaves, root's included, and nothing in the
 			// guest can rewrite it. The VM need not be running.
-			if inst, _ := instance(cmd.Context(), cfg); inst != nil && inst.Running() {
-				if !warnCrashes(cmd.ErrOrStderr(), cfg.VMName(), true) {
-					warnRunning(cmd.Context(), cfg)
-				}
-			}
-			return showHostLog(cmd, cfg.VMName(), lines, follow)
+			return hostLogs(cmd, cfg, lines, follow)
 		}
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err

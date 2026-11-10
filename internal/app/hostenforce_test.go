@@ -13,7 +13,9 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jurajpiar/devkit/internal/embedded"
 	"github.com/jurajpiar/devkit/internal/fakelima"
@@ -572,4 +574,109 @@ func TestHostProxyStateIsPerLimaHome(t *testing.T) {
 	if refused := connectStatus(t, portA, "example.org:443"); !strings.HasPrefix(refused, "403") {
 		t.Errorf("the first proxy keeps its own allowlist, got %q", refused)
 	}
+}
+
+// hostLogFixture is a host-mode project whose VM has the host log lines,
+// with a provision stamp to compare, so a running VM gets asked for its own.
+func hostLogFixture(t *testing.T, f *fakelima.Fake, home, status, log string) string {
+	t.Helper()
+	old := provisionIDFor
+	t.Cleanup(func() { provisionIDFor = old })
+	provisionIDFor = func(context.Context, *project.Config) string { return "want0000000" }
+	cfgPath := filepath.Join(home, "devkit.yaml")
+	os.WriteFile(cfgPath, []byte(hostYAML), 0o644)
+	f.SetInstances(fakelima.Instance{Name: "devkit-demo", Status: status})
+	os.MkdirAll(vmStateDir("devkit-demo"), 0o700)
+	os.WriteFile(filepath.Join(vmStateDir("devkit-demo"), hostProxyLog), []byte(log), 0o600)
+	return cfgPath
+}
+
+func TestLogsInHostModeDoNotWaitForAGuestThatHangs(t *testing.T) {
+	f, home := fakeHome(t)
+	cfgPath := hostLogFixture(t, f, home, "Running", "[EGRESS] BLOCKED CONNECT evil.test:443\n")
+	// A login file in the guest that blocks: the stamp read never returns.
+	f.OnShellHang("provision.id", 20*time.Second)
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := runDevkit(t, "", "logs", "--config", cfgPath)
+		done <- result{out, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if !strings.Contains(r.out, "BLOCKED CONNECT evil.test:443") {
+			t.Errorf("the host log must be shown, got %q", r.out)
+		}
+		if !strings.Contains(r.out, "did not answer") {
+			t.Errorf("a guest that does not answer must be noted, got %q", r.out)
+		}
+	case <-time.After(guestCheckTimeout + 5*time.Second):
+		t.Fatal("devkit logs waited for a guest that does not answer")
+	}
+}
+
+// lockedBuffer is written by devkit and read by the test at once.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func TestLogsFollowInHostModeDoesNotWaitForAGuestThatHangs(t *testing.T) {
+	f, home := fakeHome(t)
+	cfgPath := hostLogFixture(t, f, home, "Running", "[EGRESS] BLOCKED CONNECT evil.test:443\n")
+	f.OnShellHang("provision.id", 20*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out lockedBuffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetArgs([]string{"logs", "--config", cfgPath, "--follow"})
+	// Cobra keeps a subcommand's context from its first run.
+	prev := logsCmd.Context()
+	logsCmd.SetContext(ctx)
+	done := make(chan error, 1)
+	go func() { done <- rootCmd.Execute() }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("devkit logs --follow did not stop when cancelled")
+		}
+		logsCmd.SetContext(prev)
+		rootCmd.SetArgs(nil)
+		resetFlags(rootCmd)
+	}()
+
+	waitFor := func(what, s string, within time.Duration) {
+		t.Helper()
+		for end := time.Now().Add(within); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+			if strings.Contains(out.String(), s) {
+				return
+			}
+		}
+		t.Errorf("%s did not appear within %s; got %q", what, within, out.String())
+	}
+	// Well before the guest check could give up: the stream does not wait.
+	waitFor("the host log", "BLOCKED CONNECT evil.test:443", guestCheckTimeout/2)
+	waitFor("the note", "did not answer", guestCheckTimeout+5*time.Second)
 }

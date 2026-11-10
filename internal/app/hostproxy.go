@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -431,15 +432,60 @@ func warnIfUnconfinedTo(_ context.Context, cfg *project.Config, w io.Writer) {
 		"  Fix: run 'devkit down', then 'devkit up'.\n\n", name, why)
 }
 
+// hostLogs is 'devkit logs' under network.enforce: host: the warnings about
+// the VM, then the host proxy's log. Nothing the guest does can keep the log
+// from being shown: the guest gets guestCheckTimeout to answer, and when
+// following, the warnings are checked while the log is already streaming.
+func hostLogs(cmd *cobra.Command, cfg *project.Config, n int, follow bool) error {
+	ctx := cmd.Context()
+	out, errw := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	warn := func(ctx context.Context, w io.Writer) {
+		if inst, _ := instance(ctx, cfg); inst != nil && inst.Running() {
+			if !warnCrashes(w, cfg.VMName(), true) {
+				warnRunningWithin(ctx, cfg, w, guestCheckTimeout)
+			}
+		}
+	}
+	if !follow {
+		warn(ctx, errw)
+		return showHostLog(ctx, out, errw, cfg.VMName(), n, false)
+	}
+	// The warnings and the log's tail write at once.
+	var mu sync.Mutex
+	out, errw = &lockedWriter{mu: &mu, w: out}, &lockedWriter{mu: &mu, w: errw}
+	wctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		warn(wctx, errw)
+	}()
+	err := showHostLog(ctx, out, errw, cfg.VMName(), n, true)
+	cancel()
+	<-done
+	return err
+}
+
+// lockedWriter serialises writes to w with the writers that share mu.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 // showHostLog prints the last n lines of the host proxy's log, or follows it.
-func showHostLog(cmd *cobra.Command, name string, n int, follow bool) error {
+func showHostLog(ctx context.Context, out, errw io.Writer, name string, n int, follow bool) error {
 	path := filepath.Join(vmStateDir(name), hostProxyLog)
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("no host proxy log at %s yet; run 'devkit up'", path)
 	}
 	if follow {
-		tail := exec.CommandContext(cmd.Context(), "tail", "-n", strconv.Itoa(n), "-f", path)
-		tail.Stdout, tail.Stderr = cmd.OutOrStdout(), cmd.ErrOrStderr()
+		tail := exec.CommandContext(ctx, "tail", "-n", strconv.Itoa(n), "-f", path)
+		tail.Stdout, tail.Stderr = out, errw
 		return tail.Run()
 	}
 	f, err := os.Open(path)
@@ -456,7 +502,6 @@ func showHostLog(cmd *cobra.Command, name string, n int, follow bool) error {
 			lines = lines[1:]
 		}
 	}
-	out := cmd.OutOrStdout()
 	for _, l := range lines {
 		fmt.Fprintln(out, l)
 	}
