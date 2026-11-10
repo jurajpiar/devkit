@@ -16,3 +16,6 @@ internal/embedded/bin/egressproxy-*
 
 # Test and session logs never belong in the repo
 *.log
+
+# Python bytecode from running the test probes
+__pycache__/
