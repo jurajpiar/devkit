@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -153,7 +154,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Fprint(cmd.ErrOrStderr(), crashWarning(name, st, false))
 	}
-	if err := reconcileVM(ctx, name, rendered, inst, start); err != nil {
+	if err := reconcileVM(ctx, name, rendered, inst, start, cmd.ErrOrStderr(), shown); err != nil {
 		return err
 	}
 	// Crash reports from this boot and its provisioning, which the scans
@@ -484,8 +485,9 @@ func setSecurityUpdates(path string, on bool) error {
 //
 // start boots the instance: lima.Start, or under network.enforce: host the
 // sandboxed start. limactl create always runs unsandboxed, since it
-// downloads the image.
-func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance, start func(context.Context, string) error) error {
+// downloads the image. A kernel panic during the boot is reported on w,
+// without the crash reports in shown, and forces the VM off.
+func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance, start func(context.Context, string) error, w io.Writer, shown map[string]bool) error {
 	renderedPath := filepath.Join(devkitHome(), "instances", name+".yaml")
 	if err := os.MkdirAll(filepath.Dir(renderedPath), 0o755); err != nil {
 		return err
@@ -538,8 +540,8 @@ func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance
 		stopWatch := watchProvisioning(ctx, name)
 		err := start(ctx, name)
 		stopWatch()
-		return confirmProvisioned(ctx, name, err, serial, mark)
+		return confirmProvisioned(ctx, name, err, serial, mark, w, shown)
 	}
 	fmt.Printf("VM %s is running\n", name)
-	return confirmProvisioned(ctx, name, nil, serial, serialMark{})
+	return confirmProvisioned(ctx, name, nil, serial, serialMark{}, w, shown)
 }
