@@ -83,6 +83,24 @@ func TestNetnsFirewall(t *testing.T) {
 		n.expectInbound(t, "SSH-like sessions to the sandbox still get replies during the hold")
 		n.expectNoRide(t, "root", "the sandbox cannot ride root's tracked DNS flow during the hold")
 	})
+
+	// network.enforce: host. The Mac's service on 5432 stands in for the
+	// host proxy: the proxy's account may reach it and nothing else.
+	t.Run("host enforcement", func(t *testing.T) {
+		s, err := System(hostParams(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.applyFirewallFrom(t, s, "MODE=allowlist\nALLOW_HOST=0\nDNS=proxy\nFORWARD=\nHOST_PROXY_IP=10.231.0.2\nHOST_PROXY_PORT=5432\n")
+		n.expect(t, "proxy", "tcp", "10.231.0.2", 5432, true, "the proxy to the host proxy")
+		n.expect(t, "proxy", "tcp", "10.231.0.2", 22, false, "the proxy to another port on the Mac")
+		n.expect(t, "proxy", "tcp", "10.231.0.3", 443, false, "the proxy straight to the internet")
+		n.expect(t, "proxy", "udp", "10.231.0.2", 53, false, "the proxy's DNS: the host proxy resolves")
+		n.expect(t, "sandbox", "tcp", "10.231.0.2", 5432, false, "the sandbox to the host proxy, past its own proxy")
+		n.expect(t, "sandbox", "udp", "10.231.0.2", 53, false, "sandbox DNS")
+		n.expect(t, "root", "tcp", "10.231.0.2", 5432, false, "root has no new egress once the firewall is up")
+		n.expect(t, "sandbox", "tcp", "127.0.0.1", 7777, true, "sandbox to loopback (the proxy listens there)")
+	})
 }
 
 type netns struct {
@@ -281,10 +299,17 @@ func (n *netns) applyFirewall(t *testing.T, mode string, allowHost int, dns stri
 	if err != nil {
 		t.Fatal(err)
 	}
+	n.applyFirewallFrom(t, s, fmt.Sprintf("MODE=%s\nALLOW_HOST=%d\nDNS=%s\nFORWARD=\n", mode, allowHost, dns))
+}
+
+// applyFirewallFrom loads the firewall from system script s with confBody as
+// its network.conf.
+func (n *netns) applyFirewallFrom(t *testing.T, s, confBody string) {
+	t.Helper()
 	fw := heredoc(t, s, "cat > /usr/local/sbin/devkit-firewall <<'EOF'\n")
 	conf := filepath.Join(n.dir, "network.conf")
 	resolv := filepath.Join(n.dir, "resolv.conf")
-	os.WriteFile(conf, []byte(fmt.Sprintf("MODE=%s\nALLOW_HOST=%d\nDNS=%s\nFORWARD=\n", mode, allowHost, dns)), 0o644)
+	os.WriteFile(conf, []byte(confBody), 0o644)
 	os.WriteFile(resolv, []byte("nameserver 10.231.0.2\n"), 0o644)
 	for old, repl := range map[string]string{
 		"/etc/devkit/network.conf":         conf,

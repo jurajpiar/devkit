@@ -74,6 +74,22 @@ func TestRenderIsValidYAML(t *testing.T) {
 	}
 }
 
+func TestRenderHostEnforcement(t *testing.T) {
+	c := project.Default()
+	c.Name = "demo"
+	c.Network.Enforce = project.EnforceHost
+	out, err := Render(TemplateInput{Config: c, User: "alice", EgressSHA256: "deadbeef", HostProxy: "192.168.5.2:41234"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "-upstream 192.168.5.2:41234") {
+		t.Error("the host proxy must reach the provisioning script")
+	}
+	if _, err := Render(TemplateInput{Config: c, User: "alice", EgressSHA256: "deadbeef"}); err == nil {
+		t.Error("host enforcement without a host proxy must not render")
+	}
+}
+
 func TestRenderMount(t *testing.T) {
 	c := project.Default()
 	c.Name = "demo"
