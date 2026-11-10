@@ -1,10 +1,10 @@
 package provision
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -135,13 +135,16 @@ func TestFailureReportRuns(t *testing.T) {
 	console := filepath.Join(t.TempDir(), "hvc0")
 	helpers := strings.ReplaceAll(s[start:end], "/dev/hvc0", console)
 	script := "set -euo pipefail\n" + helpers + "\ntrue\nfalse --flag\necho not-reached\n"
-	wantLine := strings.Count(script[:strings.Index(script, "false --flag")], "\n") + 1
 	out, err := exec.Command("bash", "-c", script).CombinedOutput()
 	if err == nil || strings.Contains(string(out), "not-reached") {
 		t.Fatalf("the script must still abort: %v %s", err, out)
 	}
 	got, _ := os.ReadFile(console)
-	if want := fmt.Sprintf("devkit-progress: failed: false --flag (line %d, exit 1)\n", wantLine); string(got) != want {
+	// The command and status are checked exactly. The line number is only
+	// checked to be there: bash 3.2, which macOS ships and CI's macOS runner
+	// uses, numbers lines inside an ERR trap differently from the bash 5
+	// the guest runs.
+	if !regexp.MustCompile(`^devkit-progress: failed: false --flag \(line \d+, exit 1\)\n$`).Match(got) {
 		t.Errorf("console got %q", got)
 	}
 }
