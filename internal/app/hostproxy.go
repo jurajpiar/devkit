@@ -50,6 +50,31 @@ var (
 	sandboxStartArgs = hostenforce.StartArgs
 )
 
+// executableID identifies the devkit binary that runs: the SHA-256 of its
+// executable, symlinks resolved, computed once per process. A host proxy
+// runs the code of the binary that started it, so up restarts one started
+// by any other binary, a rebuild at the same path included. A seam for
+// tests.
+var executableID = sync.OnceValues(func() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return "", err
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+})
+
 // vmStateDir is devkit's host-side state for one VM. Lima keys an instance
 // by its home as well as its name, so two VMs of one name can exist under
 // different LIMA_HOME directories; each gets its own state, or starting one
@@ -215,6 +240,9 @@ type hostProxyState struct {
 	PID    int    `json:"pid"`
 	Port   int    `json:"port"`
 	Health string `json:"health"`
+	// Exe is the executableID of the devkit that started it; empty in
+	// state an older devkit wrote, which then counts as another binary.
+	Exe string `json:"exe,omitempty"`
 }
 
 // runningHostProxy returns the recorded proxy if it answers its health
@@ -253,12 +281,20 @@ func ensureHostProxy(ctx context.Context, cfg *project.Config) (int, error) {
 	dir := vmStateDir(name)
 	allow := strings.Join(hostAllowlist(cfg), "\n") + "\n"
 	allowPath := filepath.Join(dir, hostProxyAllowFile)
+	// Unknown when it cannot be computed: then no recorded one matches, and
+	// the proxy is restarted with this binary's code.
+	exeID, _ := executableID()
 	if st, ok := runningHostProxy(name); ok {
 		prev, _ := os.ReadFile(allowPath)
-		if st.Port == port && string(prev) == allow {
+		sameExe := exeID != "" && st.Exe == exeID
+		if st.Port == port && string(prev) == allow && sameExe {
 			return port, nil
 		}
-		fmt.Println("The allowlist changed; restarting the host proxy")
+		if sameExe {
+			fmt.Println("The allowlist changed; restarting the host proxy")
+		} else {
+			fmt.Println("The host proxy was started by another devkit binary; restarting it")
+		}
 		if err := stopHostProxy(name); err != nil {
 			return 0, err
 		}
@@ -280,7 +316,7 @@ func ensureHostProxy(ctx context.Context, cfg *project.Config) (int, error) {
 	if _, err := rand.Read(token); err != nil {
 		return 0, err
 	}
-	st := hostProxyState{Port: port, Health: hex.EncodeToString(token)}
+	st := hostProxyState{Port: port, Health: hex.EncodeToString(token), Exe: exeID}
 	listen := fmt.Sprintf("127.0.0.1:%d", port)
 	cmd := exec.Command(exe, "hostproxy", "--listen", listen, "--allow-file", allowPath, "--log", logPath, "--health", st.Health)
 	cmd.Stdout, cmd.Stderr = logFile, logFile

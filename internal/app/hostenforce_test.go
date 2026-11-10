@@ -145,6 +145,126 @@ func TestHostProxyLifecycle(t *testing.T) {
 	}
 }
 
+func TestExecutableIDIsTheHashOfThisBinary(t *testing.T) {
+	exe, _ := os.Executable()
+	exe, _ = filepath.EvalSymlinks(exe)
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	if id, err := executableID(); err != nil || id != hex.EncodeToString(sum[:]) {
+		t.Errorf("executableID = %q, %v; want the SHA-256 of %s", id, err, exe)
+	}
+}
+
+// withExecutableID makes this process's devkit binary identify as id, as
+// after an upgrade or a rebuild, for the rest of the test.
+func withExecutableID(t *testing.T, id string) {
+	t.Helper()
+	prev := executableID
+	executableID = func() (string, error) { return id, nil }
+	t.Cleanup(func() { executableID = prev })
+}
+
+// A proxy started by another devkit binary runs that binary's code, which
+// may lack a refusal this one has: up restarts it, keeping the port. One
+// started by this binary is reused.
+func TestHostProxyRestartsWhenTheDevkitBinaryChanged(t *testing.T) {
+	fakeHome(t)
+	ctx := context.Background()
+	c := hostConfig(t, nil)
+	name := c.VMName()
+	t.Cleanup(func() { stopHostProxy(name) })
+
+	withExecutableID(t, "old-binary")
+	port, err := ensureHostProxy(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _ := runningHostProxy(name)
+	if _, err := ensureHostProxy(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if same, _ := runningHostProxy(name); same.PID != old.PID {
+		t.Errorf("a proxy of this binary must be reused: pid %d then %d", old.PID, same.PID)
+	}
+
+	withExecutableID(t, "new-binary")
+	if p, err := ensureHostProxy(ctx, c); err != nil || p != port {
+		t.Fatalf("restart: port %d, %v", p, err)
+	}
+	st, ok := runningHostProxy(name)
+	if !ok || st.PID == old.PID || st.Port != port {
+		t.Errorf("a proxy of another binary must be restarted on the same port: %+v then %+v", old, st)
+	}
+	if processAlive(old.PID) {
+		t.Error("the old binary's proxy must be gone")
+	}
+}
+
+// State written by a devkit that recorded no identity, or a binary whose
+// identity cannot be computed, counts as a different binary: fail towards
+// the current code.
+func TestHostProxyRestartsWithoutAnExecutableIdentity(t *testing.T) {
+	fakeHome(t)
+	ctx := context.Background()
+	c := hostConfig(t, nil)
+	name := c.VMName()
+	t.Cleanup(func() { stopHostProxy(name) })
+
+	withExecutableID(t, "this-binary")
+	port, err := ensureHostProxy(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rewrite the state as an older devkit wrote it: no identity.
+	old, _ := runningHostProxy(name)
+	legacy := fmt.Sprintf(`{"pid":%d,"port":%d,"health":%q}`, old.PID, old.Port, old.Health)
+	if err := os.WriteFile(filepath.Join(vmStateDir(name), hostProxyStateFile), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := ensureHostProxy(ctx, c); err != nil || p != port {
+		t.Fatalf("restart: port %d, %v", p, err)
+	}
+	st, _ := runningHostProxy(name)
+	if st.PID == old.PID || processAlive(old.PID) {
+		t.Errorf("state without an identity must restart the proxy: pid %d then %d", old.PID, st.PID)
+	}
+
+	prev := executableID
+	executableID = func() (string, error) { return "", errors.New("unreadable") }
+	t.Cleanup(func() { executableID = prev })
+	if _, err := ensureHostProxy(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := runningHostProxy(name); again.PID == st.PID {
+		t.Error("an identity that cannot be computed must restart the proxy")
+	}
+}
+
+// Through devkit up: the proxy an older devkit started is replaced.
+func TestUpInHostModeRestartsAProxyOfAnotherBinary(t *testing.T) {
+	f, home := fakeHome(t)
+	cfgPath := upFixture(t, f, home, hostYAML)
+	fakeSandboxExec(t)
+	t.Cleanup(func() { stopHostProxy("devkit-demo") })
+
+	withExecutableID(t, "old-binary")
+	if _, err := ensureHostProxy(context.Background(), mustLoad(t, cfgPath)); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := runningHostProxy("devkit-demo")
+	withExecutableID(t, "new-binary")
+	if out, err := runDevkit(t, "", "up", "--config", cfgPath, "--no-sync", "--no-install"); err != nil {
+		t.Fatalf("up: %v\n%s", err, out)
+	}
+	st, ok := runningHostProxy("devkit-demo")
+	if !ok || st.PID == old.PID || st.Port != old.Port || processAlive(old.PID) {
+		t.Errorf("up must restart the old binary's proxy on the same port: %+v then %+v", old, st)
+	}
+}
+
 // If the proxy cannot start, the VM must not start: there is no unproxied
 // fallback in host mode.
 func TestHostProxyFailsClosedWhenItsPortIsTaken(t *testing.T) {

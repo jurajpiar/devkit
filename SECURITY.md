@@ -286,8 +286,12 @@ built-in DNS resolved names through the Mac's resolver socket, which is a
 channel out. No root is needed on the Mac.
 
 The host proxy is `devkit hostproxy`, one per VM, started by `devkit up`
-before the VM and stopped by `devkit down` and `devkit rm`. It applies the
-same allowlist and web-ports policy as the in-guest proxy, to the project's
+before the VM and stopped by `devkit down` and `devkit rm`. `devkit up`
+reuses a running one only if it has the same allowlist and was started by the
+same devkit binary, compared by the SHA-256 of its executable, so that an
+upgrade or rebuild of devkit replaces it; otherwise it restarts it on the same
+port. It applies the same allowlist and web-ports policy as the in-guest
+proxy, to the project's
 `network.allow` plus the hosts root's provisioning fetches from (Ubuntu's
 archive, ports and security hosts, and the toolchain manager's download
 hosts); in `open` mode it allows any host on the web ports. It refuses to
