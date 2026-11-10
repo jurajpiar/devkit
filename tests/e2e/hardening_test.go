@@ -148,6 +148,10 @@ sleep 3; python3 ~/sweep.py "$resolver"; wait`)
 			"kernel.dmesg_restrict":                        "1",
 			"kernel.apparmor_restrict_unprivileged_userns": "1",
 			"kernel.sysrq":                                 "0",
+			// Without tools.containers: no unprivileged user namespaces at
+			// all, and no module loads once provisioning is done.
+			"kernel.unprivileged_userns_clone": "0",
+			"kernel.modules_disabled":          "1",
 		}
 		// The kernel crypto socket family is out of reach: creating an AF_ALG
 		// socket (the surface of Copy-Fail and its algif siblings) must fail

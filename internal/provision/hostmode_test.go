@@ -222,21 +222,22 @@ func TestRootHostsCoverEveryProvisioningDownload(t *testing.T) {
 // script without host enforcement: first before it existed, then again on
 // the fail-closed provisioning change it was rebased onto, where the rendered
 // guest-mode scripts were compared byte for byte across the two branches. A deliberate policy change for
-// guest mode updates them, knowing it makes existing VMs stale.
+// guest mode updates them, knowing it makes existing VMs stale. The last such
+// change closed unprivileged user namespaces and locked module loading.
 func TestGuestModeScriptIsUnchangedByHostEnforcement(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":         "b6ef8935950749a9",
-		"allowlist-nix":          "87afe46154d860f9",
-		"allowlist-none":         "0136535cad0322b4",
-		"enforce-guest-explicit": "b6ef8935950749a9",
-		"loosened":               "3823d118aea145f9",
-		"no-security-updates":    "d12bf6aea3ffac05",
-		"none-mise":              "22d9fbc706c0f715",
-		"none-nix":               "37725ad77bea669d",
-		"none-none":              "a0b9fff44da3ce86",
-		"open-mise":              "b150b7d7f48ac15c",
-		"open-nix":               "336e6c91bdc64948",
-		"open-none":              "fc6e5c87827f2a88",
+		"allowlist-mise":         "c2d67d696f7a767b",
+		"allowlist-nix":          "b7f7706800f9bd04",
+		"allowlist-none":         "f12c926330befd7a",
+		"enforce-guest-explicit": "c2d67d696f7a767b",
+		"loosened":               "a97e7b64137986c6",
+		"no-security-updates":    "dde18da4d52f19e8",
+		"none-mise":              "c8ef4fb710ecee1c",
+		"none-nix":               "b5f7c221bbd717bc",
+		"none-none":              "99d3390993302284",
+		"open-mise":              "5f881efb97d50aa2",
+		"open-nix":               "92a26b932a7843d1",
+		"open-none":              "9d1623c16f6fe4b4",
 	}
 	var got []string
 	for name, p := range guestVariants() {

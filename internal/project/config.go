@@ -95,10 +95,18 @@ type VM struct {
 	// the firewall comes up. On by default: a frozen image is the one part
 	// of the sandbox that gets weaker every week. nil means on.
 	SecurityUpdates *bool `yaml:"security_updates,omitempty"`
+	// LockModules refuses kernel module loading, for root too, once
+	// provisioning has loaded what the configuration needs, until the VM
+	// restarts. On by default: any process can otherwise make the kernel
+	// load code for an unused socket family or link type. nil means on.
+	LockModules *bool `yaml:"lock_modules,omitempty"`
 }
 
 // SecurityUpdatesOn is VM.SecurityUpdates with its default applied.
 func (v VM) SecurityUpdatesOn() bool { return v.SecurityUpdates == nil || *v.SecurityUpdates }
+
+// LockModulesOn is VM.LockModules with its default applied.
+func (v VM) LockModulesOn() bool { return v.LockModules == nil || *v.LockModules }
 
 // Values of Network.DNS.
 const (

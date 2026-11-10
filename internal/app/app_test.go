@@ -54,6 +54,9 @@ func TestRenderConfigParses(t *testing.T) {
 	if got.Install != "" {
 		t.Fatal("install is only ever written by the user, not by init")
 	}
+	if !strings.Contains(renderConfig(c), "\n  # lock_modules: true ") || got.VM.LockModules != nil {
+		t.Fatalf("init should write vm.lock_modules as a commented line, leaving the default on:\n%s", renderConfig(c))
+	}
 	for _, m := range []string{project.ManagerNix, project.ManagerNone} {
 		c.Tools.Manager = m
 		c.Tools.Versions = nil

@@ -446,6 +446,15 @@ step "restricting the kernel attack surface"
 # root can drop the firewall. These close the interfaces most kernel exploits
 # of recent years needed from an unprivileged process; Ubuntu already
 # restricts unprivileged user namespaces, BPF and perf, and this pins the rest.
+# Ubuntu's AppArmor restriction lets an unprivileged user namespace be made
+# and denies capabilities inside it, but Ubuntu's own profiles exempt named
+# programs (rootlesskit, runc, slirp4netns, podman, lxc and more), so a
+# tools.packages entry can reopen namespaces with working capabilities.
+# kernel.unprivileged_userns_clone, an Ubuntu kernel switch, refuses the
+# namespace itself to unprivileged users, exempted or not; root is
+# unaffected. tools.containers: true leaves it open, because Lima's rootless
+# containerd needs user namespaces. The file is rewritten on every boot, so
+# turning containers off closes them again.
 cat > /etc/sysctl.d/90-devkit.conf <<'EOF'
 kernel.io_uring_disabled = 2
 kernel.unprivileged_bpf_disabled = 1
@@ -455,9 +464,18 @@ kernel.yama.ptrace_scope = 1
 kernel.kptr_restrict = 1
 kernel.dmesg_restrict = 1
 kernel.apparmor_restrict_unprivileged_userns = 1
+kernel.unprivileged_userns_clone = {{if .Config.Tools.Containers}}1{{else}}0{{end}}
 kernel.sysrq = 0
 EOF
 sysctl -q -p /etc/sysctl.d/90-devkit.conf || true
+# sysctl -p goes on past a key this kernel lacks, and systemd-sysctl skips
+# one at boot, so a kernel that is not Ubuntu's cannot fail here. Where the
+# switch exists it is applied on its own, and a failure to set it aborts.
+if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+  sysctl -q -w kernel.unprivileged_userns_clone={{if .Config.Tools.Containers}}1{{else}}0{{end}}
+else
+  note "this kernel has no kernel.unprivileged_userns_clone; unprivileged user namespaces are only restricted by AppArmor"
+fi
 
 # The kernel crypto socket API (AF_ALG: algif_aead and its siblings) exposes
 # kernel crypto internals to unprivileged processes and has a long history of
@@ -867,6 +885,29 @@ systemctl set-property --runtime "$HOLD_SLICE" IPAddressAllow=any
 systemctl revert "$HOLD_SLICE"
 systemctl revert systemd-resolved.service
 systemctl restart systemd-resolved
+{{- if .Config.VM.LockModulesOn}}
+
+# ---- lock kernel module loading: the last step that could need a module ----
+# Any process can make the kernel load a module, for a socket family nobody
+# uses or, from a namespace, a link type or netfilter extension: kernel code
+# that would otherwise never run. From here no module loads, for root too,
+# until the VM restarts, so this comes after everything above has loaded
+# what it needs, and nothing below may need one. It is not in the sysctl
+# drop-in, which is applied early in boot and would refuse every module the
+# boot loads after it. vm.lock_modules: false turns it off.
+step "locking kernel module loading"
+{{- if .Config.Tools.Containers}}
+# What rootless containers will need later (bridges, veth pairs, overlay,
+# NAT and the netfilter matches CNI uses), loaded now because nothing can
+# load afterwards. A module this kernel does not have is skipped.
+for m in bridge br_netfilter veth overlay nf_nat nf_conntrack_netlink tap tun xfrm_user xt_MASQUERADE xt_addrtype xt_comment xt_conntrack xt_mark xt_multiport xt_nat xt_owner xt_tcpudp ipt_REJECT ip6t_REJECT iptable_nat ip6table_nat iptable_filter ip6table_filter nft_chain_nat nft_compat; do
+  modprobe -q "$m" 2>/dev/null || true
+done
+{{- end}}
+sysctl -q -w kernel.modules_disabled=1
+{{- else}}
+note "kernel module loading is not locked (vm.lock_modules: false)"
+{{- end}}
 echo "{{.ProvisionID}}" > /etc/devkit/provision.id
 chmod 644 /etc/devkit/provision.id
 step "done"

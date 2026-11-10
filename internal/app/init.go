@@ -157,6 +157,7 @@ func renderConfig(c *project.Config) string {
 	fmt.Fprintf(&b, "\n# install: npm ci        # replaces the lockfile-based install devkit picks\n")
 	fmt.Fprintf(&b, "# services: [postgres]  # PostgreSQL 16 inside the VM, no Docker; see README: Services\n")
 	fmt.Fprintf(&b, "\nvm:\n  cpus: %d\n  memory_gb: %d\n  disk_gb: %d\n", c.VM.CPUs, c.VM.MemoryGB, c.VM.DiskGB)
+	fmt.Fprintf(&b, "  # lock_modules: true   # no kernel module loads after provisioning, root included, until restart\n")
 	fmt.Fprintf(&b, "\nssh_port: %d           # ssh devkit-%s\n", c.SSHPort, c.Name)
 	fmt.Fprintf(&b, "\nnetwork:\n  mode: %s       # allowlist | open | none\n  allow:\n", c.Network.Mode)
 	for _, h := range c.Network.Allow {
