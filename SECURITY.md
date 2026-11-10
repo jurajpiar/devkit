@@ -141,8 +141,38 @@ into it. `vm.security_updates: false` turns the step off.
 **One less surface for the privilege escalation.** Patching closes known
 holes; it cannot close the one nobody has reported yet. So the guest also
 takes away interfaces unprivileged code rarely needs and kernel exploits
-often ride in on. Beyond the sysctl restrictions above (io_uring, BPF, perf,
-userfaultfd, user namespaces), the kernel crypto socket family `AF_ALG` is
+often ride in on. A sysctl drop-in disables io_uring and restricts BPF, perf,
+userfaultfd and ptrace. Unprivileged user namespaces are refused outright
+with Ubuntu's `kernel.unprivileged_userns_clone = 0`, on top of AppArmor's
+`kernel.apparmor_restrict_unprivileged_userns`. AppArmor alone is not enough:
+it denies capabilities inside a new namespace, but Ubuntu ships profiles
+exempting named programs (`rootlesskit`, `runc`, `slirp4netns`, `podman`,
+`lxc` and others), so installing one through `tools.packages` would give
+unprivileged code a namespace with a working `CAP_NET_ADMIN`; we tested this
+with `rootlesskit`. The kernel switch refuses the namespace itself, exempted
+program or not; root is unaffected. The exception is `tools.containers: true`:
+Lima's rootless containerd needs user namespaces, so that configuration
+leaves the switch open and relies on AppArmor's restriction alone, exemptions
+included. The value follows `devkit.yaml` on every boot, so turning
+containers off closes them again. On a kernel without the switch,
+provisioning carries on with AppArmor's restriction only and says so.
+
+**No kernel modules after provisioning.** Any process can make the kernel
+load a module, for a socket family nobody uses or, from a namespace, a link
+type or a netfilter extension: kernel code that would otherwise never run.
+The last step of provisioning, after the firewall is applied and the
+provisioning hold lifted, sets `kernel.modules_disabled = 1`, which refuses
+every later load, to root as well, until the VM restarts; each boot
+provisions and locks again. With `containers: true`, the modules containers
+use (bridge, veth, overlay, NAT and the netfilter matches) are loaded first.
+The cost is that something which needs a module nothing loaded beforehand
+fails, usually with "operation not supported" or "Operation not permitted"
+(a macvlan network, an iptables match devkit does not use). A restart does
+not help on its own, since every boot locks again; `vm.lock_modules: false`
+and `devkit up`, which restarts the VM, leave loading open, and `devkit up`
+notes it.
+
+Separately, the kernel crypto socket family `AF_ALG` is
 blocked from loading and unloaded if present. That family exposes kernel
 crypto internals to any process and has produced a string of memory-safety
 bugs, Copy-Fail (CVE-2026-31431) the latest; a dev workload does its crypto
@@ -302,8 +332,9 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
   files. `network.enforce: host` (opt-in, see "Enforcement on the Mac"
   above) moves the line for the network: the Mac then refuses everything but
   devkit's host proxy, whatever root in the guest does. The mitigations are the security-pocket updates at boot, the kernel
-  surface we take away (user namespaces, io_uring, BPF, perf, and the
-  `AF_ALG` crypto family), and, for those who want it, an inner gVisor
+  surface we take away (unprivileged user namespaces unless
+  `containers: true`, module loading after provisioning, io_uring, BPF,
+  perf, and the `AF_ALG` crypto family), and, for those who want it, an inner gVisor
   sandbox on the roadmap. See "The guest is patched" and the two points
   after it. A kernel bug in a subsystem none of that covers still escalates;
   that is the residual risk and the reason the boundary we rely on is the
