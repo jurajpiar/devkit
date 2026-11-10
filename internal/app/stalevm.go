@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jurajpiar/devkit/internal/embedded"
 	"github.com/jurajpiar/devkit/internal/lima"
@@ -36,26 +38,52 @@ func warnIfStale(ctx context.Context, cfg *project.Config) {
 var provisionIDFor = expectedProvisionID
 
 func warnIfStaleTo(ctx context.Context, cfg *project.Config, w io.Writer) {
+	warnIfStaleWithin(ctx, cfg, w, 0)
+}
+
+// guestCheckTimeout is how long a command that must not depend on the guest
+// ('devkit logs' under network.enforce: host) waits for it to answer.
+const guestCheckTimeout = 3 * time.Second
+
+// warnRunningWithin is warnRunning for such a command: the guest gets d to
+// answer, and one that does not is noted on w rather than waited for.
+func warnRunningWithin(ctx context.Context, cfg *project.Config, w io.Writer, d time.Duration) {
+	if !warnIfStaleWithin(ctx, cfg, w, d) {
+		fmt.Fprintf(w, "Note: VM %s did not answer within %s, so its sandbox policy could not be checked.\n", cfg.VMName(), d)
+	}
+	warnIfUnconfinedTo(ctx, cfg, w)
+}
+
+// warnIfStaleWithin is warnIfStaleTo with the guest given d to answer (0
+// for no limit). It reports false when the guest did not answer in time.
+func warnIfStaleWithin(ctx context.Context, cfg *project.Config, w io.Writer, d time.Duration) bool {
 	want := provisionIDFor(ctx, cfg)
 	if want == "" {
-		return
+		return true
+	}
+	gctx := ctx
+	if d > 0 {
+		var cancel context.CancelFunc
+		gctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
 	}
 	// "|| true": a VM from before the stamp has no file, and that case must
 	// reach the warning below rather than look like an ssh failure.
-	out, err := lima.Exec(ctx, cfg.VMName(), "cat /etc/devkit/provision.id 2>/dev/null || true")
+	out, err := lima.Exec(gctx, cfg.VMName(), "cat /etc/devkit/provision.id 2>/dev/null || true")
 	if err != nil {
-		return
+		return !errors.Is(gctx.Err(), context.DeadlineExceeded)
 	}
 	got := strings.TrimSpace(out)
 	if got == want {
-		return
+		return true
 	}
 	if got == "" {
 		// The VM predates the stamp entirely: it is from before this feature.
 		fmt.Fprintf(w, "Warning: this VM predates the current devkit's sandbox policy.\n  Run 'devkit down && devkit up' to reprovision it.\n")
-		return
+		return true
 	}
 	fmt.Fprintf(w, "Warning: this VM applied an older devkit policy (%s; this devkit expects %s).\n  Run 'devkit down && devkit up' to apply the current sandbox policy.\n", got, want)
+	return true
 }
 
 // expectedProvisionID is the fingerprint this binary would write for cfg, or

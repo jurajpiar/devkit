@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Instance is the subset of `limactl list --format json` devkit needs.
@@ -284,6 +285,9 @@ func PipeTar(ctx context.Context, name, srcDir, guestDir string, excludes []stri
 
 func run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "limactl", args...)
+	// Once ctx is done, stop waiting for output: killing limactl can leave its
+	// ssh child holding the pipes open for as long as the guest keeps it.
+	cmd.WaitDelay = time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

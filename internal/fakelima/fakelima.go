@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Instance is one row of the fake "limactl list".
@@ -64,7 +65,11 @@ case "$1" in
       [ -f "$f" ] || continue
       pat="$(head -n1 "$f")"
       case "$cmd" in *"$pat"*)
-        tail -n +3 "$f"; exit "$(sed -n 2p "$f")" ;;
+        code="$(sed -n 2p "$f")"
+        # A code like "20s" is a guest that does not answer: sleep that
+        # long, in a child that keeps the output open as ssh would, first.
+        case "$code" in *s) sleep "${code%s}"; code=0 ;; esac
+        tail -n +3 "$f"; exit "$code" ;;
       esac
     done
     exit 0 ;;
@@ -113,6 +118,19 @@ func (f *Fake) OnShell(pattern, out string, code int) {
 	f.t.Helper()
 	f.n++
 	body := fmt.Sprintf("%s\n%d\n%s", pattern, code, out)
+	if err := os.WriteFile(filepath.Join(f.dir, "shell.d", fmt.Sprintf("%03d", f.n)), []byte(body), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// OnShellHang makes any "limactl shell" whose command contains pattern
+// hang for d before it succeeds silently, like a guest whose login shell
+// blocks. The sleep is a child that holds the output open, as ssh is under
+// limactl. Earlier rules win.
+func (f *Fake) OnShellHang(pattern string, d time.Duration) {
+	f.t.Helper()
+	f.n++
+	body := fmt.Sprintf("%s\n%ds\n", pattern, int(d.Seconds()))
 	if err := os.WriteFile(filepath.Join(f.dir, "shell.d", fmt.Sprintf("%03d", f.n)), []byte(body), 0o644); err != nil {
 		f.t.Fatal(err)
 	}
