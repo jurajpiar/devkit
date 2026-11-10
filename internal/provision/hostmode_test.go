@@ -225,18 +225,18 @@ func TestRootHostsCoverEveryProvisioningDownload(t *testing.T) {
 // guest mode updates them, knowing it makes existing VMs stale.
 func TestGuestModeScriptIsUnchangedByHostEnforcement(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":         "6dba4570cd18d45c",
-		"allowlist-nix":          "c2068e95c56e4059",
-		"allowlist-none":         "92de08f230889147",
-		"enforce-guest-explicit": "6dba4570cd18d45c",
-		"loosened":               "b3db2d54a1412070",
-		"no-security-updates":    "f06cb82b8f26e9ee",
-		"none-mise":              "d8beb9a7798fa626",
-		"none-nix":               "984f7afd7822f37f",
-		"none-none":              "2429ceed4a434e87",
-		"open-mise":              "f7d2ca2e9f431974",
-		"open-nix":               "d82a0065648721d2",
-		"open-none":              "da7717bcb7111c9b",
+		"allowlist-mise":         "b2e655b07c3f365a",
+		"allowlist-nix":          "71531cd5833e0be4",
+		"allowlist-none":         "48b703c6f916de43",
+		"enforce-guest-explicit": "b2e655b07c3f365a",
+		"loosened":               "bb7a9e35a4aa968e",
+		"no-security-updates":    "138a3ddb021da007",
+		"none-mise":              "4f67df18ac92f8ac",
+		"none-nix":               "b1d0cc458a91f248",
+		"none-none":              "f1302156c513ba14",
+		"open-mise":              "c8cae057591da0e9",
+		"open-nix":               "4cd3ce6a9f2152fd",
+		"open-none":              "da7223d15142595c",
 	}
 	var got []string
 	for name, p := range guestVariants() {

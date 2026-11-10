@@ -148,3 +148,39 @@ func TestFailureReportRuns(t *testing.T) {
 		t.Errorf("console got %q", got)
 	}
 }
+
+// The old stamp goes before anything that can fail: a re-provisioning that
+// aborts at any step, the hold included, must leave no stamp behind for
+// devkit to accept. Only plain assignments may come first.
+func TestOldStampIsRemovedFirst(t *testing.T) {
+	check := func(t *testing.T, s string) {
+		const rmStamp = "rm -f /etc/devkit/provision.id"
+		if n := strings.Count(s, rmStamp); n != 1 {
+			t.Fatalf("the stamp should be removed exactly once, found %d", n)
+		}
+		_, body, ok := strings.Cut(s, "\nset -euo pipefail\n")
+		if !ok {
+			t.Fatal("no set -euo pipefail")
+		}
+		plain := regexp.MustCompile(`^(export )?[A-Z_]+="?[A-Za-z0-9_.-]*"?$`)
+		for _, l := range strings.Split(body, "\n") {
+			l = strings.TrimSpace(l)
+			if l == "" || strings.HasPrefix(l, "#") || plain.MatchString(l) {
+				continue
+			}
+			if l != rmStamp {
+				t.Errorf("the first command must remove the stamp, got %q", l)
+			}
+			return
+		}
+		t.Fatal("no command in the script")
+	}
+	everyVariant(t, check)
+	t.Run("host", func(t *testing.T) {
+		s, err := System(hostParams(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, s)
+	})
+}
