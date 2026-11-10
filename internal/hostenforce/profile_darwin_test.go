@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These run a process under the rendered profile, the way Lima's host agent
@@ -26,6 +27,9 @@ try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(3)
         s.connect(target)
+    elif kind == "udp":
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.sendto(b"devkit-udp-probe", ("127.0.0.1", int(target)))
     elif kind == "resolve":
         socket.getaddrinfo(target, 443)
     print("ok")
@@ -106,6 +110,50 @@ func tcpListener(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
+// tcpUDPListener listens on one port number over both TCP and UDP and
+// returns the port and the datagrams the UDP side receives.
+func tcpUDPListener(t *testing.T) (int, <-chan string) {
+	t.Helper()
+	for range 20 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		pc, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			ln.Close() // the UDP port number is taken; try another
+			continue
+		}
+		t.Cleanup(func() { ln.Close(); pc.Close() })
+		go acceptAll(ln)
+		got := make(chan string, 16)
+		go func() {
+			buf := make([]byte, 512)
+			for {
+				n, _, err := pc.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				got <- string(buf[:n])
+			}
+		}()
+		return port, got
+	}
+	t.Fatal("no port number free over both TCP and UDP")
+	return 0, nil
+}
+
+// received waits briefly for a datagram and reports whether one arrived.
+func received(got <-chan string) bool {
+	select {
+	case <-got:
+		return true
+	case <-time.After(time.Second):
+		return false
+	}
+}
+
 func unixListener(t *testing.T, path string) {
 	t.Helper()
 	ln, err := net.Listen("unix", path)
@@ -164,6 +212,32 @@ func TestProfileConfinesNetworkToLimaSSHAndProxy(t *testing.T) {
 		}
 		if !c.allowed && got == "ok" {
 			t.Errorf("%s must be unreachable under the profile", c.label)
+		}
+	}
+}
+
+// The allowances are for TCP: a UDP service on the Mac's loopback at the
+// SSH-forward or proxy port number must stay out of reach. The check is
+// what the listener received, not whether sendto reported an error.
+func TestProfileBlocksUDPOnAllowedPorts(t *testing.T) {
+	sshPort, sshGot := tcpUDPListener(t)
+	proxyPort, proxyGot := tcpUDPListener(t)
+	h := newHarness(t, shortTempDir(t), sshPort, proxyPort)
+	for _, c := range []struct {
+		label string
+		port  int
+		got   <-chan string
+	}{{"the SSH forward's port", sshPort, sshGot}, {"the host proxy's port", proxyPort, proxyGot}} {
+		h.run(false, "udp", fmt.Sprint(c.port))
+		if !received(c.got) {
+			t.Fatalf("control: a datagram to %s should arrive without the profile", c.label)
+		}
+		if got := h.run(true, "tcp", fmt.Sprint(c.port)); got != "ok" {
+			t.Errorf("TCP to %s should be reachable under the profile: %s", c.label, got)
+		}
+		h.run(true, "udp", fmt.Sprint(c.port))
+		if received(c.got) {
+			t.Errorf("a datagram to %s arrived from under the profile: UDP must be denied", c.label)
 		}
 	}
 }

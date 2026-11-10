@@ -97,6 +97,17 @@ def udp_ntp(server, timeout=4):
     except Exception as e:
         return False, type(e).__name__ + ": " + str(e)
 
+def udp_answer(host, port, timeout=4):
+    """ok means a datagram to host:port was answered."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(timeout)
+        s.sendto(b"devkit-udp-probe", (host, port))
+        data, _ = s.recvfrom(200)
+        return True, repr(data[:60])
+    except Exception as e:
+        return False, type(e).__name__ + ": " + str(e)
+
 def icmp(host, timeout=4):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
@@ -153,6 +164,10 @@ for srv in [GW, "192.168.5.3"]:
 print("== the Mac's loopback")
 ok, d = tcp(GW, CANARY, GET)
 report(f"canary listener on the Mac ({GW}:{CANARY})", "fail", yes(ok), d)
+# The profile allows the host proxy's port over TCP only. The test runs a UDP
+# listener on the Mac at the same port number that answers every datagram.
+ok, d = udp_answer(GW, ALLOWED)
+report(f"UDP to the host proxy's port number ({GW}:{ALLOWED})", "fail", yes(ok), d)
 open_ports = []
 for p in list(range(1, 1025)) + list(range(3000, 9001, 50)) + [5432, 5433, 6379, 8080, 8443, 27017, CANARY]:
     if p == ALLOWED:

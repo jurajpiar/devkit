@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -78,6 +79,41 @@ func TestHostEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostPort := strings.TrimSpace(string(portData))
+	// A UDP service on the Mac's loopback at the host proxy's port number,
+	// which the profile allows over TCP only. It answers every datagram and
+	// counts those that arrive; TCP and UDP port numbers are separate, so it
+	// binds beside the proxy.
+	udpCanary, err := net.ListenPacket("udp", "127.0.0.1:"+hostPort)
+	if err != nil {
+		t.Fatalf("UDP listener on the host proxy's port number: %v", err)
+	}
+	t.Cleanup(func() { udpCanary.Close() })
+	var udpGot atomic.Int32
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, from, err := udpCanary.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			udpGot.Add(1)
+			_, _ = udpCanary.WriteTo(append([]byte("devkit-udp-canary:"), buf[:n]...), from)
+		}
+	}()
+	// Control, from the Mac: the listener answers.
+	if c, err := net.Dial("udp", "127.0.0.1:"+hostPort); err != nil {
+		t.Fatal(err)
+	} else {
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = c.Write([]byte("control"))
+		buf := make([]byte, 64)
+		n, err := c.Read(buf)
+		c.Close()
+		if err != nil || !strings.HasPrefix(string(buf[:n]), "devkit-udp-canary:") {
+			t.Fatalf("control: the UDP listener should answer on the Mac: %v %q", err, buf[:n])
+		}
+	}
+	udpBefore := udpGot.Load()
 	hostLog := func() string {
 		b, _ := os.ReadFile(filepath.Join(state, "hostproxy.log"))
 		return string(b)
@@ -145,6 +181,12 @@ func TestHostEnforcement(t *testing.T) {
 		}
 		if m[2] != "0" || m[1] == "0" {
 			t.Errorf("guest root escaped host enforcement: %s pass, %s fail", m[1], m[2])
+		}
+		if !strings.Contains(out, "UDP to the host proxy's port number") {
+			t.Errorf("the probe did not try UDP to the host proxy's port number")
+		}
+		if n := udpGot.Load() - udpBefore; n != 0 {
+			t.Errorf("%d datagram(s) from the guest reached the UDP listener at the host proxy's port number", n)
 		}
 	})
 }

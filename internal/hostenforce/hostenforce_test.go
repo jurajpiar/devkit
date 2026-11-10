@@ -24,8 +24,8 @@ func TestRenderMatchesTheSpikeProfile(t *testing.T) {
 		`(allow default)`,
 		`(deny network-outbound)`,
 		`(allow network-outbound (remote unix-socket (path-regex #"^/Users/alice/\.lima/")))`,
-		`(allow network-outbound (remote ip "localhost:2223"))`,
-		`(allow network-outbound (remote ip "localhost:13128"))`,
+		`(allow network-outbound (remote tcp "localhost:2223"))`,
+		`(allow network-outbound (remote tcp "localhost:13128"))`,
 	}
 	if !reflect.DeepEqual(rules, want) {
 		t.Errorf("profile rules:\n%s\nwant:\n%s", strings.Join(rules, "\n"), strings.Join(want, "\n"))
@@ -37,8 +37,17 @@ func TestRenderWithoutAProxyOmitsItsRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(got, "(remote ip ") != 1 || !strings.Contains(got, `"localhost:2223"`) {
+	if strings.Count(got, "(remote tcp ") != 1 || !strings.Contains(got, `"localhost:2223"`) {
 		t.Errorf("only the SSH forward should be allowed:\n%s", got)
+	}
+}
+
+// The loopback allowances name TCP: "remote ip" would cover UDP too, and
+// neither the SSH forward nor the host proxy speaks UDP.
+func TestRenderAllowsLoopbackOverTCPOnly(t *testing.T) {
+	got, _ := Render(Profile{LimaHome: "/Users/alice/.lima", SSHPort: 2223, ProxyPort: 13128})
+	if strings.Contains(got, "(remote ip ") || strings.Contains(got, "(remote udp ") {
+		t.Errorf("loopback must be allowed over TCP only:\n%s", got)
 	}
 }
 

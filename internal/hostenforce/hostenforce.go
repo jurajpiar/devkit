@@ -96,9 +96,9 @@ func Render(p Profile) (string, error) {
 	b.WriteString("(allow default)\n")
 	b.WriteString("(deny network-outbound)\n")
 	fmt.Fprintf(&b, "(allow network-outbound (remote unix-socket (path-regex #\"^%s/\")))\n", regexp.QuoteMeta(home))
-	fmt.Fprintf(&b, "(allow network-outbound (remote ip \"localhost:%d\"))\n", p.SSHPort)
+	fmt.Fprintf(&b, "(allow network-outbound (remote tcp \"localhost:%d\"))\n", p.SSHPort)
 	if p.ProxyPort != 0 {
-		fmt.Fprintf(&b, "(allow network-outbound (remote ip \"localhost:%d\"))\n", p.ProxyPort)
+		fmt.Fprintf(&b, "(allow network-outbound (remote tcp \"localhost:%d\"))\n", p.ProxyPort)
 	}
 	return b.String(), nil
 }
