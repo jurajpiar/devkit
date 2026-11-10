@@ -125,6 +125,39 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLockModules(t *testing.T) {
+	c, err := Parse([]byte("name: x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.VM.LockModules != nil || !c.VM.LockModulesOn() {
+		t.Fatal("lock_modules must default to on")
+	}
+	c, err = Parse([]byte("name: x\nvm:\n  lock_modules: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.VM.LockModulesOn() {
+		t.Fatal("lock_modules: false must be honoured")
+	}
+	for _, on := range []bool{false, true} {
+		c := Default()
+		c.Name = "lock"
+		c.VM.LockModules = &on
+		path := filepath.Join(t.TempDir(), "devkit.yaml")
+		if err := c.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.VM.LockModules == nil || *got.VM.LockModules != on {
+			t.Fatalf("lock_modules: %v did not round-trip: %v", on, got.VM.LockModules)
+		}
+	}
+}
+
 func TestLoadMissing(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "devkit init") {
