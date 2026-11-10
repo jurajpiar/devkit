@@ -306,3 +306,55 @@ func TestFirewallHeredocIsUnique(t *testing.T) {
 		}
 	})
 }
+
+// Lima's image gives the user passwordless sudo, and with it the power to
+// lift the provisioning hold. devkit's policy must be in place before any
+// step that can fail for reasons outside the VM (downloads, packages), so a
+// first boot that fails there leaves no sudo behind, and before the hold
+// itself. The trap comes first, so a failure in it is reported.
+func TestSudoPolicyComesBeforeAnythingThatCanFail(t *testing.T) {
+	check := func(t *testing.T, s string, full bool) {
+		const begin, end = "# ---- sudo ----\n", "visudo -cf /etc/sudoers.d/devkit >/dev/null\n"
+		if strings.Count(s, begin) != 1 || strings.Count(s, end) != 1 {
+			t.Fatal("the sudo block should appear exactly once")
+		}
+		b, e := strings.Index(s, begin), strings.Index(s, end)
+		block := s[b:e]
+		trap := strings.Index(s, "trap 'on_error")
+		if !(trap >= 0 && trap < b) {
+			t.Errorf("the trap must be set before the sudo policy: trap=%d sudo=%d", trap, b)
+		}
+		for _, later := range []string{holdSlice, holdResolved, "$APT ", `"${CURL[@]}"`, "$SECAPT ", `/install" --daemon`, "loginctl", "systemctl"} {
+			if i := strings.Index(s, later); i >= 0 && i < e {
+				t.Errorf("%q runs before the sudo policy is in place", later)
+			}
+		}
+		for _, want := range []string{"rm -f /etc/sudoers.d/90-cloud-init-users", `gpasswd -d "$DEVKIT_USER" sudo`, "chmod 440 /etc/sudoers.d/devkit"} {
+			if !strings.Contains(block, want) {
+				t.Errorf("the sudo block should contain %q", want)
+			}
+		}
+		lima := "Cmnd_Alias DEVKIT_LIMA = /usr/bin/cat /mnt/lima-cidata/param.env, /usr/bin/diff -q /run/lima-ssh-ready /mnt/lima-cidata/meta-data, /usr/bin/diff -q /run/lima-boot-done /mnt/lima-cidata/meta-data\n$DEVKIT_USER ALL=(root) NOPASSWD: DEVKIT_LIMA\n"
+		if full {
+			if !strings.Contains(block, "$DEVKIT_USER ALL=(ALL) NOPASSWD:ALL\n") || strings.Contains(block, "DEVKIT_LIMA") {
+				t.Errorf("sudo: true keeps full sudo:\n%s", block)
+			}
+		} else if !strings.Contains(block, lima) || strings.Contains(block, "NOPASSWD:ALL") {
+			t.Errorf("without sudo: true only Lima's boot checks are allowed:\n%s", block)
+		}
+	}
+	everyVariant(t, func(t *testing.T, s string) { check(t, s, false) })
+	for name, p := range map[string]Params{
+		"sudo":      params(func(c *project.Config) { c.Sudo = true }),
+		"host":      hostParams(nil),
+		"host-sudo": hostParams(func(c *project.Config) { c.Sudo = true }),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, err := System(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(t, s, p.Config.Sudo)
+		})
+	}
+}
