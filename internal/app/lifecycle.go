@@ -31,11 +31,15 @@ var downCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		name := cfg.VMName()
 		if inst == nil || !inst.Running() {
-			fmt.Printf("VM %s is not running\n", cfg.VMName())
-			return nil
+			fmt.Printf("VM %s is not running\n", name)
+		} else if err := lima.Stop(cmd.Context(), name); err != nil {
+			return err
 		}
-		return lima.Stop(cmd.Context(), cfg.VMName())
+		// The host proxy goes with the VM; its port stays the VM's.
+		_ = os.Remove(filepath.Join(vmStateDir(name), hostAgentPIDFile))
+		return stopHostProxy(name)
 	},
 }
 
@@ -62,7 +66,7 @@ var rmCmd = &cobra.Command{
 		if inst == nil {
 			fmt.Printf("VM %s does not exist\n", name)
 			_ = removeSSHConfig(cfg.Name)
-			return nil
+			return removeHostState(name)
 		}
 		force, _ := cmd.Flags().GetBool("force")
 		if !force && !confirm(fmt.Sprintf("Delete VM %s and all data inside it?", name)) {
@@ -72,6 +76,9 @@ var rmCmd = &cobra.Command{
 			return err
 		}
 		_ = os.Remove(filepath.Join(devkitHome(), "instances", name+".yaml"))
+		if err := removeHostState(name); err != nil {
+			fmt.Printf("Warning: %v\n", err)
+		}
 		if err := removeSSHConfig(cfg.Name); err != nil {
 			fmt.Printf("Warning: could not clean ~/.ssh/config: %v\n", err)
 		}
@@ -128,7 +135,7 @@ var shellCmd = &cobra.Command{
 		if err := requireProvisioned(cmd.Context(), cfg); err != nil {
 			return err
 		}
-		warnIfStale(cmd.Context(), cfg)
+		warnRunning(cmd.Context(), cfg)
 		return lima.Shell(cmd.Context(), cfg.VMName(), "", "bash", "-lc", shellScript(cfg, args))
 	},
 }
@@ -150,7 +157,7 @@ var syncCmd = &cobra.Command{
 		if err := requireProvisioned(cmd.Context(), cfg); err != nil {
 			return err
 		}
-		warnIfStale(cmd.Context(), cfg)
+		warnRunning(cmd.Context(), cfg)
 		cwd, _ := os.Getwd()
 		if cfg.Source == project.SourceGit && isDir(bareRepo(cwd)) {
 			ws := "$HOME/" + provision.WorkspaceDir
@@ -177,12 +184,21 @@ var logsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		follow, _ := cmd.Flags().GetBool("follow")
+		lines, _ := cmd.Flags().GetInt("lines")
+		if cfg.HostEnforced() {
+			// The host proxy's log is the authoritative one: it sees every
+			// request that leaves, root's included, and nothing in the
+			// guest can rewrite it. The VM need not be running.
+			if inst, _ := instance(cmd.Context(), cfg); inst != nil && inst.Running() {
+				warnRunning(cmd.Context(), cfg)
+			}
+			return showHostLog(cmd, cfg.VMName(), lines, follow)
+		}
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err
 		}
-		warnIfStale(cmd.Context(), cfg)
-		follow, _ := cmd.Flags().GetBool("follow")
-		lines, _ := cmd.Flags().GetInt("lines")
+		warnRunning(cmd.Context(), cfg)
 		tail := fmt.Sprintf("tail -n %d", lines)
 		if follow {
 			tail += " -f"
@@ -196,6 +212,15 @@ func init() {
 	rmCmd.Flags().BoolP("force", "f", false, "do not ask for confirmation")
 	logsCmd.Flags().BoolP("follow", "f", false, "keep following the log")
 	logsCmd.Flags().IntP("lines", "n", 100, "number of lines to show")
+}
+
+// removeHostState stops the VM's host proxy and deletes devkit's host-side
+// state for it, the host log included.
+func removeHostState(name string) error {
+	if err := stopHostProxy(name); err != nil {
+		return err
+	}
+	return os.RemoveAll(vmStateDir(name))
 }
 
 // shellScript opens a login shell in the workspace, or runs a command there.

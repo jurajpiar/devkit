@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jurajpiar/devkit/internal/embedded"
@@ -12,6 +13,14 @@ import (
 	"github.com/jurajpiar/devkit/internal/project"
 	"github.com/jurajpiar/devkit/internal/provision"
 )
+
+// warnRunning prints the warnings every command that uses a running VM
+// without restarting it owes the user: a stale policy, and under
+// network.enforce: host a VM whose network the Mac does not confine.
+func warnRunning(ctx context.Context, cfg *project.Config) {
+	warnIfStale(ctx, cfg)
+	warnIfUnconfined(ctx, cfg)
+}
 
 // warnIfStale prints a warning when the running VM applied a policy older or
 // otherwise different from what this devkit binary would apply now. Commands
@@ -63,10 +72,21 @@ func expectedProvisionID(ctx context.Context, cfg *project.Config) string {
 		}
 		sha = embedded.SHA256(bin)
 	}
+	hostProxy := ""
+	if cfg.HostEnforced() {
+		// The port up chose and kept; without one, up has never run in
+		// host mode and there is nothing to compare.
+		data, err := os.ReadFile(filepath.Join(vmStateDir(cfg.VMName()), hostProxyPortFile))
+		if err != nil {
+			return ""
+		}
+		hostProxy = hostGateway + ":" + strings.TrimSpace(string(data))
+	}
 	fp, err := provision.Fingerprint(provision.Params{
 		Config:       cfg,
 		User:         hostUser(),
 		EgressSHA256: sha,
+		HostProxy:    hostProxy,
 	})
 	if err != nil {
 		return ""

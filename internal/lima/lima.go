@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -110,6 +111,20 @@ func Home() string {
 		dir = abs
 	}
 	return dir
+}
+
+// HostAgentPID is the pid of the instance's host agent, the Mac process that
+// carries the VM's network, from the ha.pid Lima writes while it runs.
+func HostAgentPID(name string) (int, error) {
+	data, err := os.ReadFile(filepath.Join(Dir(name), "ha.pid"))
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid < 1 {
+		return 0, fmt.Errorf("%s/ha.pid does not hold a pid", Dir(name))
+	}
+	return pid, nil
 }
 
 // ConfigPath is the instance's lima.yaml.

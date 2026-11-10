@@ -15,6 +15,24 @@ func mustGetwd(t *testing.T) string {
 	return wd
 }
 
+func TestHostAgentPID(t *testing.T) {
+	t.Setenv("LIMA_HOME", t.TempDir())
+	if pid, err := HostAgentPID("vm"); err == nil || pid != 0 {
+		t.Errorf("no ha.pid: want an error, got %d", pid)
+	}
+	os.MkdirAll(Dir("vm"), 0o755)
+	os.WriteFile(filepath.Join(Dir("vm"), "ha.pid"), []byte("4321\n"), 0o644)
+	if pid, err := HostAgentPID("vm"); err != nil || pid != 4321 {
+		t.Errorf("got %d, %v; want 4321", pid, err)
+	}
+	for _, bad := range []string{"", "x", "0", "-1"} {
+		os.WriteFile(filepath.Join(Dir("vm"), "ha.pid"), []byte(bad), 0o644)
+		if pid, err := HostAgentPID("vm"); err == nil {
+			t.Errorf("%q: want an error, got %d", bad, pid)
+		}
+	}
+}
+
 func TestHomeFollowsLimaHome(t *testing.T) {
 	t.Setenv("LIMA_HOME", "/tmp/elsewhere")
 	if got := Home(); got != "/tmp/elsewhere" {

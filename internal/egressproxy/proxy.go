@@ -48,7 +48,14 @@ type ProxyConfig struct {
 	// of following it, so the client (an inner proxy with a narrower
 	// allowlist, or apt) decides about the new location itself.
 	ReturnRedirects bool
+	// Health, when set, is the body returned for GET HealthPath asked of the
+	// proxy itself rather than through it, so whoever started the proxy can
+	// tell it is up and is the process it started. Not a secret.
+	Health string
 }
+
+// HealthPath is where a proxy with ProxyConfig.Health answers.
+const HealthPath = "/devkit-health"
 
 // ValidateUpstream checks that addr is "ip:port", with no name to resolve.
 func ValidateUpstream(addr string) error {
@@ -174,6 +181,9 @@ func (p *Proxy) Stop() error {
 func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		p.handleConnect(w, r)
+	} else if p.config.Health != "" && r.Method == http.MethodGet && r.URL.Host == "" && r.URL.Path == HealthPath {
+		// Origin form: a request to the proxy, not through it.
+		io.WriteString(w, p.config.Health)
 	} else {
 		p.handleHTTP(w, r)
 	}
