@@ -461,12 +461,18 @@ func checkCrashes(cmd *cobra.Command, cfg *project.Config) error {
 }
 
 // auditCrashes prints the audit's kernel crash section to w and reports
-// whether it holds a finding, or an error when the log could not be read.
+// whether it holds a finding, and an error when the log could not be read.
+// The reports saved before still count when the log cannot be read: both
+// can be returned.
 func auditCrashes(w io.Writer, name string, running bool) (st *crashState, finding bool, err error) {
 	st, err = scanCrashes(name)
 	switch {
 	case err != nil:
 		fmt.Fprintf(w, "Kernel crash reports: could not read VM %s's serial log: %v\n", name, err)
+		if st.panicked(running) || len(st.Crashes) > 0 {
+			fmt.Fprintf(w, "The reports saved before:\n%s", crashWarning(name, st, running))
+			finding = true
+		}
 	case st.panicked(running) || len(st.Crashes) > 0:
 		fmt.Fprintf(w, "Kernel crash reports:\n%s", crashWarning(name, st, running))
 		finding = true

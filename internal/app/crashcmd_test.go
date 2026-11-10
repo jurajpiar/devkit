@@ -483,3 +483,68 @@ func TestAuditOfAMissingVMReportsItsSavedCrash(t *testing.T) {
 		t.Errorf("no shell for a missing VM: %q", f.Calls())
 	}
 }
+
+// unreadableLog puts a directory where the VM's serial log was, so the next
+// scan fails to read it, whoever runs the tests.
+func unreadableLog(t *testing.T) {
+	t.Helper()
+	must(t, os.Remove(serialLog(demoVM)))
+	must(t, os.Mkdir(serialLog(demoVM), 0o755))
+}
+
+// A serial log that cannot be read must not hide the reports already saved.
+func TestAuditShowsSavedCrashesWhenTheLogCannotBeRead(t *testing.T) {
+	f, cfg := crashProject(t, "Running", oopsLines)
+	if _, err := scanCrashes(demoVM); err != nil {
+		t.Fatal(err)
+	}
+	unreadableLog(t)
+	f.OnShell("devkit-audit", "", 0)
+	out, err := runDevkit(t, "", "audit", "--config", cfg)
+	if auditCode(err) != 1 {
+		t.Fatalf("a saved unacknowledged crash is a finding even when the log cannot be read: exit 1, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "could not read VM "+demoVM+"'s serial log") || !strings.Contains(out, "Internal error: Oops") {
+		t.Errorf("audit should say the log could not be read and show the saved report:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "could not read") {
+		t.Errorf("the error should still say part of the audit could not run: %v", err)
+	}
+}
+
+func TestAuditWithoutSavedCrashesWhenTheLogCannotBeRead(t *testing.T) {
+	f, cfg := crashProject(t, "Running", "")
+	if _, err := scanCrashes(demoVM); err != nil {
+		t.Fatal(err)
+	}
+	unreadableLog(t)
+	f.OnShell("devkit-audit", "", 0)
+	out, err := runDevkit(t, "", "audit", "--config", cfg)
+	if auditCode(err) != 2 || !strings.Contains(err.Error(), "could not read the kernel crash reports") {
+		t.Fatalf("no verdict on the crash reports: exit 2, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "could not read VM "+demoVM+"'s serial log") || strings.Contains(out, "Warning:") {
+		t.Errorf("audit should only say the log could not be read:\n%s", out)
+	}
+}
+
+func TestShellWarnsAboutSavedCrashesWhenTheLogCannotBeRead(t *testing.T) {
+	_, cfg := crashProject(t, "Running", oopsLines)
+	if _, err := scanCrashes(demoVM); err != nil {
+		t.Fatal(err)
+	}
+	unreadableLog(t)
+	out, err := runDevkit(t, "", "shell", "--config", cfg, "true")
+	if err != nil {
+		t.Fatalf("shell: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "could not read VM "+demoVM+"'s serial log") || !strings.Contains(out, "Internal error: Oops") {
+		t.Errorf("shell should say the log could not be read and still warn about the saved report:\n%s", out)
+	}
+
+	var w strings.Builder
+	newCrashWarning(&w, demoVM, nil)
+	if !strings.Contains(w.String(), "could not read VM "+demoVM+"'s serial log") || !strings.Contains(w.String(), "Internal error: Oops") {
+		t.Errorf("newCrashWarning should say the log could not be read and still show the saved report:\n%s", w.String())
+	}
+}

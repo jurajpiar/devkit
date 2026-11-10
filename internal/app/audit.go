@@ -78,16 +78,21 @@ without one there is no verdict, and the status is 2.`,
 		// Through shellScript so a Nix dev shell's node and keytool are on PATH.
 		err = lima.ExecStream(cmd.Context(), cfg.VMName(), shellScript(cfg, []string{script}))
 		// An unacknowledged crash report is a finding whatever the trust
-		// audit says: 1.
+		// audit says, and even when the serial log could not be read for
+		// new ones: 1.
+		var unread string
+		if crashErr != nil {
+			unread = fmt.Sprintf("; could not read the serial log for new ones: %v", crashErr)
+		}
 		switch v := auditExit(err); {
 		case v == auditStale && crashed:
-			return &exitError{code: 1, msg: "stale trust and unacknowledged kernel crash reports found"}
+			return &exitError{code: 1, msg: "stale trust and unacknowledged kernel crash reports found" + unread}
 		case v == auditStale:
 			return &exitError{code: 1, msg: "stale trust found"}
 		case crashed && v == auditClean:
-			return &exitError{code: 1, msg: "unacknowledged kernel crash reports found"}
+			return &exitError{code: 1, msg: "unacknowledged kernel crash reports found" + unread}
 		case crashed:
-			return &exitError{code: 1, msg: fmt.Sprintf("unacknowledged kernel crash reports found; the trust audit did not complete: %v", err)}
+			return &exitError{code: 1, msg: fmt.Sprintf("unacknowledged kernel crash reports found%s; the trust audit did not complete: %v", unread, err)}
 		case v != auditClean:
 			return &exitError{code: 2, msg: fmt.Sprintf("audit did not complete: %v", err)}
 		case crashErr != nil:
