@@ -31,21 +31,37 @@ func TestKernelLockdown(t *testing.T) {
 	t.Cleanup(func() { _, _ = s.run("rm", "--force") })
 	cfg := filepath.Join(dir, "devkit.yaml")
 	setYAML(t, cfg, "# sudo: false", "sudo: true")
-	setYAML(t, cfg, "  # packages: [postgresql-client]", "  packages: [rootlesskit, slirp4netns, uidmap]")
+	setYAML(t, cfg, "  # packages: [postgresql-client]", "  packages: [rootlesskit, uidmap]")
 	out := s.mustRun("up", "--no-install")
 	if !strings.Contains(out, "locking kernel module loading") {
 		t.Errorf("up should show the lock step:\n%s", out)
 	}
 
 	// rootlesskit is exempted by Ubuntu's AppArmor profile, so with the
-	// namespace allowed it gets a working CAP_NET_ADMIN inside it.
-	const rootlesskit = "timeout 30 rootlesskit --net=slirp4netns --disable-host-loopback sh -c 'ip link add dkp0 type dummy && echo NETADMIN-OK' 2>&1; true"
+	// namespace allowed it gets a working CAP_NET_ADMIN inside it. The
+	// probe needs no kernel module, as module loading is locked by now: in
+	// rootlesskit's user namespace (its default host network, no
+	// slirp4netns or tun) it creates a network namespace and changes its
+	// loopback, which takes CAP_NET_ADMIN in the namespace that owns it.
+	// The token is printed with printf so that it is not in the command
+	// line: rootlesskit's error on a failed child quotes the child's
+	// argument list, and a literal token there once satisfied the control
+	// while the probe failed.
+	const rootlesskit = "timeout 30 rootlesskit unshare -n sh -c 'ip link set lo up && ip addr add 10.99.99.1/32 dev lo && printf \"NETADMIN-%s\\n\" OK' 2>&1; echo exit=$?"
+	netAdmin := func(out string) bool {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.TrimSpace(l) == "NETADMIN-OK" {
+				return true
+			}
+		}
+		return false
+	}
 	closed := func(t *testing.T) {
 		t.Helper()
 		if out, _ := s.shell("unshare -U true 2>&1; echo exit=$?"); strings.Contains(out, "exit=0") {
 			t.Errorf("the sandbox user created a user namespace: %s", out)
 		}
-		if out, _ := s.shell(rootlesskit); strings.Contains(out, "NETADMIN-OK") {
+		if out, _ := s.shell(rootlesskit); netAdmin(out) {
 			t.Errorf("an exempted rootlesskit got CAP_NET_ADMIN in a namespace: %s", out)
 		}
 	}
@@ -83,8 +99,8 @@ func TestKernelLockdown(t *testing.T) {
 		s.mustRun("shell", "sudo sysctl -q -w kernel.unprivileged_userns_clone=1 && echo opened")
 		out, _ := s.shell(rootlesskit)
 		s.mustRun("shell", "sudo sysctl -q -w kernel.unprivileged_userns_clone=0 && echo closed")
-		if !strings.Contains(out, "NETADMIN-OK") {
-			t.Errorf("control: with the switch open, rootlesskit should get CAP_NET_ADMIN (the probe is otherwise vacuous): %s", out)
+		if !netAdmin(out) {
+			t.Fatalf("the control is broken: with the switch open, rootlesskit must get CAP_NET_ADMIN and print NETADMIN-OK, or every closed check is vacuous: %s", out)
 		}
 	})
 
