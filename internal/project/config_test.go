@@ -173,3 +173,41 @@ func TestAllowPortsDNSAndForward(t *testing.T) {
 		}
 	}
 }
+
+func TestEnforce(t *testing.T) {
+	c, err := Parse([]byte("name: a\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.HostEnforced() {
+		t.Fatal("enforcement must default to the guest")
+	}
+	for _, v := range []string{"guest", "host"} {
+		c, err := Parse([]byte("name: a\nnetwork:\n  enforce: " + v + "\n"))
+		if err != nil {
+			t.Fatalf("enforce: %s should parse: %v", v, err)
+		}
+		if c.HostEnforced() != (v == "host") {
+			t.Errorf("enforce: %s: HostEnforced() = %v", v, c.HostEnforced())
+		}
+	}
+	for label, c := range map[string]struct{ yaml, want string }{
+		"unknown value":    {"network:\n  enforce: mac\n", "network.enforce must be guest or host"},
+		"with allow_host":  {"network:\n  enforce: host\n  allow_host: true\n", "allow_host"},
+		"with resolvers":   {"network:\n  enforce: host\n  dns: resolvers\n", "dns: resolvers"},
+		"with mode: none":  {"network:\n  enforce: host\n  mode: none\n", "mode: none"},
+		"resolvers, guest": {"network:\n  enforce: guest\n  dns: resolvers\n", ""},
+		"open, host":       {"network:\n  enforce: host\n  mode: open\n", ""},
+	} {
+		_, err := Parse([]byte("name: a\n" + c.yaml))
+		if c.want == "" {
+			if err != nil {
+				t.Errorf("%s: should parse: %v", label, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error naming %q, got %v", label, c.want, err)
+		}
+	}
+}
