@@ -156,7 +156,7 @@ allowed host the attacker already controls, or a hypervisor escape.
 | Get code onto your remote, and from there into CI or your checkout | `devkit push` only: the VM holds no credentials; you review the commits, the changed files that run outside the VM are flagged, and nothing is pushed until you say yes | You approve it; the review is the gate, see "What git in the VM changes" below | `TestPushReviewsThenPushesWithHostCredentialsAndNoHooks`, `TestReviewShowsEveryCommitWhateverItsText`, `TestReviewShowsWhatAForcedPushRemoves` |
 | Exploit git on your Mac with a crafted bundle | devkit parses the header itself; `git index-pack --strict` checks every object; size capped at 512 MiB; no hooks run | A bug in git's own pack parsing, the code every `git fetch` from an untrusted remote runs | `TestImportRejectsAMaliciousTree`, `TestImportChecksObjectsEvenWhenTheRepoDisablesFsck` |
 | Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | Root in the guest; or the devkit binary or devkit.yaml on your Mac is tampered with, which is outside the sandbox entirely | `policy files are root-only` |
-| Become root | No sudo; io_uring, unprivileged BPF, user namespaces and `AF_ALG` off; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied` |
+| Become root | No sudo; io_uring, unprivileged BPF and `AF_ALG` off; unprivileged user namespaces refused (unless `containers: true`); module loading locked after provisioning; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied`, `TestKernelLockdown` |
 | Root reaches your Mac's loopback services | Nothing inside the guest | The row above; your files still need a hypervisor escape on top | `TestRootInGuestReachesHost`, kept red on purpose |
 
 ### Enforcement on the Mac: `network.enforce: host`
@@ -288,6 +288,7 @@ vm:
   cpus: 4
   memory_gb: 8
   disk_gb: 50
+  # lock_modules: true   # no kernel module loads after provisioning, root included, until restart
 
 ssh_port: 2222
 
@@ -384,6 +385,16 @@ boot that installed it says so. `vm.security_updates: false` turns the step off;
 `devkit up --no-security-updates` writes that for you, so the next boots are
 quick again and the VM says so in its policy stamp.
 
+Two more kernel controls. Unprivileged user namespaces are refused outright
+(`kernel.unprivileged_userns_clone = 0`), including to the programs Ubuntu's
+AppArmor profiles exempt, such as `rootlesskit` or `podman` installed from
+`tools.packages`; root is unaffected. `containers: true` leaves them open,
+under AppArmor's restriction alone, because rootless containerd needs them.
+Kernel module loading is locked, for root too, as the last step of
+provisioning, after the firewall is up and what the configuration needs is
+loaded; every boot locks it again. A tool that needs a module nothing loaded
+beforehand then fails; set `vm.lock_modules: false` for that project.
+
 **Trust store.** The VM trusts what Ubuntu's `ca-certificates` package
 trusts, refreshed by root on every boot, so a VM created before a CA was
 removed upstream catches up on its next start. `network.distrust` names roots
@@ -430,7 +441,10 @@ thing that can reach the port is the sandbox itself. Remove the service from
 `devkit.yaml` and the next `devkit up` stops it and keeps the data.
 
 **Containers** are opt-in. With `containers: true` the VM gets rootless
-containerd and `nerdctl` for databases and services.
+containerd and `nerdctl` for databases and services. It also leaves
+unprivileged user namespaces open, which rootless containerd needs, and loads
+the bridge, overlay and netfilter modules containers use before module
+loading is locked.
 
 ## Toolchains
 
