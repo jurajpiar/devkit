@@ -160,7 +160,33 @@ step() { printf 'devkit-progress: %s\n' "$*" > /dev/hvc0 2>/dev/null || true; }
 # guest's cloud-init log, where nobody sees it.
 warn() { printf 'devkit: %s\n' "$*" >&2; step "warning: $*"; }
 note() { printf 'devkit: %s\n' "$*" >&2; step "note: $*"; }
+# set -e aborts at the first failing command; this names it on the console
+# first, so devkit up can say what failed after it has stopped the VM. The
+# command is the script's own text, not its expanded values.
+on_error() {
+  local cmd="${3//[[:cntrl:]]/ }"
+  step "failed: ${cmd:0:200} (line $2, exit $1)"
+}
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 step "provisioning started"
+
+# ---- provisioning hold: no network for the sandbox user until the firewall ----
+# The firewall is applied at the end of this script. Until then, and until
+# the VM shuts down if any step fails (no stamp is written, and devkit up
+# stops the VM), the
+# sandbox user's slice and systemd-resolved, which could relay lookups for
+# it, have no IP traffic at all: not to the internet, the Mac, Lima's DNS or
+# loopback, whatever interface a socket binds to. systemd enforces it per
+# cgroup, which the user cannot leave, and it needs no packages, so it holds
+# on a first boot whose package installation fails. Root runs this script in
+# a system unit and keeps its network; it resolves upstream directly, not
+# through resolved. Set at runtime, never as a drop-in file: on systemd 255 a
+# drop-in hold cannot be lifted cleanly. Lifted after the firewall, below.
+SANDBOX_UID="$(id -u "$DEVKIT_USER")"
+HOLD_SLICE="user-$SANDBOX_UID.slice"
+step "holding the sandbox user off the network until the firewall is applied"
+systemctl set-property --runtime "$HOLD_SLICE" IPAddressDeny=any
+systemctl set-property --runtime systemd-resolved.service IPAddressDeny=any
 
 # ---- logind stall guard ----
 # Lima's boot script terminates the user's sessions to apply /etc/environment
@@ -213,7 +239,7 @@ EOF
 echo "{{.EgressSHA256}}" > /etc/devkit/egress.sha256
 # The stamp is removed now and written back only when every step below has
 # succeeded (the script runs with set -e), so an aborted provisioning leaves
-# a VM that reports itself as predating the policy rather than current.
+# a VM without one, which devkit up stops and devkit shell and sync refuse.
 rm -f /etc/devkit/provision.id
 chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256
 chown "$DEVKIT_USER" {{.DropDir}}
@@ -659,7 +685,6 @@ chmod 755 /usr/local/sbin/devkit-firewall
 # firewall replaces it. Root, which only runs devkit's own provisioning, keeps
 # the network it needs for downloads. The first boot needs no hold: nothing of
 # the sandbox's exists on a fresh disk.
-SANDBOX_UID="$(id -u "$DEVKIT_USER")"
 RESOLVE_UID="$(id -u systemd-resolve 2>/dev/null || true)"
 # The sandbox's rootless containers run processes as its subordinate UIDs.
 SUBUIDS="$(awk -F: -v u="$DEVKIT_USER" '$1==u{print $2"-"($2+$3-1); exit}' /etc/subuid 2>/dev/null || true)"
@@ -786,6 +811,17 @@ else
 fi
 
 /usr/local/sbin/devkit-firewall
+
+# ---- lift the provisioning hold: the firewall decides from here ----
+# On systemd 255, clearing IPAddressDeny or reverting alone leaves the
+# slice's filter in place; allowing everything and then reverting removes it.
+# resolved's comes off with a revert and a restart. Nothing here is excused:
+# if a step fails, the script aborts before the stamp.
+step "lifting the provisioning hold"
+systemctl set-property --runtime "$HOLD_SLICE" IPAddressAllow=any
+systemctl revert "$HOLD_SLICE"
+systemctl revert systemd-resolved.service
+systemctl restart systemd-resolved
 echo "{{.ProvisionID}}" > /etc/devkit/provision.id
 chmod 644 /etc/devkit/provision.id
 step "done"
