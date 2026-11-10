@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"text/template"
@@ -31,6 +32,11 @@ type Params struct {
 	// it so commands can tell when a VM is running provisioning older than the
 	// devkit binary. Set by Fingerprint; leave empty when computing it.
 	ProvisionID string
+	// HostProxy is devkit's proxy on the Mac as the guest reaches it,
+	// "192.168.5.2:<port>", under network.enforce: host; empty otherwise.
+	// Root's downloads and the in-guest proxy go through it, and the
+	// firewall lets the proxy's account reach it and nothing else.
+	HostProxy string
 }
 
 // System renders the root provisioning script.
@@ -67,6 +73,10 @@ func render(src string, p Params) (string, error) {
 	if strings.ContainsAny(p.MountPath, "\n\r\u0085\u2028\u2029") {
 		return "", fmt.Errorf("project path contains a line break, which cannot be provisioned safely: %q", p.MountPath)
 	}
+	hostIP, hostPort, err := splitHostProxy(p)
+	if err != nil {
+		return "", err
+	}
 	t, err := template.New("script").Funcs(template.FuncMap{
 		"join": strings.Join,
 		"shq":  shellQuote,
@@ -102,6 +112,8 @@ func render(src string, p Params) (string, error) {
 		NixArm64SHA:   NixArm64SHA,
 		NixAmd64SHA:   NixAmd64SHA,
 		AuditScript:   AuditScript,
+		HostProxyIP:   hostIP,
+		HostProxyPort: hostPort,
 	}
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
@@ -226,6 +238,10 @@ MODE={{.Config.Network.Mode}}
 ALLOW_HOST={{bool .Config.Network.AllowHost}}
 DNS={{if .Config.Network.DNS}}{{.Config.Network.DNS}}{{else}}proxy{{end}}
 FORWARD={{joinInts .Config.Network.Forward ","}}
+{{- if .HostProxy}}
+HOST_PROXY_IP={{.HostProxyIP}}
+HOST_PROXY_PORT={{.HostProxyPort}}
+{{- end}}
 EOF
 # What the sandbox may see of the host: nothing, or one mount at one path.
 cat > /etc/devkit/source.conf <<'EOF'
@@ -260,6 +276,15 @@ APT="apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false -o DPk
 # Same for the toolchain manager archives. A stalled download must fail the
 # boot, not hang it.
 CURL=(curl -fsSL --noproxy '*' --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900)
+{{- if .HostProxy}}
+# network.enforce: host. The Mac lets the VM reach devkit's proxy there and
+# nothing else, and the guest has no DNS, so root's downloads go through
+# that proxy too. It resolves the names and allows exactly the project's
+# hosts plus the ones provisioning needs.
+HOST_PROXY_URL="http://{{.HostProxy}}"
+APT="apt-get -o Acquire::http::Proxy=$HOST_PROXY_URL -o Acquire::https::Proxy=$HOST_PROXY_URL -o DPkg::Lock::Timeout=300"
+CURL=(curl -fsSL --proxy "$HOST_PROXY_URL" --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900)
+{{- end}}
 
 # ---- base packages (first boot) ----
 step "checking base packages (installed on first boot)"
@@ -642,6 +667,12 @@ done
 # sessions opened before conntrack loaded, which conntrack may record in the
 # wrong direction. Only root can bind port 22, so sandboxed code cannot use it.
 iptables -A OUTPUT -d "$HOST_IP" -p tcp --sport 22 -j ACCEPT
+{{- if .HostProxy}}
+# network.enforce: host. No DNS for any account: the proxy on the Mac
+# resolves. The proxy's account may reach that proxy, one TCP port on the
+# host, and nothing else; this comes before the host is rejected below.
+iptables -A OUTPUT -d "$HOST_PROXY_IP" -p tcp --dport "$HOST_PROXY_PORT" -m owner --uid-owner devkit-proxy -j ACCEPT
+{{- else}}
 # DNS only to the configured resolvers, never to arbitrary port-53 endpoints,
 # and not at all when air-gapped. By default (DNS=proxy) only the proxy's
 # account may query them: it resolves allowed hosts itself, and nothing the
@@ -654,6 +685,7 @@ if [ "${MODE:-allowlist}" != "none" ]; then
     iptables -A OUTPUT -d "$ip" -p tcp --dport 53 $DNS_OWNER -j ACCEPT
   done
 fi
+{{- end}}
 # The host is also the gateway. Decide about it before any other rule so
 # nothing later (including the proxy) can reach it unless allow_host is set.
 if [ "${ALLOW_HOST:-0}" = "1" ]; then
@@ -664,10 +696,12 @@ fi
 # allowlist and open: only the proxy's account may open outbound connections,
 # so every request is audited. The two modes differ only in the proxy's
 # allowlist. none: nothing leaves.
+{{- if not .HostProxy}}
 case "${MODE:-allowlist}" in
   allowlist|open)
     iptables -A OUTPUT -m owner --uid-owner devkit-proxy -j ACCEPT ;;
 esac
+{{- end}}
 iptables -A OUTPUT -j REJECT
 ip6tables -A OUTPUT -j REJECT 2>/dev/null || true
 for t in iptables ip6tables; do $t -P OUTPUT ACCEPT 2>/dev/null || true; done
@@ -740,7 +774,7 @@ ConditionPathExists={{.EgressBinary}}
 
 [Service]
 EnvironmentFile=/etc/devkit/egress.conf
-ExecStart={{.EgressBinary}} -listen {{.ProxyListen}} -audit \$EXTRA_ARGS
+ExecStart={{.EgressBinary}} -listen {{.ProxyListen}} -audit{{if .HostProxy}} -upstream {{.HostProxy}}{{end}} \$EXTRA_ARGS
 User=devkit-proxy
 Restart=always
 RestartSec=1
@@ -862,6 +896,50 @@ type templateData struct {
 	MiseVersion, MiseArm64SHA, MiseAmd64SHA                                    string
 	NixVersion, NixArm64SHA, NixAmd64SHA                                       string
 	AuditScript                                                                string
+	HostProxyIP, HostProxyPort                                                 string
+}
+
+// splitHostProxy checks Params.HostProxy against the config and returns its
+// address and port. Host mode needs it and guest mode must not have it, so
+// neither can render a script that half applies host enforcement. It lands
+// in root's script, hence the strict form: an IPv4 address and a port.
+func splitHostProxy(p Params) (string, string, error) {
+	host := p.Config != nil && p.Config.HostEnforced()
+	switch {
+	case host && p.HostProxy == "":
+		return "", "", fmt.Errorf("network.enforce: host needs the host proxy's address")
+	case !host && p.HostProxy != "":
+		return "", "", fmt.Errorf("a host proxy address is only used with network.enforce: host")
+	case !host:
+		return "", "", nil
+	}
+	ip, port, err := net.SplitHostPort(p.HostProxy)
+	if err != nil || net.ParseIP(ip) == nil || net.ParseIP(ip).To4() == nil || !strings.Contains(ip, ".") {
+		return "", "", fmt.Errorf("host proxy %q must be an IPv4 address and port", p.HostProxy)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return "", "", fmt.Errorf("host proxy %q has no valid port", p.HostProxy)
+	}
+	return ip, port, nil
+}
+
+// RootHosts are the hosts root's provisioning fetches from: Ubuntu's
+// archive (apt, the security pocket, ca-certificates), the toolchain
+// manager's release archive, and the hosts the manager itself needs. Under
+// network.enforce: host the proxy on the Mac allows them on top of the
+// project's network.allow, because root's downloads go through it.
+func RootHosts(c *project.Config) []string {
+	// archive.ubuntu.com and security.ubuntu.com serve amd64, ports.ubuntu.com
+	// arm64, as the image's ubuntu.sources names them.
+	hosts := []string{"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"}
+	switch c.Tools.Manager {
+	case project.ManagerMise:
+		// GitHub release downloads redirect to its asset hosts.
+		hosts = append(hosts, "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
+	case project.ManagerNix:
+		hosts = append(hosts, "releases.nixos.org")
+	}
+	return append(hosts, project.ManagerHosts[c.Tools.Manager]...)
 }
 
 // shellQuote wraps s in single quotes for use as one shell word, with any

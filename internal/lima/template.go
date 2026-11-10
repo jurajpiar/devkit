@@ -19,6 +19,9 @@ type TemplateInput struct {
 	HostDir string
 	// EgressSHA256 is the hash of the proxy binary the host will drop in.
 	EgressSHA256 string
+	// HostProxy is the host proxy as the guest reaches it, under
+	// network.enforce: host (see provision.Params.HostProxy).
+	HostProxy string
 }
 
 // Image is the guest base image: Ubuntu Minimal cloud image, pinned by
@@ -130,6 +133,7 @@ func Render(in TemplateInput) (string, error) {
 		User:         in.User,
 		EgressSHA256: in.EgressSHA256,
 		MountPath:    in.HostDir,
+		HostProxy:    in.HostProxy,
 	}
 	fp, err := provision.Fingerprint(params)
 	if err != nil {
