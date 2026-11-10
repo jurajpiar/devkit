@@ -159,6 +159,62 @@ allowed host the attacker already controls, or a hypervisor escape.
 | Become root | No sudo; io_uring, unprivileged BPF, user namespaces and `AF_ALG` off; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied` |
 | Root reaches your Mac's loopback services | Nothing inside the guest | The row above; your files still need a hypervisor escape on top | `TestRootInGuestReachesHost`, kept red on purpose |
 
+### Enforcement on the Mac: `network.enforce: host`
+
+Every control in the table above lives inside the guest, so root in the guest
+can remove it. `network.enforce: host` (opt-in; the default is `guest`) adds
+a layer root in the guest cannot reach. All of the VM's traffic leaves through
+Lima's host agent, a process on your Mac. devkit starts the VM with
+`limactl start` under a macOS sandbox profile (`sandbox-exec`), which the host
+agent inherits: it may open connections to Lima's own sockets, the VM's SSH
+forward and one devkit proxy on the Mac's loopback, and to nothing else. That
+proxy, `devkit hostproxy`, runs the same allowlist code, resolves names, and
+keeps its log on the Mac, where `devkit logs` reads it. In the guest, root's
+downloads and the in-guest proxy go through it; the in-guest firewall and
+proxy stay as the inner layer, and nothing in the guest may send a DNS query.
+It needs no root on the Mac.
+
+What that buys, with root in the guest and the firewall flushed and the
+in-guest proxy stopped, as `TestHostEnforcement` checks with raw sockets:
+
+| Attack vector, as root in the guest | Under `enforce: host` | Still possible only if |
+|---|---|---|
+| Direct connection to the internet, any port, IPv4 or IPv6 | Refused on the Mac: the host agent may not dial it | A host the host proxy allows (below) |
+| DNS query with data in the name, to any resolver or to Lima's own | No answer: the Mac's resolver socket is out of the host agent's reach | An allowed host the attacker controls makes DNS unnecessary anyway |
+| Connect to your Mac's loopback services | Refused on the Mac, except the host proxy and the VM's own SSH forward, which leads back into the guest | A gap in the profile or in Lima; the host proxy itself refuses names that resolve to loopback or link-local addresses |
+| Rewrite the in-guest policy or swap the in-guest proxy | Possible, and no longer enough: the host proxy's allowlist is outside the guest | You change `devkit.yaml` on the Mac |
+| Through the host proxy to another host or port | Refused by the host proxy, ports 80 and 443 only unless listed | The host is in `network.allow` or is one root's provisioning needs: Ubuntu's archive, ports and security hosts and the toolchain manager's download hosts; or `open` mode |
+
+The other rows of the escape table, and the in-guest layer for code without
+root, are unchanged.
+
+Limits, stated plainly:
+
+- **It is opt-in and new.** The default stays `guest` until host mode has
+  more use behind it.
+- **`sandbox-exec` is deprecated by Apple.** It works on current macOS. If it
+  disappears, `devkit up` refuses to start the VM rather than run it
+  unprotected; it never falls back to guest mode silently. The same goes for
+  any host that is not macOS.
+- **An outbound firewall on the Mac** such as LuLu must be told to allow the
+  `devkit` binary, which is the host proxy; until it is, downloads hang.
+- **A VM started by hand** (`limactl start`) runs without the profile and is
+  unprotected. devkit records Lima's host agent at each start it makes, and
+  `up`, `shell`, `sync`, `logs` and `audit` warn loudly when the running one
+  is not it. `devkit down`, then `devkit up`, fixes it.
+- **Not attacked:** the vsock channel between Lima's guest agent and host
+  agent. The profile confines what the host agent dials, not what it does
+  when asked over that channel.
+- **ICMP echo** is answered by Lima's own network stack for any address, so a
+  ping "succeeds" without anything leaving the Mac.
+- **Not combinable** with `allow_host: true`, `dns: resolvers` or
+  `mode: none`; devkit refuses those at validation. The first two need the
+  VM to reach something on the Mac other than the proxy; `none` would leave
+  the first boot no way to install its base packages.
+- **Logs.** The host log records every request that leaves, root's
+  included. A request the in-guest proxy refuses never reaches it; those
+  stay in the VM's own log, which `devkit up` still summarises.
+
 ### What git in the VM changes
 
 Git in the VM, `devkit push` and `devkit clone` widen the attack surface in
@@ -245,6 +301,7 @@ network:
   # dns: proxy          # proxy (only the proxy resolves names) | resolvers
   # forward: [3000]     # guest ports exposed on 127.0.0.1; nothing otherwise
   # distrust: [AAA Certificate Services]   # root CAs the VM must not trust
+  # enforce: guest      # guest | host: the Mac enforces egress too (Enforcement on the Mac, above)
 
 # exclude: [.git, node_modules]   # never copied into the VM (defaults apply)
 # mount_writable: false           # source: mount only; lets the sandbox edit your files
@@ -439,7 +496,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | `devkit shell [cmd]` | Shell in the VM, or run a command |
 | `devkit sync` | Copy the directory again; for a cloned project, fetch upstream on the Mac and fast-forward the VM |
 | `devkit push [branch]` | Review commits made in the VM and push them from your Mac with your own credentials. Flags: `--remote`, `--to`, `--yes`, `--force-with-lease` |
-| `devkit logs [-f] [-n N]` | Egress audit log |
+| `devkit logs [-f] [-n N]` | Egress audit log; under `network.enforce: host`, the host proxy's log on the Mac |
 | `devkit connect` | IDE connection instructions |
 | `devkit down [name]` | Stop the VM, keep its disk |
 | `devkit rm [-f] [name]` | Delete the VM. Without a name, the current project's; completion lists the devkit VMs |
@@ -464,6 +521,10 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 - In `allowlist` and `open` modes the firewall rejects every outbound packet
   except those from the proxy's user, DNS to the configured resolvers, and the
   host when `allow_host` is set. In `none` mode it rejects everything.
+- Under `network.enforce: host` the proxy's user may reach only the host
+  proxy at `192.168.5.2:<port>`, there is no DNS for anyone, and
+  `limactl start` runs under the profile in `~/.devkit/<vm>/network.sb`. The
+  host proxy's port, pid, allowlist and log live in the same directory.
 
 ## What gets downloaded, and how it is verified
 
@@ -494,6 +555,7 @@ internal/detect       language detection for devkit init
 internal/lima         limactl wrapper and instance config rendering
 internal/provision    scripts that run inside the VM (the security policy)
 internal/egressproxy  proxy implementation
+internal/hostenforce  the macOS sandbox profile for network.enforce: host
 internal/embedded     embedded proxy binary
 tests/e2e             creates a real VM and checks the guarantees
 ```

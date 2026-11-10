@@ -226,6 +226,54 @@ target host to `/var/log/devkit/egress.log`. `devkit logs` reads it, and
 **Localhost-only exposure.** Lima forwards ports the guest listens on to
 `127.0.0.1` on the host. Nothing is reachable from your network.
 
+## Enforcement on the Mac (`network.enforce: host`)
+
+With `network.enforce: host` the network policy no longer rests on the guest
+alone. Lima's host agent, the Mac process that carries all of the VM's
+traffic, is started under a macOS sandbox profile through `sandbox-exec`. It
+may open outbound connections only to unix sockets under Lima's home, the
+VM's SSH forward on the Mac's loopback, and devkit's host proxy on the Mac's
+loopback. Unix sockets are not allowed wholesale: when they were, Lima's
+built-in DNS resolved names through the Mac's resolver socket, which is a
+channel out. No root is needed on the Mac.
+
+The host proxy is `devkit hostproxy`, one per VM, started by `devkit up`
+before the VM and stopped by `devkit down` and `devkit rm`. It applies the
+same allowlist and web-ports policy as the in-guest proxy, to the project's
+`network.allow` plus the hosts root's provisioning fetches from (Ubuntu's
+archive, ports and security hosts, and the toolchain manager's download
+hosts); in `open` mode it allows any host on the web ports. It refuses names
+that resolve to loopback or link-local addresses, so an allowed name cannot
+be pointed at the Mac's own services, and it hands redirects back to the
+in-guest proxy to decide. Its log, in `~/.devkit/<vm>/hostproxy.log`, is the
+authoritative record of what left, and `devkit logs` shows it. In the guest,
+root's apt and downloads and the in-guest proxy use it as their upstream, the
+proxy's account may reach only it, and no account may send a DNS query.
+
+With root in the guest, the firewall flushed and the in-guest proxy stopped,
+`TestHostEnforcement` runs a raw-socket probe and requires every route it
+tries to fail except the host proxy: TCP to internet hosts on several ports,
+IPv6, DNS over UDP and TCP to public resolvers and to Lima's own, NTP, a
+listener on the Mac's loopback, a sweep of the Mac's ports, other addresses
+on Lima's network. The profile's rules themselves are also checked without a
+VM by the `internal/hostenforce` tests.
+
+What it does not cover:
+
+- **Hosts the host proxy allows** stay reachable for root in the guest, on
+  the web ports: the project's allowlist and the provisioning hosts above.
+- **A VM started outside devkit** (`limactl start` by hand) runs without the
+  profile. devkit records the host agent's pid at each start it makes and
+  warns when the running one differs; it cannot prevent it.
+- **The vsock channel** between Lima's guest agent and host agent was not
+  attacked.
+- **`sandbox-exec` is deprecated.** If macOS stops shipping it, devkit
+  refuses to start a host-enforced VM rather than start it unprotected.
+- **Outbound firewalls on the Mac**, such as LuLu, see the host proxy as a
+  new program and must be told to allow it.
+- `allow_host: true`, `dns: resolvers` and `mode: none` are refused with
+  host enforcement.
+
 ## What the escape tests cover
 
 `tests/e2e/escape_test.go` runs inside a real VM and tries, as the sandbox
@@ -251,7 +299,9 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
 - **Root in the guest.** The firewall and the uid separation are what keep
   the host's loopback and the open internet out of reach. A privilege
   escalation in the guest removes both; the VM boundary still protects your
-  files. The mitigations are the security-pocket updates at boot, the kernel
+  files. `network.enforce: host` (opt-in, see "Enforcement on the Mac"
+  above) moves the line for the network: the Mac then refuses everything but
+  devkit's host proxy, whatever root in the guest does. The mitigations are the security-pocket updates at boot, the kernel
   surface we take away (user namespaces, io_uring, BPF, perf, and the
   `AF_ALG` crypto family), and, for those who want it, an inner gVisor
   sandbox on the roadmap. See "The guest is patched" and the two points
