@@ -347,22 +347,30 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer targetConn.Close()
 
-	// Send 200 OK to client to indicate tunnel is established
-	w.WriteHeader(http.StatusOK)
-
-	// Hijack the connection
+	// Take the connection over, then answer on it ourselves. The server may
+	// already have read tunnel bytes the client sent right behind the
+	// request (a TLS ClientHello); they are only in the hijacked reader, so
+	// the client side is read through it, never the bare connection. The
+	// 200 is written and flushed before anything from the target.
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
 
-	clientConn, _, err := hijacker.Hijack()
+	clientConn, clientRW, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer clientConn.Close()
+	if _, err := clientRW.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+	if err := clientRW.Flush(); err != nil {
+		return
+	}
+	fromClient := clientRW.Reader
 
 	// Start bidirectional copy
 	var wg sync.WaitGroup
@@ -370,7 +378,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer wg.Done()
-		io.Copy(targetConn, clientConn)
+		io.Copy(targetConn, fromClient)
 		// Signal EOF to target
 		if tc, ok := targetConn.(*net.TCPConn); ok {
 			tc.CloseWrite()
