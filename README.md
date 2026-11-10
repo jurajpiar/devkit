@@ -166,8 +166,9 @@ can remove it. `network.enforce: host` (opt-in; the default is `guest`) adds
 a layer root in the guest cannot reach. All of the VM's traffic leaves through
 Lima's host agent, a process on your Mac. devkit starts the VM with
 `limactl start` under a macOS sandbox profile (`sandbox-exec`), which the host
-agent inherits: it may open connections to Lima's own sockets, the VM's SSH
-forward and one devkit proxy on the Mac's loopback, and to nothing else. That
+agent inherits: it may open connections to Lima's own sockets and, over TCP
+only, to the VM's SSH forward and one devkit proxy on the Mac's loopback, and
+to nothing else. That
 proxy, `devkit hostproxy`, runs the same allowlist code, resolves names, and
 keeps its log on the Mac, where `devkit logs` reads it. In the guest, root's
 downloads and the in-guest proxy go through it; the in-guest firewall and

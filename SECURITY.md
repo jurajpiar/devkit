@@ -278,8 +278,9 @@ target host to `/var/log/devkit/egress.log`. `devkit logs` reads it, and
 With `network.enforce: host` the network policy no longer rests on the guest
 alone. Lima's host agent, the Mac process that carries all of the VM's
 traffic, is started under a macOS sandbox profile through `sandbox-exec`. It
-may open outbound connections only to unix sockets under Lima's home, the
-VM's SSH forward on the Mac's loopback, and devkit's host proxy on the Mac's
+may open outbound connections only to unix sockets under Lima's home and,
+over TCP (`remote tcp`, not `remote ip`, which would admit UDP too), to the
+VM's SSH forward on the Mac's loopback and devkit's host proxy on the Mac's
 loopback. Unix sockets are not allowed wholesale: when they were, Lima's
 built-in DNS resolved names through the Mac's resolver socket, which is a
 channel out. No root is needed on the Mac.
@@ -301,7 +302,8 @@ With root in the guest, the firewall flushed and the in-guest proxy stopped,
 `TestHostEnforcement` runs a raw-socket probe and requires every route it
 tries to fail except the host proxy: TCP to internet hosts on several ports,
 IPv6, DNS over UDP and TCP to public resolvers and to Lima's own, NTP, a
-listener on the Mac's loopback, a sweep of the Mac's ports, other addresses
+listener on the Mac's loopback, UDP to a listener at the host proxy's port
+number, a sweep of the Mac's ports, other addresses
 on Lima's network. The profile's rules themselves are also checked without a
 VM by the `internal/hostenforce` tests.
 
