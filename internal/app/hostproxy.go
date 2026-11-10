@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,7 +30,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Host-side state for network.enforce: host, in ~/.devkit/<vm>/.
+// Host-side state for network.enforce: host, in vmStateDir: ~/.devkit/<vm>/
+// for Lima's default home.
 const (
 	hostProxyPortFile  = "hostproxy.port"  // the proxy's port, chosen once per VM
 	hostProxyStateFile = "hostproxy.json"  // the running proxy: pid, port, health token
@@ -47,9 +49,40 @@ var (
 	sandboxStartArgs = hostenforce.StartArgs
 )
 
-// vmStateDir is devkit's host-side state for one VM.
+// vmStateDir is devkit's host-side state for one VM. Lima keys an instance
+// by its home as well as its name, so two VMs of one name can exist under
+// different LIMA_HOME directories; each gets its own state, or starting one
+// would replace the other's proxy policy and down or rm would stop it. The
+// default home keeps ~/.devkit/<vm>/; any other adds the first 8 hex digits
+// of the SHA-256 of its canonical path.
 func vmStateDir(name string) string {
-	return filepath.Join(devkitHome(), name)
+	home := canonicalPath(lima.Home())
+	def, _ := os.UserHomeDir()
+	if home == canonicalPath(filepath.Join(def, ".lima")) {
+		return filepath.Join(devkitHome(), name)
+	}
+	sum := sha256.Sum256([]byte(home))
+	return filepath.Join(devkitHome(), name+"-"+hex.EncodeToString(sum[:])[:8])
+}
+
+// canonicalPath is path absolute with every symlink resolved, also when it
+// does not exist yet: its nearest existing ancestor is resolved and the
+// rest appended, so the key does not change once Lima creates its home
+// (devkit up chooses the proxy port before limactl create runs).
+func canonicalPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	rest := ""
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(real, rest)
+		}
+		if filepath.Dir(dir) == dir {
+			return path
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 var hostproxyCmd = &cobra.Command{

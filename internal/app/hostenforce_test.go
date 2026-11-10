@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -467,5 +469,107 @@ func TestExpectedProvisionIDInHostMode(t *testing.T) {
 	}
 	if got := expectedProvisionID(context.Background(), c); got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// devkit's host state for a VM is keyed by Lima's home as well as the VM's
+// name: ~/.devkit/<vm>/ for the default ~/.lima, symlinks resolved, and
+// ~/.devkit/<vm>-<8 hex of sha256 of the canonical home>/ otherwise.
+func TestVMStateDirIsKeyedByLimaHome(t *testing.T) {
+	_, home := fakeHome(t)
+	real, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(home, ".devkit", "devkit-demo")
+
+	t.Setenv("LIMA_HOME", "")
+	if got := vmStateDir("devkit-demo"); got != plain {
+		t.Errorf("default Lima home, not yet created: got %s, want %s", got, plain)
+	}
+	must(t, os.MkdirAll(filepath.Join(home, ".lima"), 0o755))
+	if got := vmStateDir("devkit-demo"); got != plain {
+		t.Errorf("default Lima home: got %s, want %s", got, plain)
+	}
+	t.Setenv("LIMA_HOME", filepath.Join(home, ".lima"))
+	if got := vmStateDir("devkit-demo"); got != plain {
+		t.Errorf("LIMA_HOME naming the default: got %s, want %s", got, plain)
+	}
+	must(t, os.Symlink(filepath.Join(home, ".lima"), filepath.Join(home, "lima-link")))
+	t.Setenv("LIMA_HOME", filepath.Join(home, "lima-link"))
+	if got := vmStateDir("devkit-demo"); got != plain {
+		t.Errorf("LIMA_HOME linking to the default: got %s, want %s", got, plain)
+	}
+
+	other := filepath.Join(home, "other-lima")
+	t.Setenv("LIMA_HOME", other)
+	before := vmStateDir("devkit-demo")
+	must(t, os.MkdirAll(other, 0o755))
+	got := vmStateDir("devkit-demo")
+	if got != before {
+		t.Errorf("the key must not change when Lima creates its home: %s then %s", before, got)
+	}
+	sum := sha256.Sum256([]byte(filepath.Join(real, "other-lima")))
+	if want := plain + "-" + hex.EncodeToString(sum[:])[:8]; got != want {
+		t.Errorf("another Lima home: got %s, want %s", got, want)
+	}
+	t.Setenv("LIMA_HOME", filepath.Join(home, "third-lima"))
+	if vmStateDir("devkit-demo") == got {
+		t.Error("two Lima homes must not share a state directory")
+	}
+}
+
+// Two VMs with the same name under different Lima homes keep separate host
+// proxies: each has its own port and state, and down in one leaves the
+// other's proxy running.
+func TestHostProxyStateIsPerLimaHome(t *testing.T) {
+	f, home := fakeHome(t)
+	c := hostConfig(t, nil)
+	name := c.VMName()
+	homeA, homeB := filepath.Join(home, "lima-a"), filepath.Join(home, "lima-b")
+	must(t, os.MkdirAll(homeA, 0o755))
+	must(t, os.MkdirAll(homeB, 0o755))
+	ctx := context.Background()
+
+	t.Setenv("LIMA_HOME", homeA)
+	t.Cleanup(func() { t.Setenv("LIMA_HOME", homeA); stopHostProxy(name) })
+	portA, err := ensureHostProxy(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stA, _ := runningHostProxy(name)
+	dirA := vmStateDir(name)
+
+	t.Setenv("LIMA_HOME", homeB)
+	t.Cleanup(func() { t.Setenv("LIMA_HOME", homeB); stopHostProxy(name) })
+	c.Network.Allow = []string{"example.org"}
+	portB, err := ensureHostProxy(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stB, _ := runningHostProxy(name)
+	if dirA == vmStateDir(name) {
+		t.Fatalf("both Lima homes use %s", dirA)
+	}
+	if portA == portB || stA.PID == stB.PID {
+		t.Fatalf("each Lima home's VM needs its own proxy: ports %d %d, pids %d %d", portA, portB, stA.PID, stB.PID)
+	}
+	if !processAlive(stA.PID) {
+		t.Fatal("starting the second VM's proxy must not replace the first's")
+	}
+
+	f.SetInstances(fakelima.Instance{Name: name, Status: "Running"})
+	if out, err := runDevkit(t, "", "down", "demo"); err != nil {
+		t.Fatalf("down: %v\n%s", err, out)
+	}
+	if processAlive(stB.PID) {
+		t.Error("down must stop its own VM's proxy")
+	}
+	t.Setenv("LIMA_HOME", homeA)
+	if st, ok := runningHostProxy(name); !ok || st.PID != stA.PID {
+		t.Errorf("down under another Lima home must leave this proxy running: %+v %v", st, ok)
+	}
+	if refused := connectStatus(t, portA, "example.org:443"); !strings.HasPrefix(refused, "403") {
+		t.Errorf("the first proxy keeps its own allowlist, got %q", refused)
 	}
 }
