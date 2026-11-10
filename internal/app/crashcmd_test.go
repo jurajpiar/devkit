@@ -417,3 +417,69 @@ func TestUpReadsTheLogAgainWhenTheStampProbeFails(t *testing.T) {
 	}
 	panickedBootChecks(t, f)
 }
+
+// After a boot-time panic up forces the VM off and keeps the report: the
+// audit of the stopped VM must still count it, from the state on the Mac.
+func TestAuditOfAStoppedVMReportsItsSavedCrash(t *testing.T) {
+	panicked := panicFixture(t) // read before the project changes directory
+	f, cfg := crashProject(t, "Stopped", panicked)
+	out, err := runDevkit(t, "", "audit", "--config", cfg)
+	if auditCode(err) != 1 {
+		t.Fatalf("an unacknowledged crash of a stopped VM is a finding: exit 1, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Kernel crash reports") || !strings.Contains(out, "Kernel panic - not syncing") {
+		t.Errorf("audit should show the saved report:\n%s", out)
+	}
+	if strings.Contains(out, "will not respond") || strings.Contains(out, "has panicked") {
+		t.Errorf("a stopped VM is not a panicked running one:\n%s", out)
+	}
+	if !strings.Contains(out, "trust audit was not run") || !strings.Contains(out, "stopped") {
+		t.Errorf("audit should say the trust audit was not run, and why:\n%s", out)
+	}
+	if verbCalled(f, "shell", "") {
+		t.Errorf("a stopped VM has no guest to open a shell in: %q", f.Calls())
+	}
+
+	out, err = runDevkit(t, "", "audit", "--config", cfg, "--ack-crashes")
+	if err != nil || !strings.Contains(out, "Acknowledged 1 kernel crash report") {
+		t.Fatalf("--ack-crashes on a stopped VM: %v\n%s", err, out)
+	}
+	out, err = runDevkit(t, "", "audit", "--config", cfg)
+	if auditCode(err) != 2 || !strings.Contains(err.Error(), "is stopped") {
+		t.Fatalf("after the acknowledgement a stopped VM has no verdict: exit 2, got %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Kernel crash reports") {
+		t.Errorf("nothing to report once acknowledged:\n%s", out)
+	}
+}
+
+func TestAuditOfAStoppedVMWithoutCrashes(t *testing.T) {
+	f, cfg := crashProject(t, "Stopped", "")
+	out, err := runDevkit(t, "", "audit", "--config", cfg)
+	if auditCode(err) != 2 || err.Error() != "VM "+demoVM+" is stopped; run 'devkit up'" {
+		t.Fatalf("a stopped VM without crash reports: the not-running error, exit 2, got %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Kernel crash reports") {
+		t.Errorf("no crash section without a report:\n%s", out)
+	}
+	if verbCalled(f, "shell", "") {
+		t.Errorf("no shell for a stopped VM: %q", f.Calls())
+	}
+}
+
+// A VM deleted outside devkit leaves its saved reports: they still count.
+func TestAuditOfAMissingVMReportsItsSavedCrash(t *testing.T) {
+	f, cfg := crashProject(t, "Stopped", oopsLines)
+	if _, err := scanCrashes(demoVM); err != nil {
+		t.Fatal(err)
+	}
+	must(t, os.Remove(serialLog(demoVM)))
+	f.SetInstances()
+	out, err := runDevkit(t, "", "audit", "--config", cfg)
+	if auditCode(err) != 1 || !strings.Contains(out, "Internal error: Oops") || !strings.Contains(out, "does not exist") {
+		t.Fatalf("want the saved report, the reason the trust audit was not run, exit 1; got %v\n%s", err, out)
+	}
+	if verbCalled(f, "shell", "") {
+		t.Errorf("no shell for a missing VM: %q", f.Calls())
+	}
+}
