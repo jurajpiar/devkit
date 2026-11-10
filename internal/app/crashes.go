@@ -472,6 +472,24 @@ func warnCrashes(w io.Writer, name string, running bool) bool {
 	return st.panicked(running)
 }
 
+// newCrashWarning scans the serial log of a VM that is running and warns
+// on w about the crash reports whose keys are not in shown, and about a
+// panicked kernel. It reports whether the kernel has panicked.
+func newCrashWarning(w io.Writer, name string, shown map[string]bool) bool {
+	st, err := scanCrashes(name)
+	if err != nil {
+		fmt.Fprintf(w, "Warning: could not read VM %s's serial log for kernel crash reports: %v\n", name, err)
+	}
+	fresh := &crashState{LastPanic: st.LastPanic}
+	for _, r := range st.Crashes {
+		if !shown[r.Key] {
+			fresh.Crashes = append(fresh.Crashes, r)
+		}
+	}
+	fmt.Fprint(w, crashWarning(name, fresh, true))
+	return st.panicked(true)
+}
+
 // errPanicked is returned by commands that need a guest whose kernel has
 // panicked.
 func errPanicked(name string) error {
