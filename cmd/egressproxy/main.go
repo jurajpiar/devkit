@@ -18,6 +18,7 @@ func main() {
 	listenAddr := flag.String("listen", ":3128", "Address to listen on (e.g., :3128)")
 	allowedHosts := flag.String("allowed", "", "Comma-separated list of allowed domains (e.g., api.example.com,*.github.com)")
 	auditLog := flag.Bool("audit", false, "Enable audit logging of all requests")
+	upstream := flag.String("upstream", "", "Parent proxy as ip:port; allowed requests go through it and nothing is resolved locally")
 	showHelp := flag.Bool("help", false, "Show help message")
 	showVersion := flag.Bool("version", false, "Show version")
 
@@ -54,6 +55,13 @@ func main() {
 		AllowedHosts: hosts,
 		AuditLog:     *auditLog,
 		Logger:       log.Default(),
+		Upstream:     *upstream,
+	}
+	if *upstream != "" {
+		if err := egressproxy.ValidateUpstream(*upstream); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("Chained to upstream proxy %s (no local DNS)", *upstream)
 	}
 
 	// Create and start proxy
@@ -103,6 +111,7 @@ Flags:
   -allowed string   Comma-separated list of allowed domains
                     Supports wildcards: *.example.com, **.example.com
   -audit            Enable audit logging of all requests
+  -upstream ip:port Send allowed requests through a parent proxy; resolve nothing
   -help             Show this help message
   -version          Show version
 

@@ -106,9 +106,21 @@ const (
 	DNSResolvers = "resolvers"
 )
 
+// Values of Network.Enforce.
+const (
+	EnforceGuest = "guest" // the firewall and proxy inside the VM decide (default)
+	EnforceHost  = "host"  // the Mac decides too: the VM's network process may reach only devkit's host proxy
+)
+
 // Network controls outbound traffic from the VM.
 type Network struct {
 	Mode string `yaml:"mode"`
+	// Enforce says where egress is enforced. "guest" (default): by the
+	// firewall and proxy inside the VM, which root in the guest can remove.
+	// "host": additionally on the Mac, where Lima's network process runs
+	// under a sandbox profile that lets it reach only devkit's own proxy,
+	// so root in the guest still cannot get past the allowlist.
+	Enforce string `yaml:"enforce,omitempty"`
 	// Allow lists host patterns reachable in allowlist mode. Patterns:
 	// "example.com", "*.example.com" (one level), "**.example.com" (any depth),
 	// each reachable on the web ports 80 and 443 only, or "host:port" for
@@ -359,8 +371,29 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("network.forward port %d is outside 1-65535", p)
 		}
 	}
+	switch c.Network.Enforce {
+	case "", EnforceGuest:
+	case EnforceHost:
+		// Each of these needs the VM to reach something on the Mac other
+		// than devkit's proxy, which is exactly what host enforcement takes
+		// away. Refused rather than quietly weakened.
+		if c.Network.AllowHost {
+			return fmt.Errorf("network.enforce: host cannot be combined with allow_host: true (the Mac lets the VM reach only devkit's proxy)")
+		}
+		if c.Network.DNS == DNSResolvers {
+			return fmt.Errorf("network.enforce: host cannot be combined with dns: resolvers (the VM has no resolver to ask; the proxy on the Mac resolves names)")
+		}
+		if c.Network.Mode == NetworkNone {
+			return fmt.Errorf("network.enforce: host does not support mode: none yet (provisioning needs the host proxy to install base packages; use enforce: guest for an air-gapped VM)")
+		}
+	default:
+		return fmt.Errorf("network.enforce must be guest or host (got %q)", c.Network.Enforce)
+	}
 	return nil
 }
+
+// HostEnforced reports whether the Mac enforces egress (network.enforce: host).
+func (c *Config) HostEnforced() bool { return c.Network.Enforce == EnforceHost }
 
 // VMName is the Lima instance name for this project.
 func (c *Config) VMName() string {

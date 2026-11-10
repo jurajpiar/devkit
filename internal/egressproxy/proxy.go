@@ -1,15 +1,20 @@
 package egressproxy
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -28,7 +33,63 @@ type ProxyConfig struct {
 	// /run/systemd/resolve/resolv.conf, which is what the VM uses; tests set
 	// it to local servers.
 	Resolvers []string
+	// Upstream, as "ip:port", is a parent proxy every allowed request is
+	// handed to: CONNECT is tunnelled through it and plain HTTP forwarded to
+	// it. The proxy still decides by its own allowlist and logs, but then
+	// resolves nothing and dials nothing except the parent, which does both.
+	// It must be an IP address, so that not even the parent is looked up.
+	// Empty means dial targets directly.
+	Upstream string
+	// RefuseLoopback refuses to dial loopback, unspecified and link-local
+	// addresses, checked after resolution, so an allowed name cannot be
+	// pointed at the machine the proxy runs on. Set for the proxy on the Mac.
+	RefuseLoopback bool
+	// ReturnRedirects hands a plain-HTTP redirect back to the client instead
+	// of following it, so the client (an inner proxy with a narrower
+	// allowlist, or apt) decides about the new location itself.
+	ReturnRedirects bool
 }
+
+// ValidateUpstream checks that addr is "ip:port", with no name to resolve.
+func ValidateUpstream(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("upstream %q must be ip:port: %w", addr, err)
+	}
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("upstream %q must be an IP address, not a name (the proxy resolves nothing when chained)", addr)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("upstream %q has no valid port", addr)
+	}
+	return nil
+}
+
+// refusalHeader marks a response as this proxy's policy refusal, so a proxy
+// chained in front of it can tell a refusal from an origin's own 403.
+const refusalHeader = "X-Devkit-Egress"
+
+// refuse writes the client-visible policy refusal for host.
+func refuse(w http.ResponseWriter, host string) {
+	refuseWith(w, fmt.Sprintf("Blocked: %s is not in the allowlist", host))
+}
+
+func refuseWith(w http.ResponseWriter, msg string) {
+	w.Header().Set(refusalHeader, "blocked")
+	http.Error(w, msg, http.StatusForbidden)
+}
+
+// errRefusedAddress is the dial error for an address RefuseLoopback covers.
+var errRefusedAddress = errors.New("refused: the name resolves to a loopback or link-local address")
+
+// refusedAddress reports whether RefuseLoopback covers ip.
+func refusedAddress(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast()
+}
+
+// errUpstreamRefused records that the parent proxy refused a request.
+var errUpstreamRefused = errors.New("refused by the upstream proxy")
 
 // Proxy is an HTTP/HTTPS proxy with domain filtering
 type Proxy struct {
@@ -62,6 +123,11 @@ func NewProxy(config ProxyConfig) *Proxy {
 
 // Start starts the proxy server
 func (p *Proxy) Start(ctx context.Context) error {
+	if p.config.Upstream != "" {
+		if err := ValidateUpstream(p.config.Upstream); err != nil {
+			return err
+		}
+	}
 	// Use the proxy directly as the handler - ServeMux doesn't properly route CONNECT requests
 	p.server = &http.Server{
 		Addr:    p.config.ListenAddr,
@@ -122,20 +188,41 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	p.audit.LogRequest(r.Method, host, result.Allowed, result.Pattern)
 
 	if !result.Allowed {
-		http.Error(w, fmt.Sprintf("Blocked: %s is not in the allowlist", host), http.StatusForbidden)
+		refuse(w, host)
 		return
 	}
 
-	// Establish connection to target
-	dial := p.dialer().DialContext
-	if p.dialTunnel != nil {
-		dial = p.dialTunnel
-	}
-	targetConn, err := dial(r.Context(), "tcp", host)
-	if err != nil {
-		p.audit.LogError(host, err)
-		http.Error(w, fmt.Sprintf("Failed to connect to %s: %v", host, err), http.StatusBadGateway)
-		return
+	var targetConn net.Conn
+	var fromTarget io.Reader
+	if p.config.Upstream != "" {
+		conn, br, err := p.tunnelViaUpstream(r.Context(), host)
+		if err != nil {
+			p.audit.LogError(host, err)
+			if errors.Is(err, errUpstreamRefused) {
+				refuse(w, host)
+				return
+			}
+			http.Error(w, fmt.Sprintf("Failed to connect to %s: %v", host, err), http.StatusBadGateway)
+			return
+		}
+		targetConn, fromTarget = conn, br
+	} else {
+		// Establish connection to target
+		dial := p.dialer().DialContext
+		if p.dialTunnel != nil {
+			dial = p.dialTunnel
+		}
+		conn, err := dial(r.Context(), "tcp", host)
+		if err != nil {
+			p.audit.LogError(host, err)
+			if errors.Is(err, errRefusedAddress) {
+				refuseWith(w, fmt.Sprintf("Blocked: %s resolves to a loopback or link-local address", host))
+				return
+			}
+			http.Error(w, fmt.Sprintf("Failed to connect to %s: %v", host, err), http.StatusBadGateway)
+			return
+		}
+		targetConn, fromTarget = conn, conn
 	}
 	defer targetConn.Close()
 
@@ -171,7 +258,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer wg.Done()
-		io.Copy(clientConn, targetConn)
+		io.Copy(clientConn, fromTarget)
 		// Signal EOF to client
 		if tc, ok := clientConn.(*net.TCPConn); ok {
 			tc.CloseWrite()
@@ -179,6 +266,53 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	wg.Wait()
+}
+
+// upstreamDialTimeout bounds the dial to the parent proxy and its answer to
+// a CONNECT.
+const upstreamDialTimeout = 10 * time.Second
+
+// dialUpstream connects to the parent proxy. Its address is an IP literal
+// (see ValidateUpstream), so this resolves nothing.
+func (p *Proxy) dialUpstream(ctx context.Context) (net.Conn, error) {
+	if err := ValidateUpstream(p.config.Upstream); err != nil {
+		return nil, err
+	}
+	d := &net.Dialer{Timeout: upstreamDialTimeout}
+	return d.DialContext(ctx, "tcp", p.config.Upstream)
+}
+
+// tunnelViaUpstream asks the parent proxy for a tunnel to host and returns
+// the connection once the parent has answered 200. The reader holds any
+// tunnel bytes the parent sent along with its answer. A 403 from the parent
+// is its policy refusal and comes back as errUpstreamRefused.
+func (p *Proxy) tunnelViaUpstream(ctx context.Context, host string) (net.Conn, *bufio.Reader, error) {
+	conn, err := p.dialUpstream(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("upstream proxy: %w", err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(upstreamDialTimeout + 20*time.Second))
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("upstream proxy: %w", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("upstream proxy: %w", err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		_ = conn.SetDeadline(time.Time{})
+		return conn, br, nil
+	case http.StatusForbidden:
+		conn.Close()
+		return nil, nil, errUpstreamRefused
+	default:
+		conn.Close()
+		return nil, nil, fmt.Errorf("upstream proxy answered %s", resp.Status)
+	}
 }
 
 // handleHTTP handles plain HTTP proxy requests
@@ -195,7 +329,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	p.audit.LogRequest(r.Method, host, result.Allowed, result.Pattern)
 
 	if !result.Allowed {
-		http.Error(w, fmt.Sprintf("Blocked: %s is not in the allowlist", host), http.StatusForbidden)
+		refuse(w, host)
 		return
 	}
 
@@ -211,6 +345,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		Timeout:   30 * time.Second,
 		Transport: p.transport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if p.config.ReturnRedirects {
+				return http.ErrUseLastResponse
+			}
 			// Check if redirect target is allowed
 			target := withDefaultPort(req.URL.Host, schemePort(req.URL.Scheme))
 			if !p.filter.IsAllowed(target) {
@@ -223,10 +360,20 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := client.Do(outReq)
 	if err != nil {
 		p.audit.LogError(host, err)
+		if errors.Is(err, errRefusedAddress) {
+			refuseWith(w, fmt.Sprintf("Blocked: %s resolves to a loopback or link-local address", host))
+			return
+		}
 		http.Error(w, fmt.Sprintf("Failed to forward request: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	if p.config.Upstream != "" && resp.StatusCode == http.StatusForbidden && resp.Header.Get(refusalHeader) == "blocked" {
+		// The parent's policy refusal, shown as this proxy's own.
+		p.audit.LogError(host, errUpstreamRefused)
+		refuse(w, host)
+		return
+	}
 
 	// Copy response headers
 	for key, values := range resp.Header {
@@ -295,6 +442,21 @@ const resolvConf = "/run/systemd/resolve/resolv.conf"
 func (p *Proxy) dialer() *net.Dialer {
 	p.dialOnce.Do(func() {
 		p.dial = &net.Dialer{Timeout: 10 * time.Second}
+		if p.config.RefuseLoopback {
+			// Control sees each address after resolution, just before the
+			// connect, so a name re-pointed between check and dial is
+			// still caught.
+			p.dial.Control = func(_, address string, _ syscall.RawConn) error {
+				host, _, err := net.SplitHostPort(address)
+				if err != nil {
+					return err
+				}
+				if ip := net.ParseIP(host); ip == nil || refusedAddress(ip) {
+					return errRefusedAddress
+				}
+				return nil
+			}
+		}
 		addrs := p.config.Resolvers
 		if len(addrs) == 0 {
 			for _, s := range upstreamResolvers(resolvConf) {
@@ -568,6 +730,16 @@ func (p *Proxy) transport() *http.Transport {
 			MaxIdleConns:        32,
 			MaxIdleConnsPerHost: 4,
 			IdleConnTimeout:     30 * time.Second,
+		}
+		if p.config.Upstream != "" {
+			// Every request goes to the parent as a proxy request, so the
+			// only dial is to the parent's IP address: no lookup of the
+			// target, and the dialer with its resolver is never used.
+			parent := &url.URL{Scheme: "http", Host: p.config.Upstream}
+			p.tr.Proxy = http.ProxyURL(parent)
+			p.tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return p.dialUpstream(ctx)
+			}
 		}
 	})
 	return p.tr
