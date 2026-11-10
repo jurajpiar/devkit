@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -187,6 +188,26 @@ func TestHostEnforcement(t *testing.T) {
 		}
 		if !strings.Contains(out, "UDP to the host proxy's port number") {
 			t.Errorf("the probe did not try UDP to the host proxy's port number")
+		}
+		// A probe that tries less passes more easily. Each route out must
+		// have been tried: an edit that drops a block of checks fails here
+		// instead of passing with a smaller count (it happened once).
+		for _, tried := range []string{
+			"host proxy port on the Mac",
+			"TCP to 1.1.1.1:80", "TCP to 1.1.1.1:443", "TCP to 35.180.139.74:8080", "TCP to 140.82.121.3:22",
+			"TCP over IPv6",
+			"DNS over UDP to 8.8.8.8", "DNS over TCP to 8.8.8.8",
+			"UDP (NTP)",
+			"DNS over UDP through Lima at 192.168.5.2", "DNS over TCP through Lima at 192.168.5.2",
+			"canary listener on the Mac",
+			"port sweep of the Mac",
+		} {
+			if !strings.Contains(out, "PASS "+tried) {
+				t.Errorf("the probe did not pass, or did not try: %s", tried)
+			}
+		}
+		if n, _ := strconv.Atoi(m[1]); n < 21 {
+			t.Errorf("the probe ran %d checks, fewer than the 21 it should", n)
 		}
 		if n := udpGot.Load() - udpBefore; n != 0 {
 			t.Errorf("%d datagram(s) from the guest reached the UDP listener at the host proxy's port number", n)
