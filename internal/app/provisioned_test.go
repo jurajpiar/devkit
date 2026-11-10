@@ -42,6 +42,10 @@ func upProject(t *testing.T, status string) *fakelima.Fake {
 	if status != "" {
 		f.SetInstances(fakelima.Instance{Name: demoVM, Status: status})
 	}
+	// After a build the proxy binary is embedded and up installs it, then
+	// waits for its service; without a build there is none and this answer
+	// goes unused. The tests must pass either way.
+	f.OnShell("systemctl is-active", "active\n", 0)
 	return f
 }
 
