@@ -32,10 +32,26 @@ var downCmd = &cobra.Command{
 			return err
 		}
 		name := cfg.VMName()
+		// Lima begins a new serial log at the next start: record its crash
+		// reports now, and again once the guest has stopped writing.
 		if inst == nil || !inst.Running() {
 			fmt.Printf("VM %s is not running\n", name)
-		} else if err := lima.Stop(cmd.Context(), name); err != nil {
-			return err
+			if inst != nil {
+				_, _ = scanCrashes(name)
+			}
+		} else {
+			st, _ := scanCrashes(name)
+			stop := lima.Stop
+			if st.panicked(true) {
+				// A panicked kernel cannot shut down; waiting for it only
+				// times out.
+				fmt.Printf("The kernel of VM %s has panicked; forcing it off\n", name)
+				stop = lima.StopForce
+			}
+			if err := stop(cmd.Context(), name); err != nil {
+				return err
+			}
+			_, _ = scanCrashes(name)
 		}
 		// The host proxy goes with the VM; its port stays the VM's.
 		_ = os.Remove(filepath.Join(vmStateDir(name), hostAgentPIDFile))
@@ -107,8 +123,17 @@ var lsCmd = &cobra.Command{
 				continue
 			}
 			n++
+			status := i.Status
+			if st, err := scanCrashes(i.Name); err == nil {
+				switch {
+				case st.panicked(i.Running()):
+					status += " (kernel panicked)"
+				case len(st.Crashes) > 0:
+					status += " (kernel crash reported)"
+				}
+			}
 			fmt.Fprintf(w, "%s\t%s\t127.0.0.1:%d\t%d\t%s\t%s\n",
-				i.Name, i.Status, i.SSHLocalPort, i.CPUs, gib(i.Memory), gib(i.Disk))
+				i.Name, status, i.SSHLocalPort, i.CPUs, gib(i.Memory), gib(i.Disk))
 		}
 		if n == 0 {
 			fmt.Println("No devkit VMs. Run 'devkit init' then 'devkit up' in a project directory.")
@@ -132,6 +157,9 @@ var shellCmd = &cobra.Command{
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err
 		}
+		if err := checkCrashes(cmd, cfg); err != nil {
+			return err
+		}
 		if err := requireProvisioned(cmd.Context(), cfg); err != nil {
 			return err
 		}
@@ -152,6 +180,9 @@ var syncCmd = &cobra.Command{
 			return err
 		}
 		if err := mustBeRunning(cmd, cfg); err != nil {
+			return err
+		}
+		if err := checkCrashes(cmd, cfg); err != nil {
 			return err
 		}
 		if err := requireProvisioned(cmd.Context(), cfg); err != nil {
@@ -191,11 +222,16 @@ var logsCmd = &cobra.Command{
 			// request that leaves, root's included, and nothing in the
 			// guest can rewrite it. The VM need not be running.
 			if inst, _ := instance(cmd.Context(), cfg); inst != nil && inst.Running() {
-				warnRunning(cmd.Context(), cfg)
+				if !warnCrashes(cmd.ErrOrStderr(), cfg.VMName(), true) {
+					warnRunning(cmd.Context(), cfg)
+				}
 			}
 			return showHostLog(cmd, cfg.VMName(), lines, follow)
 		}
 		if err := mustBeRunning(cmd, cfg); err != nil {
+			return err
+		}
+		if err := checkCrashes(cmd, cfg); err != nil {
 			return err
 		}
 		warnRunning(cmd.Context(), cfg)

@@ -132,6 +132,23 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if inst != nil {
+		// Crash reports from this log, before a start replaces it. A
+		// panicked kernel cannot shut down or answer: it is forced off and
+		// started again below.
+		st, err := scanCrashes(name)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not read VM %s's serial log for kernel crash reports: %v\n", name, err)
+		}
+		if st.panicked(inst.Running()) {
+			fmt.Printf("The kernel of VM %s has panicked; forcing it off to start it again\n", name)
+			if err := lima.StopForce(ctx, name); err != nil {
+				return err
+			}
+			inst.Status = "Stopped"
+		}
+		fmt.Fprint(cmd.ErrOrStderr(), crashWarning(name, st, false))
+	}
 	if err := reconcileVM(ctx, name, rendered, inst, start); err != nil {
 		return err
 	}
@@ -504,6 +521,9 @@ func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance
 	serial := serialLog(name)
 	if inst == nil || !inst.Running() {
 		fmt.Printf("Starting VM %s\n", name)
+		// Lima begins a new serial log: keep this one's crash reports.
+		_, _ = scanCrashes(name)
+		expectNewCrashLog(name)
 		from := fileSize(serial)
 		stopWatch := watchProvisioning(ctx, name)
 		err := start(ctx, name)

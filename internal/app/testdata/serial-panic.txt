@@ -1,0 +1,24 @@
+[   65.337662] sysrq: Trigger a crash
+[   65.337711] Kernel panic - not syncing: sysrq triggered crash
+[   65.337749] CPU: 3 PID: 3002 Comm: sh Not tainted 6.8.0-147-generic #147-Ubuntu
+[   65.337807] Hardware name: Apple Inc. Apple Virtualization Generic Platform, BIOS 2167.0.0.0.0 10/03/2026
+[   65.337850] Call trace:
+[   65.337866]  dump_backtrace+0xa4/0x150
+[   65.337895]  show_stack+0x24/0x50
+[   65.337915]  dump_stack_lvl+0x38/0x138
+[   65.337942]  dump_stack+0x1c/0x38
+[   65.337966]  panic+0x3ac/0x448
+[   65.337991]  sysrq_handle_crash+0x28/0x30
+[   65.338018]  __handle_sysrq+0x110/0x2b0
+[   65.338038]  write_sysrq_trigger+0x174/0x218
+[   65.338080]  proc_reg_write+0xd4/0x160
+[   65.338111]  vfs_write+0xe0/0x3a0
+[   65.338140]  ksys_write+0x80/0x140
+[   65.338161]  __arm64_sys_write+0x28/0x50
+[   65.338183]  invoke_syscall+0x6c/0x108
+[   65.338203]  el0_svc_common.constprop.0+0x114/0x140
+[   65.338227]  do_el0_svc+0x28/0x58
+[   65.338247]  el0_svc+0x40/0x1c0
+[   65.338275]  el0t_64_sync_handler+0x148/0x158
+[   65.338303]  el0t_64_sync+0x1b0/0x1b8
+[   65.338326] SMP: stopping secondary CPUs
