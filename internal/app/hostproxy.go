@@ -440,10 +440,14 @@ func hostLogs(cmd *cobra.Command, cfg *project.Config, n int, follow bool) error
 	ctx := cmd.Context()
 	out, errw := cmd.OutOrStdout(), cmd.ErrOrStderr()
 	warn := func(ctx context.Context, w io.Writer) {
-		if inst, _ := instance(ctx, cfg); inst != nil && inst.Running() {
-			if !warnCrashes(w, cfg.VMName(), true) {
-				warnRunningWithin(ctx, cfg, w, guestCheckTimeout)
-			}
+		if inst, _ := instance(ctx, cfg); inst == nil || !inst.Running() {
+			// Crash reports already found stay saved on the Mac after the
+			// VM stops; only a running VM's serial log is scanned again.
+			fmt.Fprint(w, crashWarning(cfg.VMName(), loadCrashState(cfg.VMName()), false))
+			return
+		}
+		if !warnCrashes(w, cfg.VMName(), true) {
+			warnRunningWithin(ctx, cfg, w, guestCheckTimeout)
 		}
 	}
 	if !follow {

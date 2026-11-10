@@ -680,3 +680,26 @@ func TestLogsFollowInHostModeDoesNotWaitForAGuestThatHangs(t *testing.T) {
 	waitFor("the host log", "BLOCKED CONNECT evil.test:443", guestCheckTimeout/2)
 	waitFor("the note", "did not answer", guestCheckTimeout+5*time.Second)
 }
+
+func TestLogsInHostModeWarnAboutSavedCrashesOfAStoppedVM(t *testing.T) {
+	f, home := fakeHome(t)
+	cfgPath := hostLogFixture(t, f, home, "Stopped", "[EGRESS] BLOCKED CONNECT evil.test:443\n")
+	// Found while the VM ran, never acknowledged; it has stopped since.
+	st := &crashState{Crashes: []crashReport{{Key: "k", Lines: []string{"[   12.000000] BUG: unable to handle page fault"}}}}
+	if err := saveCrashState("devkit-demo", st); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runDevkit(t, "", "logs", "--config", cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "kernel crash report that you have not acknowledged") || !strings.Contains(out, "BUG: unable to handle page fault") {
+		t.Errorf("a saved crash report must be warned about with the VM stopped, got %q", out)
+	}
+	if !strings.Contains(out, "BLOCKED CONNECT evil.test:443") {
+		t.Errorf("the host log must be shown, got %q", out)
+	}
+	if mentions(f.Calls(), "shell") {
+		t.Errorf("a stopped VM must not be asked anything: %q", f.Calls())
+	}
+}
