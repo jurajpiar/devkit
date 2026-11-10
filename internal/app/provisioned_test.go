@@ -233,7 +233,7 @@ func TestReconcileStopsARunningVMWithoutAStamp(t *testing.T) {
 	must(t, os.MkdirAll(lima.Dir(demoVM), 0o755))
 	must(t, lima.WriteConfig(demoVM, "rendered"))
 	unprovisioned(f)
-	err := reconcileVM(context.Background(), demoVM, "rendered", &lima.Instance{Name: demoVM, Status: "Running"})
+	err := reconcileVM(context.Background(), demoVM, "rendered", &lima.Instance{Name: demoVM, Status: "Running"}, lima.Start)
 	if err == nil || !strings.Contains(err.Error(), "provisioning") {
 		t.Fatalf("want a provisioning error, got %v", err)
 	}
