@@ -219,6 +219,23 @@ cannot fix is a compiled program that embeds its own bundle and ignores the
 environment, though it can find one by fingerprint; and the proxy cannot
 inspect certificates, because TLS 1.3 encrypts them.
 
+**Container images the project does not pin are reported, not blocked.**
+devkit pins by hash everything it downloads itself; a project's images are
+the project's choice, and a tag is mutable. The audit reads the project's
+compose files and Dockerfiles (it needs no Docker: an image list cannot say
+how an image was requested, since a pulled image carries both tag and digest
+either way) and counts each reference as pinned (`@sha256:` and 64 hex
+characters), unpinned, or unresolved. Variables are resolved from the
+compose file's `.env` and from defaults in the reference, and a Dockerfile's
+from the `ARG` defaults before its first `FROM`; anything else, including a
+build argument passed on the command line, is unresolved, which is reported
+rather than assumed fine. Without PyYAML in the VM the compose reading falls
+back to line matching and says it is approximate. File names and references
+are stripped of control characters before they reach the terminal, and a
+file over 256 KB, binary or not a regular file is named as not read. Unpinned
+and unresolved images do not change the audit's exit status: they are
+common, and the audit's verdict stays about trust.
+
 **Toolchains are installed by the sandbox user.** Root installs only the
 manager (mise or Nix) from a release archive pinned by SHA-256 in devkit's
 source, with the pin taken after verifying the upstream signature. The

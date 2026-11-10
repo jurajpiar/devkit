@@ -404,6 +404,17 @@ are pointed at the system bundle instead, so both the distro's updates and
 your `distrust` list apply to them. `devkit up` ends with a short trust audit;
 `devkit audit --deep` scans every file. See SECURITY.md for what it catches.
 
+The audit also lists container images the project does not pin by digest. It
+reads every `image:` in the compose files (`compose.yaml`,
+`docker-compose.*.yml` and the like, with their `.env`) and every `FROM` and
+`COPY --from` in Dockerfiles and Containerfiles, so it needs no Docker. A
+reference counts as pinned only with `@sha256:` and a 64-character digest; a
+tag or a bare name is unpinned, because the same tag can be different code
+tomorrow. A reference whose variable has no value devkit can see, such as
+`${IMAGE:?}` or a build `ARG` without a default, is reported as unresolved
+rather than assumed fine. This part is a report: unpinned or unresolved
+images do not change `devkit audit`'s exit status.
+
 The sandbox cannot reach your Mac in any mode unless `allow_host` is true. With
 `allow_host: true` the VM reaches the host directly at `host.lima.internal`,
 bypassing the proxy and its log.
@@ -516,7 +527,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | `devkit rm [-f] [name]` | Delete the VM. Without a name, the current project's; completion lists the devkit VMs |
 | `devkit ls` | List devkit VMs |
 | `devkit doctor` | Check the host |
-| `devkit audit [--deep]` | Report roots the VM, its runtimes or the project trust that Mozilla no longer does |
+| `devkit audit [--deep]` | Report roots the VM, its runtimes or the project trust that Mozilla no longer does, and container images not pinned by digest |
 
 ## Under the hood
 

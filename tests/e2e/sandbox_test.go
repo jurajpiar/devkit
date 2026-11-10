@@ -228,6 +228,32 @@ func TestSandboxGuarantees(t *testing.T) {
 		}
 	})
 
+	t.Run("trust audit reports unpinned images without failing", func(t *testing.T) {
+		// Written in the VM's workspace so the rest of the run is unaffected.
+		digest := "sha256:" + strings.Repeat("ab", 32)
+		s.mustRun("shell", "mkdir -p ~/workspace/imgcheck && cat > ~/workspace/imgcheck/compose.yaml <<'EOF'\n"+
+			"services:\n  db:\n    image: postgres:16@"+digest+"\n  cache:\n    image: redis:7\n  node:\n    image: ${RSKJ_IMAGE:?set RSKJ_IMAGE}\nEOF")
+		defer s.shell("rm -rf ~/workspace/imgcheck")
+		out, err := s.run("audit")
+		for _, want := range []string{
+			"container images: 3 references in 1 file, 1 pinned by digest, 1 unpinned, 1 unresolved",
+			"    - imgcheck/compose.yaml: redis:7  (unpinned)",
+			"    - imgcheck/compose.yaml: ${RSKJ_IMAGE:?set RSKJ_IMAGE}  (unresolved)",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("audit output missing %q:\n%s", want, out)
+			}
+		}
+		// Cloud-init brings PyYAML, so the reading is exact, not approximate.
+		if strings.Contains(out, "approximate") {
+			t.Errorf("the VM's python3 should read compose files with PyYAML:\n%s", out)
+		}
+		// A report, not a finding: the exit status is the trust verdict's.
+		if err != nil || !strings.Contains(out, "Nothing stale.") {
+			t.Fatalf("unpinned images must not change the audit's exit status: %v\n%s", err, out)
+		}
+	})
+
 	t.Run("trust settings reach non-login sessions", func(t *testing.T) {
 		// Not through devkit shell (bash -l): a bare ssh command, as an IDE's
 		// remote server or `ssh vm node ...` would run, gets them from
