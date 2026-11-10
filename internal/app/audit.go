@@ -22,6 +22,11 @@ and names anything that is trusted but should not be. devkit up runs the
 same audit shallowly after installing dependencies; --deep scans every file
 in the workspace, including node_modules and vendored trees.
 
+It also reports container images the project names without a digest, read
+from its compose files and Dockerfiles (no Docker needed): pinned, unpinned,
+and unresolved where a variable has no value devkit can see. That part is a
+report and does not affect the exit status.
+
 Exit status is 1 when something stale was found, 2 when the audit could not
 run to a verdict.`,
 	RunE: func(cmd *cobra.Command, args []string) error {

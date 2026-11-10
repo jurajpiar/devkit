@@ -9,7 +9,9 @@ package provision
 // runtime or the project trusts that Mozilla no longer trusts for TLS is
 // reported, as is anything the system bundle still trusts that Mozilla has
 // distrusted, with the name to put in network.distrust.
-const AuditScript = `#!/usr/bin/env python3
+const AuditScript = auditHead + ImageScanScript + auditBody
+
+const auditHead = `#!/usr/bin/env python3
 """devkit trust audit: what does this VM trust that it should not?"""
 import hashlib, os, re, ssl, subprocess, sys, time, urllib.request
 
@@ -149,6 +151,9 @@ def report_set(name, pairs, reference, counts=True):
         else:
             say(f"    - {subject(pem)}  {fp[:16]}")
 
+`
+
+const auditBody = `
 say("Trust audit" + (" (deep)" if DEEP else ""))
 trusted, distrusted = mozilla_store()
 if trusted:
@@ -237,8 +242,11 @@ for path in pems:
         if fp not in trusted and self_signed(pem):
             found += 1
             if found <= 12:
-                flag(f"{os.path.relpath(path, WORKSPACE)}: root {subject(pem)} not in the reference store (stale, or a private CA)  {fp[:16]}")
+                flag(f"{printable(os.path.relpath(path, WORKSPACE))}: root {subject(pem)} not in the reference store (stale, or a private CA)  {fp[:16]}")
 say(f"  project files: {len(pems)} certificate files scanned, {found} untrusted roots")
+# Reported, never counted: an unpinned image is common and not stale trust.
+for line in image_report(image_scan(WORKSPACE, DEEP), DEEP):
+    say(line)
 say(f"  {time.monotonic() - START:.1f}s" + ("" if DEEP else ", shallow; devkit audit --deep scans everything"))
 if stale:
     say(f"{stale} finding(s). A root the reference no longer trusts is stale: update the bundle or runtime that carries it.")
