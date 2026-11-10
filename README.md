@@ -260,6 +260,31 @@ the VM; read the flagged files; and don't merge `refs/devkit/...` into your
 Mac's checkout and then run the project's tooling there unless you have read
 what it changes.
 
+### Kernel crashes, seen from the Mac
+
+A failed attempt at a kernel exploit often crashes the guest kernel before
+one succeeds. devkit points the guest kernel's console at the serial port
+Lima records on the Mac (`~/.lima/<vm>/serialv.log`) and reads the crash
+reports there, on the Mac: nothing runs in the guest to find them, and the
+sandbox user can neither write to that console nor stop the kernel from
+writing to it.
+
+- **From the first restart.** The kernel setting is written on the first
+  boot and takes effect on the next one; `devkit up` says so. Until then a
+  VM cannot report crashes, and `devkit audit` says that rather than "none".
+- **What you see.** `up`, `shell`, `sync`, `logs` and `audit` warn about
+  every crash report you have not acknowledged and show its first lines; a
+  VM whose kernel has panicked, which Lima still lists as Running, is named
+  as such (`devkit ls` too), and `devkit down` forces it off. `devkit
+  audit` counts an unacknowledged report as a finding (exit 1).
+- **What to do.** A crash can be a failed attempt to break out, or simply a
+  kernel bug. If you cannot explain it, discard the VM with `devkit rm`;
+  otherwise acknowledge it with `devkit audit --ack-crashes`.
+- **The limit.** This catches the noisy attempt, not the clean one. An
+  exploit that works first time crashes nothing, and once it has root it
+  can silence the console. A report is a reason to act; no report proves
+  nothing.
+
 Where the picture ends, and the risks that remain, are in [SECURITY.md](SECURITY.md).
 
 ## Configuration
@@ -527,7 +552,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | `devkit rm [-f] [name]` | Delete the VM. Without a name, the current project's; completion lists the devkit VMs |
 | `devkit ls` | List devkit VMs |
 | `devkit doctor` | Check the host |
-| `devkit audit [--deep]` | Report roots the VM, its runtimes or the project trust that Mozilla no longer does, and container images not pinned by digest |
+| `devkit audit [--deep]` | Report roots the VM, its runtimes or the project trust that Mozilla no longer does, container images not pinned by digest, and the guest kernel's crash reports. `--ack-crashes` acknowledges those |
 
 ## Under the hood
 
