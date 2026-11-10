@@ -125,6 +125,9 @@ var shellCmd = &cobra.Command{
 		if err := mustBeRunning(cmd, cfg); err != nil {
 			return err
 		}
+		if err := requireProvisioned(cmd.Context(), cfg); err != nil {
+			return err
+		}
 		warnIfStale(cmd.Context(), cfg)
 		return lima.Shell(cmd.Context(), cfg.VMName(), "", "bash", "-lc", shellScript(cfg, args))
 	},
@@ -142,6 +145,9 @@ var syncCmd = &cobra.Command{
 			return err
 		}
 		if err := mustBeRunning(cmd, cfg); err != nil {
+			return err
+		}
+		if err := requireProvisioned(cmd.Context(), cfg); err != nil {
 			return err
 		}
 		warnIfStale(cmd.Context(), cfg)

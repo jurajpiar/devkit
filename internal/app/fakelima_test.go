@@ -103,15 +103,17 @@ func TestReconcileVM(t *testing.T) {
 		stored string // the instance's lima.yaml, "" for none
 		want   []string
 	}{
-		{"new VM", nil, "", []string{"validate", "create", "start"}},
-		{"running, config unchanged", &lima.Instance{Name: name, Status: "Running"}, "rendered", nil},
-		{"running, config changed", &lima.Instance{Name: name, Status: "Running"}, "old", []string{"stop", "start"}},
-		{"stopped, config unchanged", &lima.Instance{Name: name, Status: "Stopped"}, "rendered", []string{"start"}},
-		{"stopped, config changed", &lima.Instance{Name: name, Status: "Stopped"}, "old", []string{"start"}},
+		// Each ends by checking the provision stamp ("shell").
+		{"new VM", nil, "", []string{"validate", "create", "start", "shell"}},
+		{"running, config unchanged", &lima.Instance{Name: name, Status: "Running"}, "rendered", []string{"shell"}},
+		{"running, config changed", &lima.Instance{Name: name, Status: "Running"}, "old", []string{"stop", "start", "shell"}},
+		{"stopped, config unchanged", &lima.Instance{Name: name, Status: "Stopped"}, "rendered", []string{"start", "shell"}},
+		{"stopped, config changed", &lima.Instance{Name: name, Status: "Stopped"}, "old", []string{"start", "shell"}},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
 			f, home := fakeHome(t)
+			provisioned(f, "current")
 			if c.stored != "" {
 				writeLimaYAML(c.stored)
 			}
