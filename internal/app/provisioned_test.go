@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -151,6 +152,60 @@ func TestUpStopsAVMWhoseProvisioningDidNotFinish(t *testing.T) {
 	nothingSentAfterStart(t, f)
 }
 
+// Lima begins a new serial log at every start. One that grows past the old
+// log's size must still be read from its beginning, where this boot's
+// progress lines are.
+func TestUpReadsANewSerialLogLongerThanTheOld(t *testing.T) {
+	f := upProject(t, "Stopped")
+	unprovisioned(f)
+	must(t, os.WriteFile(filepath.Join(lima.Dir(demoVM), "serialv.log"),
+		[]byte("devkit-progress: provisioning started\ndevkit-progress: failed: an old failure (line 1, exit 1)\n"), 0o644))
+	f.TruncateSerialOnStart(demoVM)
+	f.OnStartSerial(demoVM, "devkit-progress: provisioning started\n"+
+		"devkit-progress: checking extra packages\n"+
+		"devkit-progress: failed: this boot's command (line 7, exit 100)\n"+
+		strings.Repeat("[  9.0] kernel noise after the failure\n", 20))
+	var err error
+	out := captureStdout(t, func() { _, err = runDevkit(t, "", "up") })
+	if err == nil {
+		t.Fatalf("up must fail when provisioning did not finish:\n%s", out)
+	}
+	for _, want := range []string{"checking extra packages", "this boot's command (line 7, exit 100)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should name this boot's failure %q:\n%s", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "an old failure") {
+		t.Errorf("the previous boot's failure must not be reported:\n%s", err)
+	}
+}
+
+// A start that adds nothing to the serial log leaves only the previous
+// boot's lines there, and they are not this boot's failure.
+func TestUpDoesNotReportAnOldSerialLogsFailure(t *testing.T) {
+	for _, truncate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("truncated=%v", truncate), func(t *testing.T) {
+			f := upProject(t, "Stopped")
+			unprovisioned(f)
+			must(t, os.WriteFile(filepath.Join(lima.Dir(demoVM), "serialv.log"),
+				[]byte("devkit-progress: provisioning started\ndevkit-progress: checking an old step\ndevkit-progress: failed: an old failure (line 1, exit 1)\n"), 0o644))
+			if truncate {
+				f.TruncateSerialOnStart(demoVM)
+			}
+			var err error
+			out := captureStdout(t, func() { _, err = runDevkit(t, "", "up") })
+			if err == nil || !strings.Contains(err.Error(), "did not finish provisioning") {
+				t.Fatalf("up must fail when provisioning did not finish, got %v\n%s", err, out)
+			}
+			for _, bad := range []string{"an old failure", "an old step"} {
+				if strings.Contains(err.Error(), bad) {
+					t.Errorf("the previous boot's %q must not be reported:\n%s", bad, err)
+				}
+			}
+		})
+	}
+}
+
 func TestUpStopsAVMWhoseStartFailedWithoutAStamp(t *testing.T) {
 	f := upProject(t, "Running")
 	must(t, lima.WriteConfig(demoVM, "an older config"))
@@ -287,22 +342,35 @@ func TestProvisioningReport(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "serialv.log")
 	old := "devkit-progress: provisioning started\ndevkit-progress: failed: old (line 1, exit 1)\n"
 	now := "devkit-progress: provisioning started\ndevkit-progress: applying the firewall\ndevkit-progress: note: n\n"
+	must(t, os.WriteFile(path, []byte(old), 0o644))
+	mark := markSerial(path)
 	must(t, os.WriteFile(path, []byte(old+now), 0o644))
-	step, failed := provisioningReport(path, int64(len(old)))
+	step, failed := provisioningReport(path, mark)
 	if step != "applying the firewall" || failed != "" {
 		t.Errorf("got step %q, failed %q", step, failed)
 	}
-	// Without an offset, the latest boot's lines.
-	step, failed = provisioningReport(path, 0)
+	// Without a mark, the latest boot's lines.
+	step, failed = provisioningReport(path, serialMark{})
 	if step != "applying the firewall" || failed != "" {
 		t.Errorf("from 0: got step %q, failed %q", step, failed)
 	}
 	// A log that shrank was started afresh: read it from the beginning.
-	step, _ = provisioningReport(path, 1<<20)
+	step, _ = provisioningReport(path, serialMark{size: 1 << 20, headLen: 1 << 20})
 	if step != "applying the firewall" {
 		t.Errorf("a truncated log: got step %q", step)
 	}
-	if step, failed := provisioningReport(filepath.Join(t.TempDir(), "none"), 0); step != "" || failed != "" {
+	// So was one that is as long but starts differently.
+	fresh := "devkit-progress: provisioning started\ndevkit-progress: failed: new (line 2, exit 2)\n" + strings.Repeat("x\n", len(old))
+	must(t, os.WriteFile(path, []byte(fresh), 0o644))
+	if _, failed := provisioningReport(path, mark); failed != "new (line 2, exit 2)" {
+		t.Errorf("a new log longer than the old: got failed %q", failed)
+	}
+	// An unchanged log has nothing from this boot.
+	must(t, os.WriteFile(path, []byte(old), 0o644))
+	if step, failed := provisioningReport(path, markSerial(path)); step != "" || failed != "" {
+		t.Errorf("an unchanged log reports nothing, got %q %q", step, failed)
+	}
+	if step, failed := provisioningReport(filepath.Join(t.TempDir(), "none"), serialMark{}); step != "" || failed != "" {
 		t.Errorf("a missing log reports nothing, got %q %q", step, failed)
 	}
 }
