@@ -282,15 +282,15 @@ func (n *netns) expectNoRide(t *testing.T, trusted, what string) {
 	}
 }
 
-// heredoc pulls a heredoc's body out of the rendered system script.
+// heredoc pulls a heredoc's body out of the rendered system script, and
+// fails if its opener is missing or repeated or it has no end.
 func heredoc(t *testing.T, s, opener string) string {
 	t.Helper()
-	i := strings.Index(s, opener)
-	if i < 0 {
-		t.Fatalf("%q not in the system script", opener)
+	body, err := heredocBody(s, opener)
+	if err != nil {
+		t.Fatalf("%v; update this test", err)
 	}
-	body := s[i+len(opener):]
-	return body[:strings.Index(body, "\nEOF\n")+1]
+	return body
 }
 
 func (n *netns) applyFirewall(t *testing.T, mode string, allowHost int, dns string) {
@@ -334,13 +334,20 @@ func (n *netns) applyHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := strings.Index(s, `SANDBOX_UID="$(id -u "$DEVKIT_USER")"`)
-	end := strings.Index(s, "chmod 755 /usr/local/sbin/devkit-boot-hold")
-	if start < 0 || end < 0 {
-		t.Fatal("boot hold generator not found in the system script; update this test")
+	// Exactly the generator between its markers, which
+	// TestBootHoldGeneratorIsSelfContained checks holds nothing else: this
+	// runs as root on the test host, outside the namespaces. The UID the
+	// script looks up earlier is supplied here.
+	body, err := section(s, bootHoldBegin, bootHoldEnd)
+	if err != nil {
+		t.Fatalf("%v; update this test", err)
+	}
+	if !strings.Contains(body, "cat > /usr/local/sbin/devkit-boot-hold <<EOF\n") {
+		t.Fatal("the generator no longer writes /usr/local/sbin/devkit-boot-hold; update this test")
 	}
 	hold := filepath.Join(n.dir, "hold.sh")
-	gen := "DEVKIT_USER=dkt-sandbox\n" + strings.ReplaceAll(s[start:end], "/usr/local/sbin/devkit-boot-hold", hold)
+	gen := "set -euo pipefail\nDEVKIT_USER=dkt-sandbox\nSANDBOX_UID=" + n.uids["sandbox"] + "\n" +
+		strings.ReplaceAll(body, "/usr/local/sbin/devkit-boot-hold", hold)
 	genPath := filepath.Join(n.dir, "hold-gen.sh")
 	os.WriteFile(genPath, []byte(gen), 0o755)
 	sh(t, "bash", genPath)

@@ -722,6 +722,9 @@ chmod 755 /usr/local/sbin/devkit-firewall
 # firewall replaces it. Root, which only runs devkit's own provisioning, keeps
 # the network it needs for downloads. The first boot needs no hold: nothing of
 # the sandbox's exists on a fresh disk.
+# The markers delimit what TestNetnsFirewall runs as root on the test host:
+# keep only the hold's own lookups and script between them.
+# ---- begin boot-hold generator (TestNetnsFirewall runs exactly this) ----
 RESOLVE_UID="$(id -u systemd-resolve 2>/dev/null || true)"
 # The sandbox's rootless containers run processes as its subordinate UIDs.
 SUBUIDS="$(awk -F: -v u="$DEVKIT_USER" '$1==u{print $2"-"($2+$3-1); exit}' /etc/subuid 2>/dev/null || true)"
@@ -748,6 +751,7 @@ for t in iptables ip6tables; do
   fi
 done
 EOF
+# ---- end boot-hold generator ----
 chmod 755 /usr/local/sbin/devkit-boot-hold
 cat > /etc/systemd/system/devkit-boot-hold.service <<'EOF'
 [Unit]
