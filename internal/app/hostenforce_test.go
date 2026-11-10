@@ -204,6 +204,7 @@ func upFixture(t *testing.T, f *fakelima.Fake, home, yaml string) string {
 	os.MkdirAll(filepath.Dir(cache), 0o755)
 	os.WriteFile(cache, []byte("fake proxy binary"), 0o755)
 	f.OnShell("systemctl is-active", "active\n", 0)
+	provisioned(f, "some-id")       // up stops a VM that reports no provision stamp
 	os.MkdirAll(lima.Home(), 0o755) // limactl create makes it
 	path := filepath.Join(home, "devkit.yaml")
 	os.WriteFile(path, []byte(yaml), 0o644)
@@ -451,8 +452,14 @@ func TestExpectedProvisionIDInHostMode(t *testing.T) {
 		t.Errorf("before any host-mode up there is nothing to expect, got %q", got)
 	}
 	port, _ := hostProxyPort(c.VMName())
+	// Whichever proxy binary devkit finds: the embedded one after a build,
+	// otherwise the cached one above.
+	bin, err := egressProxyBinary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	want, err := provision.Fingerprint(provision.Params{
-		Config: c, User: hostUser(), EgressSHA256: embedded.SHA256([]byte("fake proxy binary")),
+		Config: c, User: hostUser(), EgressSHA256: embedded.SHA256(bin),
 		HostProxy: fmt.Sprintf("192.168.5.2:%d", port),
 	})
 	if err != nil {

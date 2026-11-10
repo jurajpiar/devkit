@@ -219,22 +219,24 @@ func TestRootHostsCoverEveryProvisioningDownload(t *testing.T) {
 // script this binary renders. Host enforcement must not change a byte of
 // the script for a config that does not use it, or every existing VM would
 // be reported stale and reprovisioned. These hashes were taken from the
-// script before host enforcement existed. A deliberate policy change for
+// script without host enforcement: first before it existed, then again on
+// the fail-closed provisioning change it was rebased onto, where the rendered
+// guest-mode scripts were compared byte for byte across the two branches. A deliberate policy change for
 // guest mode updates them, knowing it makes existing VMs stale.
 func TestGuestModeScriptIsUnchangedByHostEnforcement(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":         "71187ee5734869f1",
-		"allowlist-nix":          "8ad642d22409e5bd",
-		"allowlist-none":         "4b617d451ddded84",
-		"enforce-guest-explicit": "71187ee5734869f1",
-		"loosened":               "090da9127615d709",
-		"no-security-updates":    "4a54d055821b1b58",
-		"none-mise":              "8164c753054accf8",
-		"none-nix":               "0a97e250e1380a72",
-		"none-none":              "182d3e96f2979f24",
-		"open-mise":              "889bd11ebd948bf8",
-		"open-nix":               "cc17478fba4e90f2",
-		"open-none":              "bfd297e51ae25f56",
+		"allowlist-mise":         "6dba4570cd18d45c",
+		"allowlist-nix":          "c2068e95c56e4059",
+		"allowlist-none":         "92de08f230889147",
+		"enforce-guest-explicit": "6dba4570cd18d45c",
+		"loosened":               "b3db2d54a1412070",
+		"no-security-updates":    "f06cb82b8f26e9ee",
+		"none-mise":              "d8beb9a7798fa626",
+		"none-nix":               "984f7afd7822f37f",
+		"none-none":              "2429ceed4a434e87",
+		"open-mise":              "f7d2ca2e9f431974",
+		"open-nix":               "d82a0065648721d2",
+		"open-none":              "da7717bcb7111c9b",
 	}
 	var got []string
 	for name, p := range guestVariants() {
