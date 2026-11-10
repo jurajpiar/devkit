@@ -3,6 +3,7 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +16,14 @@ import (
 // netProbe runs as the sandbox user with plain sockets: no curl, no proxy
 // variables. It prints "<label> OPEN|closed" per destination. Option 25 is
 // SO_BINDTODEVICE, which binds a socket to an interface without privilege
-// and so sidesteps routing rules.
-const netProbe = `import socket
+// and so sidesteps routing rules. "mac" is a listener the test runs on the
+// Mac's loopback, which Lima routes 192.168.5.2 to, so a closed verdict is
+// the policy's and not a port with nothing behind it.
+func netProbe(macPort int) string {
+	return fmt.Sprintf(netProbeTmpl, macPort, macPort)
+}
+
+const netProbeTmpl = `import socket
 def tcp(label, host, port, dev=None):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(5)
@@ -30,9 +37,9 @@ def tcp(label, host, port, dev=None):
     finally:
         s.close()
 tcp("internet", "1.1.1.1", 80)
-tcp("mac", "192.168.5.2", 22)
+tcp("mac", "192.168.5.2", %d)
 tcp("internet-eth0", "1.1.1.1", 80, "eth0")
-tcp("mac-eth0", "192.168.5.2", 22, "eth0")
+tcp("mac-eth0", "192.168.5.2", %d, "eth0")
 tcp("loopback", "127.0.0.1", 22)
 `
 
@@ -56,6 +63,26 @@ func TestFailedProvisioningFailsClosed(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "README.md"), "provisioning failure e2e\n")
 	s.mustRun("init", "--name", name, "--toolchain", "none")
 	t.Cleanup(func() { _, _ = s.run("rm", "--force") })
+
+	// A listener on the Mac's loopback: the target of every "mac" probe,
+	// and reached at the end under allow_host as the positive control.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	macPort := ln.Addr().(*net.TCPAddr).Port
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("devkit-host-listener\n"))
+			c.Close()
+		}
+	}()
+	probe := netProbe(macPort)
 
 	cfgPath := filepath.Join(dir, "devkit.yaml")
 	good, err := os.ReadFile(cfgPath)
@@ -97,7 +124,7 @@ func TestFailedProvisioningFailsClosed(t *testing.T) {
 		if st := limaStatus(t, vm); st != "Running" {
 			t.Fatalf("the VM should be running after limactl start, it is %q", st)
 		}
-		got := guest(t, vm, "python3 -", netProbe)
+		got := guest(t, vm, "python3 -", probe)
 		for _, label := range []string{"internet", "mac", "internet-eth0", "mac-eth0", "loopback"} {
 			if !strings.Contains(got, label+" closed\n") {
 				t.Errorf("%s should be closed under the hold:\n%s", label, got)
@@ -144,7 +171,7 @@ func TestFailedProvisioningFailsClosed(t *testing.T) {
 			t.Errorf("an allowed host should be reachable through the proxy: %v %q", err, code)
 		}
 		// The firewall decides now: loopback open, everything else closed.
-		got := guest(t, vm, "python3 -", netProbe)
+		got := guest(t, vm, "python3 -", probe)
 		if !strings.Contains(got, "loopback OPEN\n") {
 			t.Errorf("loopback should be open after the lift:\n%s", got)
 		}
@@ -158,6 +185,32 @@ func TestFailedProvisioningFailsClosed(t *testing.T) {
 	t.Run("broken again after a good boot: up fails the same way", func(t *testing.T) {
 		writeFile(t, cfgPath, bad)
 		failsClosed(t, "re-provisioning")
+	})
+
+	// The positive control for every "mac closed" above: with the policy
+	// allowing the Mac, the same probe reaches the listener, plain and bound
+	// to eth0, so closed meant the hold or the firewall.
+	t.Run("fixed with allow_host: the sandbox user reaches the Mac", func(t *testing.T) {
+		const from = "allow_host: false"
+		if !strings.Contains(string(good), from) {
+			t.Fatalf("no %q in devkit.yaml:\n%s", from, good)
+		}
+		writeFile(t, cfgPath, strings.Replace(string(good), from, "allow_host: true", 1))
+		out := s.mustRun("up")
+		if !strings.Contains(out, "Ready") {
+			t.Fatalf("up should finish with Ready:\n%s", out)
+		}
+		got := guest(t, vm, "python3 -", probe)
+		for _, label := range []string{"mac", "mac-eth0"} {
+			if !strings.Contains(got, label+" OPEN\n") {
+				t.Errorf("%s should be reachable under allow_host:\n%s", label, got)
+			}
+		}
+		for _, label := range []string{"internet", "internet-eth0"} {
+			if !strings.Contains(got, label+" closed\n") {
+				t.Errorf("%s should still be closed:\n%s", label, got)
+			}
+		}
 	})
 }
 
