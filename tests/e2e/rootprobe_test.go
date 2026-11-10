@@ -106,3 +106,87 @@ func TestRootProbeReadsFramedDNSReplies(t *testing.T) {
 		}
 	}
 }
+
+// echoHarness loads the probe's functions as framingHarness does and asks
+// icmp_is_echo_reply about packets as a raw IPv4 ICMP socket on Linux
+// delivers them: IP header first, of the length its IHL field gives.
+const echoHarness = `import ast, socket, struct, sys
+src = open(sys.argv[1]).read()
+tree = ast.parse(src)
+tree.body = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom, ast.FunctionDef))]
+ns = {}
+exec(compile(tree, sys.argv[1], "exec"), ns)
+check = ns["icmp_is_echo_reply"]
+TARGET = "203.0.113.1"
+
+def ip(src, body, options=b""):
+    ihl = (20 + len(options)) // 4
+    head = struct.pack(">BBHHHBBH4s4s", 0x40 | ihl, 0, 20 + len(options) + len(body), 0, 0, 64, 1, 0,
+                       socket.inet_aton(src), socket.inet_aton("192.168.5.15"))
+    return head + options + body
+
+def icmp(typ, code, ident, seq, payload):
+    return struct.pack(">BBHHH", typ, code, 0, ident, seq) + payload
+
+request = ns["icmp_echo_request"](0x1234, 1, b"devkit")
+cases = [
+    ("matching reply", ip(TARGET, icmp(0, 0, 0x1234, 1, b"devkit"))),
+    ("matching reply, IP options", ip(TARGET, icmp(0, 0, 0x1234, 1, b"devkit"), options=b"\x01\x01\x01\x00")),
+    ("destination unreachable from a router", ip("192.168.5.2", icmp(3, 1, 0, 0, ip("192.168.5.15", request)[:28]))),
+    ("destination unreachable from the target", ip(TARGET, icmp(3, 1, 0, 0, ip("192.168.5.15", request)[:28]))),
+    ("reply from another source", ip("192.168.5.2", icmp(0, 0, 0x1234, 1, b"devkit"))),
+    ("reply with another identifier", ip(TARGET, icmp(0, 0, 0x4321, 1, b"devkit"))),
+    ("reply with another sequence", ip(TARGET, icmp(0, 0, 0x1234, 2, b"devkit"))),
+    ("reply with another payload", ip(TARGET, icmp(0, 0, 0x1234, 1, b"devkiT"))),
+    ("our own echo request", ip(TARGET, request)),
+    ("truncated reply", ip(TARGET, icmp(0, 0, 0x1234, 1, b"devkit"))[:26]),
+    ("not IPv4", b"\x60" + ip(TARGET, icmp(0, 0, 0x1234, 1, b"devkit"))[1:]),
+]
+for name, pkt in cases:
+    print(f"{name}: {check(pkt, TARGET, 0x1234, 1, b'devkit')}")
+# The request the probe sends carries a valid checksum.
+s = 0
+for i in range(0, len(request), 2):
+    s += (request[i] << 8) + (request[i + 1] if i + 1 < len(request) else 0)
+s = (s >> 16) + (s & 0xFFFF)
+print("request checksum valid:", (s + (s >> 16)) & 0xFFFF == 0xFFFF)
+`
+
+// The probe's ICMP check shows Lima's network stack answers echoes itself.
+// It must count only the echo reply to its own request: if enforcement
+// regressed and the packet were forwarded, a router's Destination
+// Unreachable must not pass for the local answer. Runs with the host's
+// python3; no VM.
+func TestRootProbeAcceptsOnlyItsOwnEchoReply(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not installed")
+	}
+	probe, err := filepath.Abs(filepath.Join("testdata", "guest-root-probe.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(py, "-I", "-B", "-c", echoHarness, probe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("harness: %v\n%s", err, out)
+	}
+	t.Logf("\n%s", out)
+	for _, want := range []string{
+		"matching reply: True",
+		"matching reply, IP options: True",
+		"destination unreachable from a router: False",
+		"destination unreachable from the target: False",
+		"reply from another source: False",
+		"reply with another identifier: False",
+		"reply with another sequence: False",
+		"reply with another payload: False",
+		"our own echo request: False",
+		"truncated reply: False",
+		"not IPv4: False",
+		"request checksum valid: True",
+	} {
+		if !strings.Contains(string(out), want+"\n") {
+			t.Errorf("want %q", want)
+		}
+	}
+}
