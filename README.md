@@ -277,7 +277,8 @@ writing to it.
   every crash report you have not acknowledged and show its first lines; a
   VM whose kernel has panicked, which Lima still lists as Running, is named
   as such (`devkit ls` too), and `devkit down` forces it off. `devkit
-  audit` counts an unacknowledged report as a finding (exit 1).
+  audit` counts an unacknowledged report as a finding (exit 1), with the VM
+  stopped too.
 - **What to do.** A crash can be a failed attempt to break out, or simply a
   kernel bug. If you cannot explain it, discard the VM with `devkit rm`;
   otherwise acknowledge it with `devkit audit --ack-crashes`.

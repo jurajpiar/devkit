@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 
 	"github.com/jurajpiar/devkit/internal/lima"
@@ -32,7 +33,10 @@ console, from the boot after the first (see SECURITY.md); --ack-crashes
 acknowledges them and does nothing else.
 
 Exit status is 1 when something stale or an unacknowledged kernel crash
-report was found, 2 when the audit could not run to a verdict.`,
+report was found, 2 when the audit could not run to a verdict. The crash
+reports are kept on the Mac, so a VM that is not running is still audited
+for them: an unacknowledged one exits 1, with the trust audit not run;
+without one there is no verdict, and the status is 2.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Preflight failures are not findings either: status 2, cause kept.
 		if err := requireLima(); err != nil {
@@ -51,8 +55,14 @@ report was found, 2 when the audit could not run to a verdict.`,
 			fmt.Fprintf(cmd.OutOrStdout(), "Acknowledged %d kernel crash report(s) of VM %s.\n", n, cfg.VMName())
 			return nil
 		}
-		if err := mustBeRunning(cmd, cfg); err != nil {
+		inst, err := instance(cmd.Context(), cfg)
+		if err != nil {
 			return &exitError{code: 2, msg: err.Error()}
+		}
+		if why := notRunning(cfg, inst); why != nil {
+			// The crash reports are on the Mac: one saved after a panic
+			// that up forced off is still a finding.
+			return auditStopped(cmd.OutOrStdout(), cfg.VMName(), inst != nil, why)
 		}
 		// The kernel's crash reports, read on the Mac. A panicked guest
 		// cannot run the rest.
@@ -86,6 +96,33 @@ report was found, 2 when the audit could not run to a verdict.`,
 			return nil
 		}
 	},
+}
+
+// auditStopped is the audit of a VM that is not running, so no trust audit
+// can run in it: the kernel crash reports saved on the Mac are still read,
+// and an unacknowledged one is a finding (1). Without one there is no
+// verdict (2). exists is whether Lima knows the VM: only its serial log,
+// kept until the next start, is scanned again.
+func auditStopped(w io.Writer, name string, exists bool, why error) error {
+	var st *crashState
+	var err error
+	if exists {
+		st, err = scanCrashes(name)
+	} else {
+		st = loadCrashState(name)
+	}
+	if len(st.Crashes) == 0 {
+		return &exitError{code: 2, msg: why.Error()}
+	}
+	if err != nil {
+		fmt.Fprintf(w, "Kernel crash reports: could not read VM %s's serial log: %v; the reports saved before:\n", name, err)
+	} else {
+		fmt.Fprintln(w, "Kernel crash reports:")
+	}
+	// Not running: never "has panicked and will not respond".
+	fmt.Fprint(w, crashWarning(name, st, false))
+	fmt.Fprintf(w, "The trust audit was not run: %v.\n", why)
+	return &exitError{code: 1, msg: fmt.Sprintf("unacknowledged kernel crash reports found; the trust audit was not run: %v", why)}
 }
 
 // Verdicts of the in-VM audit. The script exits 3 for stale trust and 2 for

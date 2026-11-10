@@ -368,9 +368,9 @@ report is not seen either. A report is a reason to act; the absence of one
 proves nothing.
 
 **What to do on a report.** Every command that uses the VM warns until you
-act, and `devkit audit` exits 1. A crash can be a failed attempt to break
-out or simply a kernel bug. If you cannot explain it, discard the VM with
-`devkit rm`: a VM where an exploit has been attempted is not worth
+act, and `devkit audit` exits 1, even with the VM stopped. A crash can be a
+failed attempt to break out or simply a kernel bug. If you cannot explain
+it, discard the VM with `devkit rm`: a VM where an exploit has been attempted is not worth
 repairing. Otherwise acknowledge it with `devkit audit --ack-crashes`. A
 kernel that has panicked does not answer while Lima still lists the VM as
 Running; devkit names it, and `devkit down` forces it off.

@@ -307,6 +307,12 @@ func mustBeRunning(cmd *cobra.Command, cfg *project.Config) error {
 	if err != nil {
 		return err
 	}
+	return notRunning(cfg, inst)
+}
+
+// notRunning says why a command that needs the VM running cannot use inst,
+// or is nil when it can.
+func notRunning(cfg *project.Config, inst *lima.Instance) error {
 	if inst == nil {
 		return fmt.Errorf("VM %s does not exist; run 'devkit up'", cfg.VMName())
 	}
