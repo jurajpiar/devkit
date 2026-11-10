@@ -68,8 +68,8 @@ func requireProvisioned(ctx context.Context, cfg *project.Config) error {
 // its error, or for a VM that was already running. A running VM without a
 // stamp did not finish provisioning and may have no firewall: it is stopped,
 // and the error says which step failed. serial is the instance's console
-// log and from the offset where this boot's lines begin.
-func confirmProvisioned(ctx context.Context, name string, startErr error, serial string, from int64) error {
+// log and mark where it stood before this boot (the zero mark: read it all).
+func confirmProvisioned(ctx context.Context, name string, startErr error, serial string, mark serialMark) error {
 	if startErr != nil {
 		// A VM that is not running exposes nothing; any other state, or one
 		// that cannot be read, is checked like a running one.
@@ -84,7 +84,7 @@ func confirmProvisioned(ctx context.Context, name string, startErr error, serial
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "VM %s did not finish provisioning", name)
-	step, failed := provisioningReport(serial, from)
+	step, failed := provisioningReport(serial, mark)
 	switch {
 	case err != nil:
 		fmt.Fprintf(&b, " as far as devkit can tell: checking for the provision stamp failed: %v", err)
@@ -112,25 +112,66 @@ func confirmProvisioned(ctx context.Context, name string, startErr error, serial
 	return errors.New(b.String())
 }
 
+// serialMark is where a serial log stood before a start: its size and, as
+// the crash scanner keeps it, a fingerprint of its beginning. Lima begins a
+// new log at every start, which may grow to or past the old one's size, so
+// the size alone cannot tell this boot's lines from the previous boot's.
+type serialMark struct {
+	size, headLen int64
+	headSHA       string
+}
+
+// markSerial is the mark of the log at path now; the zero mark if it is
+// missing or unreadable.
+func markSerial(path string) serialMark {
+	f, err := os.Open(path)
+	if err != nil {
+		return serialMark{}
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return serialMark{}
+	}
+	m := serialMark{size: fi.Size(), headLen: min(fi.Size(), crashHeadLen)}
+	if m.headSHA, err = headSHA(f, m.headLen); err != nil {
+		return serialMark{}
+	}
+	return m
+}
+
+// since is where this boot's lines begin in f, of the given size: past the
+// marked log if f still starts with it, else at the start, because Lima
+// began a new log.
+func (m serialMark) since(f *os.File, size int64) int64 {
+	if m.size == 0 || size < m.size {
+		return 0
+	}
+	if sum, err := headSHA(f, m.headLen); err != nil || sum != m.headSHA {
+		return 0
+	}
+	return m.size
+}
+
 // provisioningReport reads the progress lines the system script wrote to
-// the serial console since offset from (from the start if the log is now
-// shorter, which means Lima began a new one) and returns, for the last boot
-// in that range, the last step it began and the failure its ERR trap
-// reported. Either may be empty. Lines are sanitised.
-func provisioningReport(path string, from int64) (step, failed string) {
+// the serial console since mark (from the start if Lima began a new log)
+// and returns, for the last boot in that range, the last step it began and
+// the failure its ERR trap reported. Either may be empty. Lines are
+// sanitised.
+func provisioningReport(path string, mark serialMark) (step, failed string) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", ""
 	}
 	defer f.Close()
-	if fi, err := f.Stat(); err == nil {
-		if fi.Size() < from {
-			from = 0
-		}
-		// The steps are near the end; do not read a long log whole.
-		if fi.Size()-from > 4<<20 {
-			from = fi.Size() - 4<<20
-		}
+	fi, err := f.Stat()
+	if err != nil {
+		return "", ""
+	}
+	from := mark.since(f, fi.Size())
+	// The steps are near the end; do not read a long log whole.
+	if fi.Size()-from > 4<<20 {
+		from = fi.Size() - 4<<20
 	}
 	if _, err := f.Seek(from, io.SeekStart); err != nil {
 		return "", ""
@@ -161,12 +202,4 @@ func provisioningReport(path string, from int64) (step, failed string) {
 // the guest's provisioning reports.
 func serialLog(name string) string {
 	return filepath.Join(lima.Dir(name), "serialv.log")
-}
-
-// fileSize is the size of path, or 0.
-func fileSize(path string) int64 {
-	if fi, err := os.Stat(path); err == nil {
-		return fi.Size()
-	}
-	return 0
 }

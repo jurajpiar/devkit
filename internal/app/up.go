@@ -524,12 +524,12 @@ func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance
 		// Lima begins a new serial log: keep this one's crash reports.
 		_, _ = scanCrashes(name)
 		expectNewCrashLog(name)
-		from := fileSize(serial)
+		mark := markSerial(serial)
 		stopWatch := watchProvisioning(ctx, name)
 		err := start(ctx, name)
 		stopWatch()
-		return confirmProvisioned(ctx, name, err, serial, from)
+		return confirmProvisioned(ctx, name, err, serial, mark)
 	}
 	fmt.Printf("VM %s is running\n", name)
-	return confirmProvisioned(ctx, name, nil, serial, 0)
+	return confirmProvisioned(ctx, name, nil, serial, serialMark{})
 }
