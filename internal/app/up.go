@@ -132,11 +132,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	shown := map[string]bool{} // crash reports already warned about
 	if inst != nil {
 		// Crash reports from this log, before a start replaces it. A
 		// panicked kernel cannot shut down or answer: it is forced off and
 		// started again below.
 		st, err := scanCrashes(name)
+		for _, r := range st.Crashes {
+			shown[r.Key] = true
+		}
 		if err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not read VM %s's serial log for kernel crash reports: %v\n", name, err)
 		}
@@ -151,6 +155,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	if err := reconcileVM(ctx, name, rendered, inst, start); err != nil {
 		return err
+	}
+	// Crash reports from this boot and its provisioning, which the scans
+	// above could not see: an Oops is warned about and up goes on, as the
+	// other commands do; a panicked kernel will not respond, so up stops.
+	if newCrashWarning(cmd.ErrOrStderr(), name, shown) {
+		return errPanicked(name)
 	}
 	warnIfUnconfined(ctx, cfg)
 

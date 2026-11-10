@@ -262,3 +262,61 @@ func TestLsShowsAPanickedVM(t *testing.T) {
 		}
 	}
 }
+
+// upMerged runs devkit up with the command's output and os.Stdout in one
+// stream, so the order of a warning and "Ready" can be checked.
+func upMerged(t *testing.T) (string, error) {
+	t.Helper()
+	var err error
+	out := captureStdout(t, func() {
+		rootCmd.SetOut(os.Stdout)
+		rootCmd.SetErr(os.Stdout)
+		rootCmd.SetArgs([]string{"up", "--no-sync", "--no-install"})
+		defer func() {
+			rootCmd.SetOut(nil)
+			rootCmd.SetErr(nil)
+			rootCmd.SetArgs(nil)
+			resetFlags(rootCmd)
+		}()
+		err = rootCmd.Execute()
+	})
+	return out, err
+}
+
+func TestUpWarnsAboutACrashDuringTheBoot(t *testing.T) {
+	f, _ := crashProject(t, "Stopped", "")
+	f.TruncateSerialOnStart(demoVM)
+	f.OnStartSerial(demoVM, bootLines+oopsLines)
+	out, err := upMerged(t)
+	if err != nil {
+		t.Fatalf("an Oops is not a panic: up goes on with a warning, got %v\n%s", err, out)
+	}
+	warn := strings.Index(out, "Unable to handle kernel NULL pointer dereference")
+	ready := strings.Index(out, "Ready.")
+	if warn < 0 || ready < 0 || warn > ready {
+		t.Errorf("up must warn about a crash in this boot before it says Ready:\n%s", out)
+	}
+	if !strings.Contains(out, "devkit audit --ack-crashes") || strings.Contains(out, "panicked") {
+		t.Errorf("the usual warning, and no panic:\n%s", out)
+	}
+	if st := loadCrashState(demoVM); len(st.Crashes) != 1 {
+		t.Errorf("the crash is kept until acknowledged: %+v", st.Crashes)
+	}
+}
+
+func TestUpFailsOnAPanicDuringTheBoot(t *testing.T) {
+	panicked := panicFixture(t) // read before the project changes directory
+	f, _ := crashProject(t, "Stopped", "")
+	f.TruncateSerialOnStart(demoVM)
+	f.OnStartSerial(demoVM, bootLines+panicked)
+	out, err := upMerged(t)
+	if err == nil || !strings.Contains(err.Error(), "panicked") || !strings.Contains(err.Error(), "devkit down") {
+		t.Fatalf("up on a VM that panicked during its boot must fail and say so: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Ready") {
+		t.Errorf("a panicked VM is not ready:\n%s", out)
+	}
+	if !strings.Contains(out, "will not respond") || !strings.Contains(out, "Kernel panic - not syncing") {
+		t.Errorf("the warning should say the VM panicked and show the report:\n%s", out)
+	}
+}
