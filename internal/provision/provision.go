@@ -158,6 +158,13 @@ DEVKIT_USER="{{.User}}"
 MODE="{{.Config.Network.Mode}}"
 DNS="{{if .Config.Network.DNS}}{{.Config.Network.DNS}}{{else}}proxy{{end}}"
 
+# The stamp says provisioning finished. It goes first, before anything that
+# can fail, and is written back only when every step below has succeeded
+# (the script runs with set -e), so an aborted provisioning, on a first boot
+# or a later one, leaves a VM without one, which devkit up stops and devkit
+# shell and sync refuse.
+rm -f /etc/devkit/provision.id
+
 mkdir -p /etc/devkit /var/log/devkit /var/lib/devkit {{.DropDir}}
 chmod 755 /var/log/devkit
 
@@ -253,10 +260,6 @@ cat > /etc/devkit/egress.conf <<'EOF'
 EXTRA_ARGS=-allowed={{if eq .Config.Network.Mode "open"}}*{{else}}{{join .Config.Network.Allow ","}}{{end}}
 EOF
 echo "{{.EgressSHA256}}" > /etc/devkit/egress.sha256
-# The stamp is removed now and written back only when every step below has
-# succeeded (the script runs with set -e), so an aborted provisioning leaves
-# a VM without one, which devkit up stops and devkit shell and sync refuse.
-rm -f /etc/devkit/provision.id
 chmod 644 /etc/devkit/*.conf /etc/devkit/egress.sha256
 chown "$DEVKIT_USER" {{.DropDir}}
 chmod 700 {{.DropDir}}
