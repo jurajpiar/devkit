@@ -179,13 +179,15 @@ ok, d = dns_tcp("8.8.8.8")
 report("DNS over TCP to 8.8.8.8", "fail", yes(ok), d)
 ok, d = udp_ntp("185.125.190.57")
 report("UDP (NTP) to 185.125.190.57:123", "fail", yes(ok), d)
-# Lima's network stack answers every echo itself (0 ms, even for TEST-NET
-# addresses), so a reply proves nothing left the Mac. The check is that an
-# unroutable address "answers" too: if it ever stops, ICMP is being forwarded.
-# Only the echo reply to this request counts, so a router's Destination
-# Unreachable for a forwarded one cannot pass for it.
+# ICMP is reported, not judged. From in here a ping the Mac refused and one
+# it forwarded look the same: no reply. And when a reply does come it is
+# Lima's own network stack answering (0 ms, TTL 64, for unroutable addresses
+# too), which varies with the environment: the same code got one all
+# morning and none in the afternoon. What can be checked is checked on the
+# Mac: TestProfileBlocksICMP shows a process under the profile cannot send
+# ICMP at all.
 ok, d = icmp("203.0.113.1")
-report("ICMP echo is answered locally (TEST-NET-3 replies)", "ok", yes(ok), d)
+print(f"NOTE ICMP echo to an unroutable address: {'answered locally' if ok else 'no reply'} ({d})")
 
 print("== Lima's own resolver (a DNS exfiltration channel if it answers)")
 # A name that does not exist cannot tell a leak from a local failure (both

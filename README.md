@@ -206,8 +206,10 @@ Limits, stated plainly:
 - **Not attacked:** the vsock channel between Lima's guest agent and host
   agent. The profile confines what the host agent dials, not what it does
   when asked over that channel.
-- **ICMP echo** is answered by Lima's own network stack for any address, so a
-  ping "succeeds" without anything leaving the Mac.
+- **ICMP** cannot leave the Mac: a process under the profile is refused when
+  it tries to send one, which a test checks on the Mac itself. Inside the
+  guest a ping either gets no reply or is answered by Lima's own network
+  stack, depending on the environment; neither means it reached anything.
 - **Not combinable** with `allow_host: true`, `dns: resolvers` or
   `mode: none`; devkit refuses those at validation. The first two need the
   VM to reach something on the Mac other than the proxy; `none` would leave

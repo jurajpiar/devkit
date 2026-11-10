@@ -32,6 +32,13 @@ try:
         s.sendto(b"devkit-udp-probe", ("127.0.0.1", int(target)))
     elif kind == "resolve":
         socket.getaddrinfo(target, 443)
+    elif kind == "icmp":
+        # An unprivileged ICMP datagram socket, as Lima's network stack uses
+        # to forward a guest's ping. Echo request, checksum precomputed.
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+        s.settimeout(3)
+        s.sendto(b"\x08\x00\xf7\xff\x00\x00\x00\x00", (target, 0))
+        s.recv(64)
     print("ok")
 except Exception as e:
     print("fail", type(e).__name__, e)
@@ -275,5 +282,23 @@ func TestProfileWithoutProxyAllowsOnlySSH(t *testing.T) {
 	}
 	if got := h.run(true, "tcp", fmt.Sprint(otherPort)); got == "ok" {
 		t.Error("another port must be unreachable")
+	}
+}
+
+// A guest's ping must not leave the Mac either. Seen from inside the guest
+// a refused ping and a forwarded one look the same (no reply), so this is
+// checked here, on the process the profile confines: it cannot send ICMP at
+// all. Loopback only, with an unsandboxed control showing the ping works.
+func TestProfileBlocksICMP(t *testing.T) {
+	h := newHarness(t, shortTempDir(t), tcpListener(t), tcpListener(t))
+	if got := h.run(false, "icmp", "127.0.0.1"); got != "ok" {
+		t.Skipf("this machine does not answer an unprivileged ICMP echo on loopback, so the control is void: %s", got)
+	}
+	got := h.run(true, "icmp", "127.0.0.1")
+	if got == "ok" {
+		t.Fatal("a process under the profile sent an ICMP echo and got a reply")
+	}
+	if !strings.Contains(got, "PermissionError") {
+		t.Errorf("ICMP should be refused by the sandbox, not fail some other way: %s", got)
 	}
 }
