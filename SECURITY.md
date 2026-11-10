@@ -321,6 +321,55 @@ What it does not cover:
 - `allow_host: true`, `dns: resolvers` and `mode: none` are refused with
   host enforcement.
 
+## Kernel crash reports, read on the Mac
+
+**What is detected.** Kernel crash reports from the guest: panics, Oopses,
+`BUG:` and `kernel BUG at`, KASAN and UBSAN reports, watchdog lockups,
+stack-protector failures and list corruption. Failed exploit attempts often
+crash the kernel before one succeeds, so these are worth seeing.
+
+**From where.** The system script adds `console=hvc0` to the kernel command
+line through a grub drop-in. hvc0 is the serial console Lima records on the
+Mac in `~/.lima/<vm>/serialv.log`; on this hypervisor the kernel's default
+console, ttyAMA0, does not exist, so before this nothing the kernel printed
+reached the Mac. Messages at levels 0 to 3 (emergency to error) arrive,
+which includes every crash report. devkit scans the log on the Mac; nothing
+runs in the guest to do it. The sandbox user cannot write to `/dev/hvc0`,
+`/dev/console` or `/dev/kmsg`, and when a process named like a crash report ("BUG:
+unable to") crashes, the kernel logs nothing for it (both tested). The
+scanner matches a signature only at the start of a kernel message, directly
+after its timestamp, so names and other text the sandbox chooses, which
+appear later in kernel lines, cannot forge a report; devkit's own progress
+lines and systemd's status lines are not kernel lines and never match.
+Everything shown is stripped of control characters and escape sequences.
+
+**From when.** The drop-in takes effect from the boot after the one that
+wrote it: a new VM reports crashes only after its first restart (`devkit
+down`, then `devkit up`), and devkit says so instead of reporting "none". If
+`update-grub` is missing or fails, provisioning warns and goes on: this is
+detection, not enforcement.
+
+**The limit.** This catches the noisy attempt, not the clean one. An exploit
+that works the first time crashes nothing, and once it has root it can lower
+the console level or rewrite the command line, after which only what it lets
+through gets out. A guest that hangs without printing a
+report is not seen either. A report is a reason to act; the absence of one
+proves nothing.
+
+**What to do on a report.** Every command that uses the VM warns until you
+act, and `devkit audit` exits 1. A crash can be a failed attempt to break
+out or simply a kernel bug. If you cannot explain it, discard the VM with
+`devkit rm`: a VM where an exploit has been attempted is not worth
+repairing. Otherwise acknowledge it with `devkit audit --ack-crashes`. A
+kernel that has panicked does not answer while Lima still lists the VM as
+Running; devkit names it, and `devkit down` forces it off.
+
+Reports are kept in `~/.devkit/<vm>/kernel-crashes.json` across restarts,
+since Lima starts a new serial log at every VM start; `devkit up` and
+`devkit down` read the log before that happens. A VM started with
+`limactl` directly, rather than devkit, can lose a crash from before that
+start.
+
 ## What the escape tests cover
 
 `tests/e2e/escape_test.go` runs inside a real VM and tries, as the sandbox
