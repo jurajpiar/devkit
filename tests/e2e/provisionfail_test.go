@@ -109,6 +109,19 @@ func TestFailedProvisioningFailsClosed(t *testing.T) {
 		if st := guest(t, vm, "test -e /etc/devkit/provision.id && echo present || echo absent", ""); !strings.Contains(st, "absent") {
 			t.Errorf("a failed provisioning must leave no stamp: %q", st)
 		}
+		// The image's passwordless sudo must be gone although provisioning
+		// failed, or the sandbox user could lift the hold with
+		// "sudo systemctl revert user-<uid>.slice". The probe is sudo -n true:
+		// outside Lima's three boot checks like the revert, so the policy
+		// decides the same way, but harmless if it were allowed. Lima's own
+		// check must still pass: the denial is devkit's policy, not a broken
+		// sudo.
+		if out := guest(t, vm, "sudo -n true; echo exit=$?", ""); !strings.Contains(out, "exit=1\n") {
+			t.Errorf("sudo must be denied on a VM whose first provisioning failed:\n%s", out)
+		}
+		if out := guest(t, vm, "sudo -n cat /mnt/lima-cidata/param.env >/dev/null; echo exit=$?", ""); !strings.Contains(out, "exit=0\n") {
+			t.Errorf("Lima's boot check must still be allowed by sudo:\n%s", out)
+		}
 	})
 
 	t.Run("shell refuses a VM without a stamp", func(t *testing.T) {

@@ -189,6 +189,36 @@ on_error() {
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 step "provisioning started"
 
+# ---- sudo ----
+# Lima's host agent confirms boot by running three read-only commands with
+# sudo over SSH. Those are always allowed. Anything else requires sudo: true.
+# Applied first, before the hold and before any step that can fail for
+# reasons outside the VM: the image gives the user passwordless sudo, which
+# could lift the hold on a VM whose first provisioning failed and that was
+# then started by hand. Lima's checks need nothing more: on every boot after
+# the first this policy is already in place when they run.
+rm -f /etc/sudoers.d/90-cloud-init-users
+for f in /etc/sudoers.d/*; do
+  [ -f "$f" ] || continue
+  [ "$f" = /etc/sudoers.d/devkit ] && continue
+  if grep -q "^$DEVKIT_USER " "$f" 2>/dev/null; then rm -f "$f"; fi
+done
+gpasswd -d "$DEVKIT_USER" sudo >/dev/null 2>&1 || true
+{{- if .Config.Sudo}}
+cat > /etc/sudoers.d/devkit <<EOF
+# devkit.yaml has sudo: true. Root can disable the egress firewall.
+$DEVKIT_USER ALL=(ALL) NOPASSWD:ALL
+EOF
+{{- else}}
+cat > /etc/sudoers.d/devkit <<EOF
+# Only what Lima's host agent needs to confirm the VM booted. Nothing else.
+Cmnd_Alias DEVKIT_LIMA = /usr/bin/cat /mnt/lima-cidata/param.env, /usr/bin/diff -q /run/lima-ssh-ready /mnt/lima-cidata/meta-data, /usr/bin/diff -q /run/lima-boot-done /mnt/lima-cidata/meta-data
+$DEVKIT_USER ALL=(root) NOPASSWD: DEVKIT_LIMA
+EOF
+{{- end}}
+chmod 440 /etc/sudoers.d/devkit
+visudo -cf /etc/sudoers.d/devkit >/dev/null
+
 # ---- provisioning hold: no network for the sandbox user until the firewall ----
 # The firewall is applied at the end of this script. Until then, and until
 # the VM shuts down if any step fails (no stamp is written, and devkit up
@@ -589,32 +619,6 @@ fi
 systemctl daemon-reload
 systemctl try-restart nix-daemon.service 2>/dev/null || true
 {{- end}}
-
-# ---- sudo ----
-# Lima's host agent confirms boot by running three read-only commands with
-# sudo over SSH. Those are always allowed. Anything else requires sudo: true.
-rm -f /etc/sudoers.d/90-cloud-init-users
-for f in /etc/sudoers.d/*; do
-  [ -f "$f" ] || continue
-  [ "$f" = /etc/sudoers.d/devkit ] && continue
-  if grep -q "^$DEVKIT_USER " "$f" 2>/dev/null; then rm -f "$f"; fi
-done
-gpasswd -d "$DEVKIT_USER" sudo >/dev/null 2>&1 || true
-{{- if .Config.Sudo}}
-cat > /etc/sudoers.d/devkit <<EOF
-# devkit.yaml has sudo: true. Root can disable the egress firewall.
-$DEVKIT_USER ALL=(ALL) NOPASSWD:ALL
-EOF
-{{- else}}
-cat > /etc/sudoers.d/devkit <<EOF
-# Only what Lima's host agent needs to confirm the VM booted. Nothing else.
-Cmnd_Alias DEVKIT_LIMA = /usr/bin/cat /mnt/lima-cidata/param.env, /usr/bin/diff -q /run/lima-ssh-ready /mnt/lima-cidata/meta-data, /usr/bin/diff -q /run/lima-boot-done /mnt/lima-cidata/meta-data
-$DEVKIT_USER ALL=(root) NOPASSWD: DEVKIT_LIMA
-EOF
-{{- end}}
-chmod 440 /etc/sudoers.d/devkit
-visudo -cf /etc/sudoers.d/devkit >/dev/null
-
 
 # ---- name resolution: who may ask, and through what ----
 # With DNS=proxy (or none) nothing but the proxy may resolve names: libc
