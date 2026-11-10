@@ -65,6 +65,10 @@ func vmStateDir(name string) string {
 	return filepath.Join(devkitHome(), name+"-"+hex.EncodeToString(sum[:])[:8])
 }
 
+// VMStateDir is vmStateDir, for the end-to-end tests, which read the host
+// proxy's port and log from it.
+func VMStateDir(name string) string { return vmStateDir(name) }
+
 // canonicalPath is path absolute with every symlink resolved, also when it
 // does not exist yet: its nearest existing ancestor is resolved and the
 // rest appended, so the key does not change once Lima creates its home

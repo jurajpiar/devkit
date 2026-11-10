@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jurajpiar/devkit/internal/app"
 )
 
 // TestHostEnforcement checks network.enforce: host on a real VM: the Mac,
@@ -72,8 +74,9 @@ func TestHostEnforcement(t *testing.T) {
 	if !strings.Contains(upOut, "enforced on the Mac") {
 		t.Fatalf("devkit up should report host enforcement:\n%s", upOut)
 	}
-	home, _ := os.UserHomeDir()
-	state := filepath.Join(home, ".devkit", "devkit-"+name)
+	// Resolved as devkit does: namespaced by Lima home under a custom
+	// LIMA_HOME.
+	state := app.VMStateDir("devkit-" + name)
 	portData, err := os.ReadFile(filepath.Join(state, "hostproxy.port"))
 	if err != nil {
 		t.Fatal(err)
