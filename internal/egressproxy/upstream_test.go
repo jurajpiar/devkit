@@ -282,6 +282,41 @@ func TestRefuseLoopbackBlocksTheMacsOwnServices(t *testing.T) {
 	}
 }
 
+// Health lets the process that started a proxy tell that it is up and is the
+// one it started. Only a request to the proxy itself gets it; a proxy
+// request for the same path is decided by the allowlist as ever.
+func TestHealthAnswersOnlyRequestsToTheProxyItself(t *testing.T) {
+	up := newUpstream(t, nil)
+	addr := serve(t, NewProxy(ProxyConfig{AllowedHosts: []string{"nothing.test"}, Logger: log.New(io.Discard, "", 0), Health: "token-123"}))
+	resp, err := http.Get("http://" + addr + HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "token-123" {
+		t.Errorf("health: got %d %q", resp.StatusCode, body)
+	}
+	resp, err = clientVia(addr).Get(up.URL + HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || up.hits.Load() != 0 {
+		t.Errorf("a proxy request for the health path must still be decided by the allowlist: %d", resp.StatusCode)
+	}
+	plain := serve(t, NewProxy(ProxyConfig{Logger: log.New(io.Discard, "", 0)}))
+	resp, err = http.Get("http://" + plain + HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == 200 {
+		t.Errorf("without Health set there is no health answer: %d %q", resp.StatusCode, body)
+	}
+}
+
 func TestRefusedAddress(t *testing.T) {
 	for addr, want := range map[string]bool{
 		"127.0.0.1": true, "127.8.9.1": true, "::1": true, "0.0.0.0": true, "::": true,

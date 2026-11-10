@@ -66,6 +66,13 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Host enforcement is never dropped silently: without its tools the VM
+	// does not start at all.
+	if cfg.HostEnforced() {
+		if err := hostEnforceCheck(); err != nil {
+			return err
+		}
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -87,11 +94,29 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// network.enforce: host: the proxy on the Mac comes first, because the
+	// first boot's provisioning already downloads through it, and the VM
+	// then starts under the sandbox profile.
+	start := lima.Start
+	hostProxy := ""
+	if cfg.HostEnforced() {
+		port, err := ensureHostProxy(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		hostProxy = fmt.Sprintf("%s:%d", hostGateway, port)
+		start = startSandboxed(cfg, port)
+	} else if err := stopHostProxy(cfg.VMName()); err != nil {
+		// Left over from an earlier host-mode config.
+		fmt.Printf("Warning: %v\n", err)
+	}
+
 	rendered, err := lima.Render(lima.TemplateInput{
 		Config:       cfg,
 		User:         hostUser(),
 		HostDir:      cwd,
 		EgressSHA256: proxySHA,
+		HostProxy:    hostProxy,
 	})
 	if err != nil {
 		return err
@@ -107,9 +132,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := reconcileVM(ctx, name, rendered, inst); err != nil {
+	if err := reconcileVM(ctx, name, rendered, inst, start); err != nil {
 		return err
 	}
+	warnIfUnconfined(ctx, cfg)
 
 	if proxyBin != nil {
 		if err := installProxy(ctx, name, proxyBin, proxySHA); err != nil {
@@ -358,6 +384,13 @@ func printable(s string) string {
 }
 
 func describeNetwork(cfg *project.Config) string {
+	if cfg.HostEnforced() {
+		return describeGuestNetwork(cfg) + ", enforced on the Mac"
+	}
+	return describeGuestNetwork(cfg)
+}
+
+func describeGuestNetwork(cfg *project.Config) string {
 	switch cfg.Network.Mode {
 	case project.NetworkAllowlist:
 		return fmt.Sprintf("allowlist (%d hosts), audited", len(cfg.Network.Allow))
@@ -421,7 +454,11 @@ func setSecurityUpdates(path string, on bool) error {
 // running and write the new config; then start it unless it is already
 // running with the current config. Provisioning runs on that start. A VM
 // whose provisioning did not finish is stopped, with an error.
-func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance) error {
+//
+// start boots the instance: lima.Start, or under network.enforce: host the
+// sandboxed start. limactl create always runs unsandboxed, since it
+// downloads the image.
+func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance, start func(context.Context, string) error) error {
 	renderedPath := filepath.Join(devkitHome(), "instances", name+".yaml")
 	if err := os.MkdirAll(filepath.Dir(renderedPath), 0o755); err != nil {
 		return err
@@ -469,7 +506,7 @@ func reconcileVM(ctx context.Context, name, rendered string, inst *lima.Instance
 		fmt.Printf("Starting VM %s\n", name)
 		from := fileSize(serial)
 		stopWatch := watchProvisioning(ctx, name)
-		err := lima.Start(ctx, name)
+		err := start(ctx, name)
 		stopWatch()
 		return confirmProvisioned(ctx, name, err, serial, from)
 	}

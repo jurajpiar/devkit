@@ -117,7 +117,7 @@ func TestReconcileVM(t *testing.T) {
 			if c.stored != "" {
 				writeLimaYAML(c.stored)
 			}
-			if err := reconcileVM(ctx, name, "rendered", c.inst); err != nil {
+			if err := reconcileVM(ctx, name, "rendered", c.inst, lima.Start); err != nil {
 				t.Fatal(err)
 			}
 			if got := f.Verbs(); !reflect.DeepEqual(got, c.want) {
