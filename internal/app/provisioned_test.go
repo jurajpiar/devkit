@@ -149,7 +149,30 @@ func TestUpStopsAVMWhoseProvisioningDidNotFinish(t *testing.T) {
 	if !stoppedAfterStart(t, f) {
 		t.Errorf("the VM must be stopped: %q", f.Calls())
 	}
+	if hasCall(f.Calls(), "stop", "--force", demoVM) {
+		t.Errorf("without a panic the VM is stopped gracefully: %q", f.Calls())
+	}
 	nothingSentAfterStart(t, f)
+}
+
+// A stamp probe that fails, with no panic in the log, is the ordinary
+// provisioning failure: a graceful stop and the step named.
+func TestUpStopsGracefullyWhenTheStampProbeFailsWithoutAPanic(t *testing.T) {
+	f := upProject(t, "Stopped")
+	f.OnShell(stampMarker, "", 255)
+	f.OnStartSerial(demoVM, bootLines+"[    2.000000] Unable to handle kernel paging request at virtual address dead\n"+
+		"devkit-progress: provisioning started\ndevkit-progress: checking extra packages\n")
+	var err error
+	out := captureStdout(t, func() { _, err = runDevkit(t, "", "up") })
+	if err == nil || !strings.Contains(err.Error(), "did not finish provisioning") || !strings.Contains(err.Error(), "checking for the provision stamp failed") {
+		t.Fatalf("want the provisioning failure: %v\n%s", err, out)
+	}
+	if strings.Contains(err.Error(), "panicked") || strings.Contains(out, "panicked") {
+		t.Errorf("an Oops is not a panic:\n%v\n%s", err, out)
+	}
+	if !stoppedAfterStart(t, f) || hasCall(f.Calls(), "stop", "--force", demoVM) {
+		t.Errorf("the VM must be stopped gracefully: %q", f.Calls())
+	}
 }
 
 // Lima begins a new serial log at every start. One that grows past the old
@@ -289,7 +312,7 @@ func TestReconcileStopsARunningVMWithoutAStamp(t *testing.T) {
 	must(t, os.MkdirAll(lima.Dir(demoVM), 0o755))
 	must(t, lima.WriteConfig(demoVM, "rendered"))
 	unprovisioned(f)
-	err := reconcileVM(context.Background(), demoVM, "rendered", &lima.Instance{Name: demoVM, Status: "Running"}, lima.Start)
+	err := reconcileVM(context.Background(), demoVM, "rendered", &lima.Instance{Name: demoVM, Status: "Running"}, lima.Start, io.Discard, nil)
 	if err == nil || !strings.Contains(err.Error(), "provisioning") {
 		t.Fatalf("want a provisioning error, got %v", err)
 	}

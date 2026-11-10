@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -117,7 +118,7 @@ func TestReconcileVM(t *testing.T) {
 			if c.stored != "" {
 				writeLimaYAML(c.stored)
 			}
-			if err := reconcileVM(ctx, name, "rendered", c.inst, lima.Start); err != nil {
+			if err := reconcileVM(ctx, name, "rendered", c.inst, lima.Start, io.Discard, nil); err != nil {
 				t.Fatal(err)
 			}
 			if got := f.Verbs(); !reflect.DeepEqual(got, c.want) {

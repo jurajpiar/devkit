@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jurajpiar/devkit/internal/fakelima"
 )
@@ -302,6 +303,9 @@ func TestUpWarnsAboutACrashDuringTheBoot(t *testing.T) {
 	if st := loadCrashState(demoVM); len(st.Crashes) != 1 {
 		t.Errorf("the crash is kept until acknowledged: %+v", st.Crashes)
 	}
+	if verbCalled(f, "stop", demoVM) {
+		t.Errorf("a provisioned VM that survived an Oops is not stopped: %q", f.Calls())
+	}
 }
 
 func TestUpFailsOnAPanicDuringTheBoot(t *testing.T) {
@@ -316,7 +320,100 @@ func TestUpFailsOnAPanicDuringTheBoot(t *testing.T) {
 	if strings.Contains(out, "Ready") {
 		t.Errorf("a panicked VM is not ready:\n%s", out)
 	}
-	if !strings.Contains(out, "will not respond") || !strings.Contains(out, "Kernel panic - not syncing") {
-		t.Errorf("the warning should say the VM panicked and show the report:\n%s", out)
+	if !strings.Contains(out, "will not respond") || strings.Count(out, "Kernel panic - not syncing") != 1 {
+		t.Errorf("the warning should say the VM panicked and show the report, once:\n%s", out)
 	}
+	panickedBootChecks(t, f)
+}
+
+// panickedBootChecks checks what up leaves after a boot whose kernel
+// panicked: the VM forced off, never asked to shut down, and the report kept.
+func panickedBootChecks(t *testing.T, f *fakelima.Fake) {
+	t.Helper()
+	calls, _ := afterStart(t, f)
+	if !hasCall(calls, "stop", "--force", demoVM) {
+		t.Errorf("a panicked kernel cannot shut down: up must force the VM off: %q", calls)
+	}
+	if hasCall(calls, "stop", demoVM) {
+		t.Errorf("a graceful stop of a panicked kernel only waits: %q", calls)
+	}
+	st := loadCrashState(demoVM)
+	if len(st.Crashes) != 1 || !st.Crashes[0].Panic {
+		t.Errorf("the crash state must hold the panic for audit and later commands: %+v", st.Crashes)
+	}
+}
+
+// The stamp probe cannot answer from a panicked kernel: up must not wait
+// for it, nor take the panic for a provisioning failure.
+func TestUpDoesNotWaitOnTheStampOfAPanickedBoot(t *testing.T) {
+	panicked := panicFixture(t)
+	f := upProject(t, "Stopped")
+	f.OnShellHang(stampMarker, 20*time.Second)
+	writeLog(t, serialLog(demoVM), bootLines)
+	f.TruncateSerialOnStart(demoVM)
+	f.OnStartSerial(demoVM, bootLines+panicked)
+	began := time.Now()
+	out, err := upMerged(t)
+	if took := time.Since(began); took > 10*time.Second {
+		t.Errorf("up waited %v on a guest that cannot answer", took)
+	}
+	if err == nil || !strings.Contains(err.Error(), "panicked") || strings.Contains(err.Error(), "provisioning") {
+		t.Fatalf("want the panic error, not a provisioning failure: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Ready") || strings.Contains(out, "provisioning did not finish") {
+		t.Errorf("a panicked VM is neither ready nor a provisioning failure:\n%s", out)
+	}
+	if !strings.Contains(out, "will not respond") || strings.Count(out, "Kernel panic - not syncing") != 1 {
+		t.Errorf("the panic should be reported, once:\n%s", out)
+	}
+	if calls, _ := afterStart(t, f); mentions(calls, stampMarker) {
+		t.Errorf("no stamp probe may be sent to a panicked guest: %q", calls)
+	}
+	panickedBootChecks(t, f)
+}
+
+// A kernel that panics while the stamp probe waits: the probe fails, and
+// the log, read again, says why.
+func TestUpReadsTheLogAgainWhenTheStampProbeFails(t *testing.T) {
+	panicked := panicFixture(t)
+	f := upProject(t, "Stopped")
+	f.OnShellHang(stampMarker, 2*time.Second)
+	writeLog(t, serialLog(demoVM), bootLines)
+	f.TruncateSerialOnStart(demoVM)
+	f.OnStartSerial(demoVM, bootLines)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			for _, c := range f.Calls() {
+				if c[0] == "shell" && strings.Contains(c[len(c)-1], stampMarker) {
+					fh, err := os.OpenFile(serialLog(demoVM), os.O_APPEND|os.O_WRONLY, 0)
+					if err == nil {
+						fh.WriteString(panicked)
+						fh.Close()
+					}
+					return
+				}
+			}
+		}
+	}()
+	out, err := upMerged(t)
+	close(stop)
+	<-done
+	if err == nil || !strings.Contains(err.Error(), "panicked") || strings.Contains(err.Error(), "provisioning") {
+		t.Fatalf("want the panic error, not a provisioning failure: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Ready") || strings.Contains(out, "provisioning did not finish") {
+		t.Errorf("a panicked VM is neither ready nor a provisioning failure:\n%s", out)
+	}
+	if strings.Count(out, "Kernel panic - not syncing") != 1 {
+		t.Errorf("the panic should be reported, once:\n%s", out)
+	}
+	panickedBootChecks(t, f)
 }

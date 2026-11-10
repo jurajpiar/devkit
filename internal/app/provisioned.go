@@ -69,7 +69,12 @@ func requireProvisioned(ctx context.Context, cfg *project.Config) error {
 // stamp did not finish provisioning and may have no firewall: it is stopped,
 // and the error says which step failed. serial is the instance's console
 // log and mark where it stood before this boot (the zero mark: read it all).
-func confirmProvisioned(ctx context.Context, name string, startErr error, serial string, mark serialMark) error {
+//
+// A kernel that has panicked cannot answer the stamp probe nor shut down:
+// the serial log is read before the probe and again when the probe gets no
+// stamp, and a panic found there is reported on w, except the reports in
+// shown, which up has already warned about, and the VM is forced off.
+func confirmProvisioned(ctx context.Context, name string, startErr error, serial string, mark serialMark, w io.Writer, shown map[string]bool) error {
 	if startErr != nil {
 		// A VM that is not running exposes nothing; any other state, or one
 		// that cannot be read, is checked like a running one.
@@ -77,9 +82,16 @@ func confirmProvisioned(ctx context.Context, name string, startErr error, serial
 			return startErr
 		}
 	}
+	if st, _ := scanCrashes(name); st.panicked(true) {
+		return stopPanicked(ctx, name, st, w, shown, startErr)
+	}
 	_, present, err := readStamp(ctx, name)
 	if err == nil && present {
 		return startErr
+	}
+	// The kernel may have panicked while the probe waited.
+	if st, _ := scanCrashes(name); st.panicked(true) {
+		return stopPanicked(ctx, name, st, w, shown, startErr)
 	}
 
 	var b strings.Builder
@@ -110,6 +122,38 @@ func confirmProvisioned(ctx context.Context, name string, startErr error, serial
 	}
 	b.WriteString("Fix the cause and run 'devkit up' again.")
 	return errors.New(b.String())
+}
+
+// stopPanicked reports the kernel panic of a VM being brought up, with the
+// crash reports not in shown, adds them to shown, forces the VM off, since a
+// panicked kernel cannot shut down, and returns the panic error, with
+// startErr, limactl start's error, if any.
+func stopPanicked(ctx context.Context, name string, st *crashState, w io.Writer, shown map[string]bool, startErr error) error {
+	fresh := &crashState{}
+	for _, r := range st.Crashes {
+		if !shown[r.Key] {
+			fresh.Crashes = append(fresh.Crashes, r)
+			if shown != nil {
+				shown[r.Key] = true
+			}
+		}
+	}
+	fmt.Fprintf(w, "The kernel of VM %s has panicked, so it will not respond; forcing it off\n", name)
+	fmt.Fprint(w, crashWarning(name, fresh, false))
+	// The stop must happen even when devkit up itself was interrupted.
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	err := errPanicked(name)
+	if serr := lima.StopForce(stopCtx, name); serr != nil {
+		err = fmt.Errorf("%w; forcing it off failed: %v", err, serr)
+	} else {
+		// What the kernel wrote until it stopped.
+		_, _ = scanCrashes(name)
+	}
+	if startErr != nil {
+		err = fmt.Errorf("%w\nlimactl start also failed: %v", err, startErr)
+	}
+	return err
 }
 
 // serialMark is where a serial log stood before a start: its size and, as
