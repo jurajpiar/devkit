@@ -524,7 +524,10 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 - Under `network.enforce: host` the proxy's user may reach only the host
   proxy at `192.168.5.2:<port>`, there is no DNS for anyone, and
   `limactl start` runs under the profile in `~/.devkit/<vm>/network.sb`. The
-  host proxy's port, pid, allowlist and log live in the same directory.
+  host proxy's port, pid, allowlist and log live in the same directory. With
+  a `LIMA_HOME` other than `~/.lima` it is `~/.devkit/<vm>-<hash>/`, the hash
+  taken from that Lima home, so VMs of the same name under two Lima homes
+  keep separate proxies.
 
 ## What gets downloaded, and how it is verified
 
