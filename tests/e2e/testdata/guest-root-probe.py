@@ -55,6 +55,16 @@ def dns_udp(server, name="example.com", timeout=4):
     except Exception as e:
         return False, type(e).__name__ + ": " + str(e)
 
+def recv_exact(s, n):
+    """Exactly n bytes from stream socket s; one recv may return fewer."""
+    data = b""
+    while len(data) < n:
+        chunk = s.recv(n - len(data))
+        if not chunk:
+            raise EOFError(f"closed after {len(data)} of {n} bytes")
+        data += chunk
+    return data
+
 def dns_tcp(server, name="example.com", timeout=4):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -62,9 +72,17 @@ def dns_tcp(server, name="example.com", timeout=4):
         s.connect((server, 53))
         q = dns_query(name)
         s.sendall(struct.pack(">H", len(q)) + q)
-        data = s.recv(512)
-        ancount = struct.unpack(">H", data[8:10])[0] if len(data) >= 10 else 0
-        rcode = (data[5] & 0x0F) if len(data) >= 6 else -1
+        # The reply is framed: a two-byte length, then that many bytes. Read
+        # both fully before looking at the header, or a reply whose prefix
+        # arrives on its own reads as no answer and a working resolver as
+        # blocked.
+        length = struct.unpack(">H", recv_exact(s, 2))[0]
+        data = recv_exact(s, length)
+        s.close()
+        if len(data) < 12:
+            return False, f"short reply ({len(data)} bytes)"
+        ancount = struct.unpack(">H", data[6:8])[0]
+        rcode = data[3] & 0x0F
         return (ancount > 0), f"bytes={len(data)} rcode={rcode} answers={ancount}"
     except Exception as e:
         return False, type(e).__name__ + ": " + str(e)
