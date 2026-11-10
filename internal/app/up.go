@@ -50,17 +50,26 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	configPath, _ := cmd.Flags().GetString("config")
 
+	// Both flags' edits are validated together and written at once, or not
+	// at all: a rejected flag must not leave a devkit.yaml that every later
+	// command refuses.
+	var edits []configEdit
+	var done []string
 	if mode, _ := cmd.Flags().GetString("network"); mode != "" {
-		if err := setNetworkMode(configPath, mode); err != nil {
-			return err
-		}
-		fmt.Printf("Set network.mode to %s in %s\n", mode, configPath)
+		edits = append(edits, networkModeEdit(mode))
+		done = append(done, fmt.Sprintf("Set network.mode to %s in %s", mode, configPath))
 	}
 	if off, _ := cmd.Flags().GetBool("no-security-updates"); off {
-		if err := setSecurityUpdates(configPath, false); err != nil {
+		edits = append(edits, securityUpdatesEdit(false))
+		done = append(done, fmt.Sprintf("Set vm.security_updates to false in %s (the guest will no longer apply Ubuntu's security pocket at boot)", configPath))
+	}
+	if len(edits) > 0 {
+		if err := editConfig(configPath, edits...); err != nil {
 			return err
 		}
-		fmt.Printf("Set vm.security_updates to false in %s (the guest will no longer apply Ubuntu's security pocket at boot)\n", configPath)
+		for _, d := range done {
+			fmt.Println(d)
+		}
 	}
 
 	cfg, err := loadConfig(cmd)
@@ -431,22 +440,78 @@ func describeGuestNetwork(cfg *project.Config) string {
 
 var modeLine = regexp.MustCompile(`(?m)^(\s*mode:\s*)(\S+)`)
 
-// setNetworkMode edits the mode line in place so comments survive.
-func setNetworkMode(path, mode string) error {
-	switch mode {
-	case project.NetworkOpen, project.NetworkAllowlist, project.NetworkNone:
-	default:
-		return fmt.Errorf("network mode must be allowlist, open or none (got %q)", mode)
+// configEdit changes the text of devkit.yaml in place, so comments survive.
+type configEdit func(data []byte) ([]byte, error)
+
+// editConfig applies edits to the devkit.yaml at path and writes the result
+// only if it is a valid config. Otherwise the file is left as it was and
+// the error says why. The write is atomic and keeps the file's mode.
+func editConfig(path string, edits ...configEdit) error {
+	// Replace the file a symlink points to, not the link.
+	if p, err := filepath.EvalSymlinks(path); err == nil {
+		path = p
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	if !modeLine.Match(data) {
-		return fmt.Errorf("could not find network.mode in %s", path)
+	updated := data
+	for _, edit := range edits {
+		if updated, err = edit(updated); err != nil {
+			return fmt.Errorf("%w in %s", err, path)
+		}
 	}
-	updated := modeLine.ReplaceAll(data, []byte("${1}"+mode))
-	return os.WriteFile(path, updated, 0o644)
+	if _, err := project.Parse(updated); err != nil {
+		return fmt.Errorf("%w; %s was left unchanged", err, path)
+	}
+	return writeFileAtomic(path, updated, info.Mode().Perm())
+}
+
+// writeFileAtomic writes data to a new file beside path and renames it into
+// place, so path holds the old contents or the new, never part of them.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Chmod(perm)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+	}
+	return err
+}
+
+// networkModeEdit sets network.mode.
+func networkModeEdit(mode string) configEdit {
+	return func(data []byte) ([]byte, error) {
+		switch mode {
+		case project.NetworkOpen, project.NetworkAllowlist, project.NetworkNone:
+		default:
+			return nil, fmt.Errorf("network mode must be allowlist, open or none (got %q)", mode)
+		}
+		if !modeLine.Match(data) {
+			return nil, fmt.Errorf("could not find network.mode")
+		}
+		return modeLine.ReplaceAll(data, []byte("${1}"+mode)), nil
+	}
+}
+
+// setNetworkMode edits the mode line of the devkit.yaml at path.
+func setNetworkMode(path, mode string) error {
+	return editConfig(path, networkModeEdit(mode))
 }
 
 var (
@@ -454,27 +519,28 @@ var (
 	diskLine            = regexp.MustCompile(`(?m)^(\s*disk_gb:.*)$`)
 )
 
-// setSecurityUpdates writes vm.security_updates into devkit.yaml, replacing
-// the line if present and otherwise adding it after disk_gb in the vm block.
+// securityUpdatesEdit sets vm.security_updates, replacing the line if
+// present and otherwise adding it after disk_gb in the vm block.
+func securityUpdatesEdit(on bool) configEdit {
+	return func(data []byte) ([]byte, error) {
+		val := "false"
+		if on {
+			val = "true"
+		}
+		switch {
+		case securityUpdatesLine.Match(data):
+			return securityUpdatesLine.ReplaceAll(data, []byte("${1}"+val)), nil
+		case diskLine.Match(data):
+			return diskLine.ReplaceAll(data, []byte("${1}\n  security_updates: "+val)), nil
+		default:
+			return nil, fmt.Errorf("could not find the vm block")
+		}
+	}
+}
+
+// setSecurityUpdates writes vm.security_updates into the devkit.yaml at path.
 func setSecurityUpdates(path string, on bool) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	val := "false"
-	if on {
-		val = "true"
-	}
-	var updated []byte
-	switch {
-	case securityUpdatesLine.Match(data):
-		updated = securityUpdatesLine.ReplaceAll(data, []byte("${1}"+val))
-	case diskLine.Match(data):
-		updated = diskLine.ReplaceAll(data, []byte("${1}\n  security_updates: "+val))
-	default:
-		return fmt.Errorf("could not find the vm block in %s", path)
-	}
-	return os.WriteFile(path, updated, 0o644)
+	return editConfig(path, securityUpdatesEdit(on))
 }
 
 // reconcileVM brings the Lima instance in line with the rendered config:
