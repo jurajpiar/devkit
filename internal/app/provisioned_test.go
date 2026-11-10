@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -303,5 +304,71 @@ func TestProvisioningReport(t *testing.T) {
 	}
 	if step, failed := provisioningReport(filepath.Join(t.TempDir(), "none"), 0); step != "" || failed != "" {
 		t.Errorf("a missing log reports nothing, got %q %q", step, failed)
+	}
+}
+
+// A stamp that exists but is empty, or that the probe could not read, is
+// no proof that provisioning finished: up stops the VM, shell and sync
+// refuse it.
+func TestAnEmptyStampIsNotProvisioned(t *testing.T) {
+	t.Run("up", func(t *testing.T) {
+		f := upProject(t, "Stopped")
+		provisioned(f, "")
+		var err error
+		out := captureStdout(t, func() { _, err = runDevkit(t, "", "up") })
+		if err == nil || !strings.Contains(err.Error(), "provisioning") {
+			t.Fatalf("up must fail on an empty stamp, got %v\n%s", err, out)
+		}
+		if !stoppedAfterStart(t, f) {
+			t.Errorf("the VM must be stopped: %q", f.Calls())
+		}
+		nothingSentAfterStart(t, f)
+	})
+	for _, args := range [][]string{{"shell", "true"}, {"sync"}} {
+		t.Run(args[0], func(t *testing.T) {
+			f := upProject(t, "Running")
+			provisioned(f, "")
+			if _, err := runDevkit(t, "", args...); err == nil || !strings.Contains(err.Error(), "provisioning") {
+				t.Fatalf("%s should refuse an empty stamp, got %v", args[0], err)
+			}
+		})
+	}
+}
+
+// The guest side of the stamp check, run with sh against a stand-in for the
+// stamp file: only a stamp that exists, can be read and is not empty is
+// reported as present.
+func TestStampProbeReportsOnlyAReadableStamp(t *testing.T) {
+	const stampPath = "/etc/devkit/provision.id"
+	if strings.Count(stampProbe, stampPath) < 1 {
+		t.Fatalf("the probe no longer names %s; update this test", stampPath)
+	}
+	run := func(t *testing.T, path string) string {
+		t.Helper()
+		out, err := exec.Command("sh", "-c", strings.ReplaceAll(stampProbe, stampPath, path)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("probe: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	dir := t.TempDir()
+	stamp := filepath.Join(dir, "provision.id")
+	if got := run(t, stamp); got != stampMarker+"-missing\n" {
+		t.Errorf("no stamp: got %q", got)
+	}
+	must(t, os.WriteFile(stamp, []byte("abc123\n"), 0o644))
+	if got := run(t, stamp); got != stampMarker+"=abc123\n" {
+		t.Errorf("a stamp: got %q", got)
+	}
+	must(t, os.WriteFile(stamp, nil, 0o644))
+	if got := run(t, stamp); got != stampMarker+"-missing\n" {
+		t.Errorf("an empty stamp: got %q", got)
+	}
+	if os.Geteuid() != 0 {
+		must(t, os.WriteFile(stamp, []byte("abc123\n"), 0o644))
+		must(t, os.Chmod(stamp, 0o000))
+		if got := run(t, stamp); got != stampMarker+"-missing\n" {
+			t.Errorf("an unreadable stamp: got %q", got)
+		}
 	}
 }

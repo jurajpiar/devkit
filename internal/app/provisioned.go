@@ -19,13 +19,16 @@ import (
 // from anything a login shell prints.
 const stampMarker = "devkit-stamp"
 
-// stampProbe prints stampMarker=<id> when the provision stamp exists and
-// stampMarker-missing when it does not. The system script removes the stamp
-// when it starts and writes it back only when every step has succeeded.
-const stampProbe = `if [ -f /etc/devkit/provision.id ]; then printf '` + stampMarker + `=%s\n' "$(cat /etc/devkit/provision.id)"; else echo ` + stampMarker + `-missing; fi`
+// stampProbe prints stampMarker=<id> when the provision stamp exists, can
+// be read and is not empty, and stampMarker-missing otherwise. The system
+// script removes the stamp when it starts and writes it back only when every
+// step has succeeded. The read is a checked step: a stamp that cannot be
+// read proves nothing.
+const stampProbe = `if v="$(cat /etc/devkit/provision.id 2>/dev/null)" && [ -n "$v" ]; then printf '` + stampMarker + `=%s\n' "$v"; else echo ` + stampMarker + `-missing; fi`
 
 // readStamp reports whether the running VM has a provision stamp, and its
-// value. An error means the answer could not be read.
+// value. An empty value is no stamp, whatever the guest printed. An error
+// means the answer could not be read.
 func readStamp(ctx context.Context, name string) (id string, present bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -40,7 +43,8 @@ func readStamp(ctx context.Context, name string) (id string, present bool, err e
 			return "", false, nil
 		}
 		if v, ok := strings.CutPrefix(l, stampMarker+"="); ok {
-			return v, true, nil
+			v = strings.TrimSpace(v)
+			return v, v != "", nil
 		}
 	}
 	return "", false, errors.New("no answer from the stamp check")
