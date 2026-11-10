@@ -319,6 +319,31 @@ APT="apt-get -o Acquire::http::Proxy=$HOST_PROXY_URL -o Acquire::https::Proxy=$H
 CURL=(curl -fsSL --proxy "$HOST_PROXY_URL" --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900)
 {{- end}}
 
+# ---- kernel console on hvc0: crash reports reach the Mac ----
+# The kernel's console is ttyAMA0, which this hypervisor does not provide,
+# so nothing the kernel prints reaches the Mac. hvc0 is the console Lima
+# records in serialv.log, where devkit on the Mac looks for kernel crash
+# reports. Only root can write to it. The drop-in takes effect from the next
+# boot; update-grub runs only when it changes. This is detection, not
+# enforcement: a failure here warns and provisioning goes on.
+step "connecting the kernel console to the Mac"
+CONSOLE_DROPIN=/etc/default/grub.d/99-devkit-console.cfg
+CONSOLE_WANT='GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT console=hvc0"'
+if [ "$(cat "$CONSOLE_DROPIN" 2>/dev/null || true)" != "$CONSOLE_WANT" ]; then
+  if ! command -v update-grub >/dev/null 2>&1; then
+    warn "update-grub is missing: kernel crash reports will not reach the Mac"
+  elif ! { mkdir -p /etc/default/grub.d && printf '%s\n' "$CONSOLE_WANT" > "$CONSOLE_DROPIN"; } 2>/dev/null; then
+    warn "could not write $CONSOLE_DROPIN: kernel crash reports will not reach the Mac"
+  elif ! grub_out="$(update-grub 2>&1)"; then
+    # Removed, so that the next boot tries again.
+    rm -f "$CONSOLE_DROPIN"
+    warn "update-grub failed, so kernel crash reports will not reach the Mac: $(printf '%s\n' "$grub_out" | tail -n 1)"
+  fi
+fi
+if ! grep -qw 'console=hvc0' /proc/cmdline 2>/dev/null; then
+  note "kernel crash reporting to the Mac starts after the VM's next restart (devkit down, then devkit up)"
+fi
+
 # ---- base packages (first boot) ----
 step "checking base packages (installed on first boot)"
 if [ ! -f /var/lib/devkit/.base ]; then

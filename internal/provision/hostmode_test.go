@@ -226,18 +226,18 @@ func TestRootHostsCoverEveryProvisioningDownload(t *testing.T) {
 // change closed unprivileged user namespaces and locked module loading.
 func TestGuestModeScriptIsUnchangedByHostEnforcement(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":         "5c82e46e77e4b6df",
-		"allowlist-nix":          "1b2ef68bf2571812",
-		"allowlist-none":         "3a26525806b4974f",
-		"enforce-guest-explicit": "5c82e46e77e4b6df",
-		"loosened":               "92b7aff8ba131488",
-		"no-security-updates":    "49b0bc87ebe7c572",
-		"none-mise":              "cb262847a3efd361",
-		"none-nix":               "3f5d740eea6d8e09",
-		"none-none":              "cd0cfef313ecea99",
-		"open-mise":              "53f2060ef4062649",
-		"open-nix":               "819bfcc7d1ad54ed",
-		"open-none":              "6721f7caaae28c56",
+		"allowlist-mise":         "d6504a022a19bf33",
+		"allowlist-nix":          "4dc4ef43deeae1c6",
+		"allowlist-none":         "0108fd46de11595e",
+		"enforce-guest-explicit": "d6504a022a19bf33",
+		"loosened":               "1f376226fd7d4b4b",
+		"no-security-updates":    "51a93757746c12e2",
+		"none-mise":              "fe3e031c30e37663",
+		"none-nix":               "8937ef7cd6dbb29b",
+		"none-none":              "347b617241e1e851",
+		"open-mise":              "6467c7b180d0ba87",
+		"open-nix":               "178b741772ff0b53",
+		"open-none":              "42f0e3d4a20398c3",
 	}
 	var got []string
 	for name, p := range guestVariants() {
