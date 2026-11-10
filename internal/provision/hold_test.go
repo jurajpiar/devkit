@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -182,5 +183,126 @@ func TestOldStampIsRemovedFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 		check(t, s)
+	})
+}
+
+// The boot-hold generator is delimited in the template by these lines, so
+// TestNetnsFirewall can run exactly it, as root on the test host, and
+// nothing else of the provisioning.
+const (
+	bootHoldBegin = "# ---- begin boot-hold generator (TestNetnsFirewall runs exactly this) ----"
+	bootHoldEnd   = "# ---- end boot-hold generator ----"
+)
+
+// section returns the text between the lines begin and end, each of which
+// must appear exactly once as a whole line, begin first.
+func section(s, begin, end string) (string, error) {
+	b, e := "\n"+begin+"\n", "\n"+end+"\n"
+	if n := strings.Count(s, b); n != 1 {
+		return "", fmt.Errorf("marker %q appears %d times, want once", begin, n)
+	}
+	if n := strings.Count(s, e); n != 1 {
+		return "", fmt.Errorf("marker %q appears %d times, want once", end, n)
+	}
+	i, j := strings.Index(s, b), strings.Index(s, e)
+	if j < i+len(b)-1 {
+		return "", fmt.Errorf("marker %q comes before %q", end, begin)
+	}
+	return s[i+len(b) : j+1], nil
+}
+
+// heredocBody returns the body of the heredoc that opener (its whole first
+// line, newline included) starts. The opener must appear exactly once, and
+// the body ends at the first line that is exactly EOF, as in bash.
+func heredocBody(s, opener string) (string, error) {
+	if n := strings.Count(s, opener); n != 1 {
+		return "", fmt.Errorf("%q appears %d times in the system script, want once", opener, n)
+	}
+	body := s[strings.Index(s, opener)+len(opener):]
+	end := strings.Index("\n"+body, "\nEOF\n")
+	if end < 0 {
+		return "", fmt.Errorf("the heredoc %q has no EOF line", opener)
+	}
+	return body[:end], nil
+}
+
+func TestSectionMarkers(t *testing.T) {
+	const b, e = "# begin", "# end"
+	if got, err := section("x\n# begin\na\nb\n# end\ny\n", b, e); err != nil || got != "a\nb\n" {
+		t.Errorf("got %q, %v", got, err)
+	}
+	for name, s := range map[string]string{
+		"no begin":         "x\na\n# end\n",
+		"no end":           "x\n# begin\na\n",
+		"two begins":       "x\n# begin\na\n# begin\nb\n# end\n",
+		"two ends":         "x\n# begin\na\n# end\nb\n# end\n",
+		"end before":       "x\n# end\na\n# begin\n",
+		"not a whole line": "x\n# beginning\na\n# end\n",
+	} {
+		if got, err := section(s, b, e); err == nil {
+			t.Errorf("%s: want an error, got %q", name, got)
+		}
+	}
+	if _, err := heredocBody("cat > f <<'EOF'\na\n", "cat > f <<'EOF'\n"); err == nil {
+		t.Error("an unterminated heredoc must be an error")
+	}
+	if _, err := heredocBody("cat > f <<'EOF'\nEOF\ncat > f <<'EOF'\nEOF\n", "cat > f <<'EOF'\n"); err == nil {
+		t.Error("a duplicated heredoc opener must be an error")
+	}
+}
+
+// What TestNetnsFirewall runs as root outside any namespace must be the
+// boot-hold generator and nothing else: two lookups and one heredoc that
+// writes the hold script. Checked on every platform, because the netns test
+// itself only runs on Linux as root.
+func TestBootHoldGeneratorIsSelfContained(t *testing.T) {
+	check := func(t *testing.T, s string) {
+		gen, err := section(s, bootHoldBegin, bootHoldEnd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const opener = "cat > /usr/local/sbin/devkit-boot-hold <<EOF\n"
+		body, err := heredocBody(gen, opener)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outside := strings.Replace(gen, opener+body+"EOF\n", "", 1)
+		if outside == gen {
+			t.Fatal("the generator should write the hold script with one heredoc")
+		}
+		for _, l := range strings.Split(outside, "\n") {
+			l = strings.TrimSpace(l)
+			if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "RESOLVE_UID=") || strings.HasPrefix(l, "SUBUIDS=") {
+				continue
+			}
+			t.Errorf("the generator runs more than the hold needs: %q", l)
+		}
+		for _, bad := range []string{"apt", "APT", "curl", "CURL", "set-property", "systemctl", "sysctl", "sudoers", "visudo", "resolv.conf", "resolved.conf", "provision.id", "step ", "useradd", "rm "} {
+			if strings.Contains(gen, bad) {
+				t.Errorf("the generator must not contain %q", bad)
+			}
+		}
+		for _, want := range []string{"$SANDBOX_UID", "$SUBUIDS", "--uid-owner", "-j REJECT"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the hold script should contain %q", want)
+			}
+		}
+	}
+	everyVariant(t, check)
+	t.Run("host", func(t *testing.T) {
+		s, err := System(hostParams(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, s)
+	})
+}
+
+// The firewall TestNetnsFirewall loads is the one heredoc that installs it.
+func TestFirewallHeredocIsUnique(t *testing.T) {
+	everyVariant(t, func(t *testing.T, s string) {
+		if _, err := heredocBody(s, "cat > /usr/local/sbin/devkit-firewall <<'EOF'\n"); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
