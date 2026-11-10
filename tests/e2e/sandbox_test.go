@@ -25,7 +25,18 @@ func repoRootDir(t *testing.T) string {
 func buildDevkitBinary(t *testing.T) string {
 	t.Helper()
 	root := repoRootDir(t)
+	// DEVKIT_E2E_BIN names a fixed path to install the binary at instead of
+	// a new temporary one per run. A host firewall such as LuLu decides per
+	// program path, and under network.enforce: host the devkit binary itself
+	// makes the VM's outbound connections: with a fixed path it can be
+	// allowed once.
 	bin := filepath.Join(t.TempDir(), "devkit")
+	if fixed := os.Getenv("DEVKIT_E2E_BIN"); fixed != "" {
+		if !filepath.IsAbs(fixed) {
+			t.Fatalf("DEVKIT_E2E_BIN must be an absolute path, got %q", fixed)
+		}
+		bin = fixed
+	}
 	cmd := exec.Command("make", "-s", "build")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {

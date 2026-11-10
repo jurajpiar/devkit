@@ -122,12 +122,14 @@ func TestHostEnforcement(t *testing.T) {
 
 		// The host proxy still decides by the allowlist, now that it is
 		// the only thing standing.
-		out, _ := s.shell("sudo curl -s -m 30 -p -x http://192.168.5.2:" + hostPort + " -o /dev/null -w '%{http_connect}' https://example.org/ ; echo")
-		if strings.TrimSpace(out) != "403" {
+		// sudo warns on stderr that it cannot resolve the hostname: the
+		// guest has no DNS. Only curl's own line is compared.
+		out, _ := s.shell("sudo curl -s -m 30 -p -x http://192.168.5.2:" + hostPort + " -o /dev/null -w 'code=%{http_connect}\\n' https://example.org/ 2>/dev/null")
+		if !strings.Contains(out, "code=403") {
 			t.Errorf("root through the host proxy to a host off the allowlist: want 403, got %s", out)
 		}
-		out, _ = s.shell("sudo curl -s -m 30 -x http://192.168.5.2:" + hostPort + " -o /dev/null -w '%{http_code}' https://example.com/ ; echo")
-		if strings.TrimSpace(out) != "200" {
+		out, _ = s.shell("sudo curl -s -m 30 -x http://192.168.5.2:" + hostPort + " -o /dev/null -w 'code=%{http_code}\\n' https://example.com/ 2>/dev/null")
+		if !strings.Contains(out, "code=200") {
 			t.Errorf("root through the host proxy to an allowed host: want 200, got %s", out)
 		}
 		logs := s.mustRun("logs", "-n", "1000")
