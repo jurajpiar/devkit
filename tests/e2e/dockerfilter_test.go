@@ -214,6 +214,37 @@ volumes:
 		if !strings.Contains(out, "devkit") {
 			t.Errorf("the swapped mount should be refused by devkit's runtime guard, by name: %s", out)
 		}
+
+		// The same swap aimed at Docker's stored settings for another
+		// container. Docker does mount three files from a container's own
+		// directory into it (hosts, hostname, resolv.conf); nothing else
+		// there, and nothing of another container's, may be mounted:
+		// hostconfig.json is what Docker reads a container's privileges
+		// from when it restarts.
+		const data = "/var/lib/devkit-docker/.local/share/docker"
+		out = sh(`cd ~/workspace && rm -f swapf && docker rm -f byp-t byp-b >/dev/null 2>&1; T=$(docker create --name byp-t busybox:1.36 true) && : > swapf && docker create --name byp-b -v "$PWD/swapf:/h" busybox:1.36 cat /h >/dev/null && rm swapf && ln -s ` + data + `/containers/$T/hostconfig.json swapf && docker start -a byp-b; rc=$?; docker rm -f byp-t byp-b >/dev/null 2>&1; rm -f swapf; (exit $rc)`)
+		if ok(out) || strings.Contains(out, "NetworkMode") {
+			t.Errorf("a container mounted another container's hostconfig.json: %s", out)
+		}
+		if !strings.Contains(out, "devkit") {
+			t.Errorf("mounting another container's settings should be refused by devkit's guard, by name: %s", out)
+		}
+
+		// docker cp has the daemon mount a container's binds itself,
+		// without the runtime, so the guard never sees them: a bind source
+		// swapped for a symlink would be followed. With a bind mount on the
+		// container, copying in or out is refused, swapped or not.
+		out = sh(`cd ~/workspace && rm -rf swap && docker rm -f byp-cp >/dev/null 2>&1; mkdir swap && docker create --name byp-cp -v "$PWD/swap:/s" busybox:1.36 true >/dev/null && rmdir swap && ln -s ` + data + `/containers swap && docker cp byp-cp:/s - | tar -t; rc=$?; rm -rf swap; (exit $rc)`)
+		if strings.Contains(out, "hostconfig.json") || strings.Contains(out, "config.v2.json") {
+			t.Errorf("docker cp read Docker's own files through a swapped bind: %s", out)
+		}
+		if !strings.Contains(out, "devkit") {
+			t.Errorf("docker cp out of a container with a bind mount should be refused by devkit: %s", out)
+		}
+		out = sh(`cd ~/workspace && docker cp README.md byp-cp:/s/planted; rc=$?; docker rm -f byp-cp >/dev/null 2>&1; (exit $rc)`)
+		if ok(out) || !strings.Contains(out, "devkit") {
+			t.Errorf("docker cp into a container with a bind mount should be refused by devkit: %s", out)
+		}
 	})
 
 	t.Run("other doors are refused", func(t *testing.T) {
@@ -353,6 +384,38 @@ volumes:
 		if out := sh("docker run --rm -u 1000 busybox:1.36 su root -c true"); ok(out) {
 			t.Errorf("no-new-privileges should hold for every container: %s", out)
 		}
+		// The daemon's own default covers its default bridge only. A
+		// network the user makes, which is every Compose project's, has its
+		// own default, and that is every interface unless the filter sets
+		// it. Published with no address, with -P, and through Compose.
+		listeners := func(port string) string {
+			return sh(`ss -ltnH | awk '$4 ~ /:` + port + `$/ {print "LISTEN " $4}'`)
+		}
+		loopbackOnly := func(t *testing.T, what, out, port string) {
+			t.Helper()
+			if !hasLine(out, "LISTEN 127.0.0.1:"+port) || strings.Count(out, "LISTEN ") != 1 {
+				t.Errorf("%s: the published port should listen on 127.0.0.1 only: %s", what, out)
+			}
+		}
+		if out := sh(`docker network create byp-pub >/dev/null && docker run -d --name byp-pub1 --network byp-pub -p 18083:80 busybox:1.36 sleep 60 >/dev/null && sleep 2`); !ok(out) {
+			t.Fatalf("could not start a container on a user-defined network: %s", out)
+		}
+		loopbackOnly(t, "a user-defined network", listeners("18083"), "18083")
+		out = sh(`docker run -d --name byp-pub2 --network byp-pub --expose 80 -P busybox:1.36 sleep 60 >/dev/null && sleep 2 && docker port byp-pub2 80; docker rm -f byp-pub1 byp-pub2 >/dev/null; docker network rm byp-pub >/dev/null`)
+		for _, l := range strings.Split(out, "\n") {
+			l = strings.TrimSpace(l)
+			if strings.Contains(l, ":") && !strings.HasPrefix(l, "exit=") && !strings.HasPrefix(l, "127.0.0.1:") && !strings.HasPrefix(l, "[::1]:") {
+				t.Errorf("-P on a user-defined network published beyond loopback: %s", out)
+			}
+		}
+		if !strings.Contains(out, "127.0.0.1:") {
+			t.Errorf("-P should have published on loopback: %s", out)
+		}
+		if out := sh("cd ~/workspace && docker compose up -d web >/dev/null 2>&1 && sleep 2"); !ok(out) {
+			t.Fatalf("compose up: %s", out)
+		}
+		loopbackOnly(t, "a Compose project's network", listeners("18081"), "18081")
+		sh("cd ~/workspace && docker compose down -v")
 	})
 
 	t.Run("nothing is left behind and the VM is as it was", func(t *testing.T) {

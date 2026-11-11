@@ -96,11 +96,18 @@ func TestDockerGvisor(t *testing.T) {
 		if out := sh("docker run --rm busybox:1.36 wget -T 10 -qO- http://neverssl.com/"); ok(out) || !strings.Contains(out, "403") {
 			t.Errorf("a host not on the allowlist should be refused by the proxy: %s", out)
 		}
-		// With the capability, a container still configures gVisor's
-		// network stack, not the VM's: nothing appears in the VM.
-		out := sh("docker run --rm --cap-add NET_ADMIN busybox:1.36 ip link add dkgv0 type dummy; ip link show dkgv0")
-		if ok(out) {
-			t.Errorf("a container with NET_ADMIN created an interface in the VM: %s", out)
+		// The capability that would let a container reconfigure a network
+		// stack is refused by the filter under every runtime, so the
+		// request never reaches gVisor.
+		if out := sh("docker run --rm --cap-add NET_ADMIN busybox:1.36 true"); ok(out) || !strings.Contains(out, "devkit") {
+			t.Errorf("--cap-add NET_ADMIN should be refused by the filter: %s", out)
+		}
+		// Under gVisor nothing checks the mounts as made, so the filter
+		// must not pass a bind source it cannot see through. A symlink in
+		// a directory only the sandbox user may enter is one.
+		out := sh(`cd ~/workspace && rm -rf priv && mkdir -m 700 priv && ln -s /etc priv/l && docker run --rm -v "$PWD/priv/l:/x" busybox:1.36 ls /x/passwd; rc=$?; rm -rf priv; (exit $rc)`)
+		if ok(out) || !strings.Contains(out, "devkit") {
+			t.Errorf("a bind source the filter cannot resolve should be refused under gVisor: %s", out)
 		}
 	}
 
