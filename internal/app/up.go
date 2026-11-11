@@ -88,14 +88,16 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// The egress proxy is mandatory for allowlist mode and provides the audit
-	// log in open mode. Air-gapped VMs do not need it.
+	// The guest binary is the egress proxy, mandatory for allowlist mode and
+	// the audit log in open mode, and Docker's API filter and runtime guard,
+	// without which Docker does not run. Air-gapped VMs without Docker do
+	// not need it.
 	var proxyBin []byte
 	var proxySHA string
-	if cfg.Network.Mode != project.NetworkNone {
+	if needsGuestBinary(cfg) {
 		proxyBin, err = egressProxyBinary(ctx)
 		if err != nil {
-			if cfg.Network.Mode == project.NetworkAllowlist {
+			if cfg.Network.Mode == project.NetworkAllowlist || cfg.Tools.Containers.Docker() {
 				return err
 			}
 			fmt.Printf("Warning: %v\nContinuing without the audit log.\n", err)
@@ -175,7 +177,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	warnIfUnconfined(ctx, cfg)
 
 	if proxyBin != nil {
-		if err := installProxy(ctx, name, proxyBin, proxySHA); err != nil {
+		if err := installProxy(ctx, cfg, proxyBin, proxySHA); err != nil {
 			return err
 		}
 	}
@@ -236,12 +238,21 @@ func runUp(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// installProxy drops the proxy binary where root picks it up, then waits
-// for the service. Skipped when the VM already runs this exact binary.
-func installProxy(ctx context.Context, name string, bin []byte, sha string) error {
+// needsGuestBinary reports whether the VM runs devkit's guest binary: the
+// egress proxy whenever the VM has network, and Docker's API filter and
+// runtime guard whenever it has Docker. stalevm mirrors this exactly, since
+// the binary's hash is part of the provisioning fingerprint.
+func needsGuestBinary(cfg *project.Config) bool {
+	return cfg.Network.Mode != project.NetworkNone || cfg.Tools.Containers.Docker()
+}
+
+// installProxy drops the guest binary where root picks it up, then waits
+// for what runs it. Skipped when the VM already has this exact binary.
+func installProxy(ctx context.Context, cfg *project.Config, bin []byte, sha string) error {
+	name := cfg.VMName()
 	out, _ := lima.Exec(ctx, name, fmt.Sprintf("sha256sum %s 2>/dev/null | cut -d' ' -f1", provision.EgressBinary))
 	if strings.TrimSpace(out) == sha {
-		return waitForService(ctx, name)
+		return waitForGuestBinary(ctx, cfg)
 	}
 
 	tmp, err := os.CreateTemp("", "devkit-egressproxy-*")
@@ -262,7 +273,37 @@ func installProxy(ctx context.Context, name string, bin []byte, sha string) erro
 	if _, err := lima.Exec(ctx, name, fmt.Sprintf("mv %s %s/egressproxy", guestTmp, provision.DropDir)); err != nil {
 		return fmt.Errorf("stage egress proxy: %w", err)
 	}
-	return waitForService(ctx, name)
+	return waitForGuestBinary(ctx, cfg)
+}
+
+// waitForGuestBinary waits for the egress proxy when the VM has network,
+// and for Docker's API filter when it has Docker. On a first boot the
+// filter could not be checked by provisioning, which ran before the binary
+// was installed: this is where a broken filter fails devkit up then.
+func waitForGuestBinary(ctx context.Context, cfg *project.Config) error {
+	if cfg.Network.Mode != project.NetworkNone {
+		if err := waitForService(ctx, cfg.VMName()); err != nil {
+			return err
+		}
+	}
+	if cfg.Tools.Containers.Docker() {
+		return waitForDockerFilter(ctx, cfg.VMName())
+	}
+	return nil
+}
+
+func waitForDockerFilter(ctx context.Context, name string) error {
+	check := "timeout 10 docker --host unix://" + provision.FilterSocket + " version >/dev/null 2>&1 && echo filter-ok"
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		out, _ := lima.Exec(ctx, name, check)
+		if strings.TrimSpace(out) == "filter-ok" {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	out, _ := lima.Exec(ctx, name, "systemctl status --no-pager "+provision.FilterUnit+".socket "+provision.FilterUnit+".service 2>&1 | tail -n 20")
+	return fmt.Errorf("Docker's API filter did not answer inside the VM:\n%s", out)
 }
 
 func waitForService(ctx context.Context, name string) error {
