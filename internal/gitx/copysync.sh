@@ -64,6 +64,12 @@ for kv in core.trustctime=false core.filemode=true core.symlinks=true core.ignor
   r config "${kv%%=*}" "${kv#*=}" || fail "could not configure $repo"
 done
 
+# A sync interrupted while git held the index leaves its lock behind, and
+# every later sync would fail on it. One older than ten minutes is stale.
+if [ -n "$(find "$repo/index.lock" -mmin +10 2>/dev/null)" ]; then
+  rm -f "$repo/index.lock"
+fi
+
 # A workspace that is gone starts again from nothing.
 if [ ! -d "$ws" ]; then
   r update-ref -d refs/devkit/synced 2>/dev/null

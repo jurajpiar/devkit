@@ -106,22 +106,38 @@ func OpenCopyRepo(ctx context.Context, lockDir string) (*CopyRepo, error) {
 		return nil, err
 	}
 	r := &CopyRepo{Dir: dir}
-	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
-		return r, nil
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
+		// No template: no sample hooks or info/exclude from the Mac's git.
+		init := exec.CommandContext(ctx, "git", "-c", "init.templateDir=", "init", "-q", "--bare", "--object-format=sha1", "--", dir)
+		init.Env = copyEnv()
+		if out, err := init.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("create %s: %w: %s", dir, err, strings.TrimSpace(string(out)))
+		}
 	}
-	// No template: no sample hooks or info/exclude from the Mac's git.
-	init := exec.CommandContext(ctx, "git", "-c", "init.templateDir=", "init", "-q", "--bare", "--object-format=sha1", "--", dir)
-	init.Env = copyEnv()
-	if out, err := init.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("create %s: %w: %s", dir, err, strings.TrimSpace(string(out)))
+	// The repository sits in the project directory, so a project could
+	// ship one: whatever is there, git reads only devkit's own config, and
+	// no objects or config from elsewhere.
+	for _, p := range []string{"commondir", filepath.Join("objects", "info", "alternates"), filepath.Join("objects", "info", "http-alternates")} {
+		if err := os.Remove(filepath.Join(dir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 	}
-	// Snapshots are packed by fast-import and pruned after every sync; git
-	// must not start its own maintenance in the background.
-	if _, err := r.git(ctx, nil, "config", "gc.auto", "0"); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, "config"), []byte(copyRepoConfig)); err != nil {
 		return nil, err
 	}
 	return r, nil
 }
+
+// copyRepoConfig is the whole config of the Mac's private repository.
+// Snapshots are packed by fast-import and pruned after every sync, so git
+// must not start its own maintenance in the background.
+const copyRepoConfig = `[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+[gc]
+	auto = 0
+`
 
 // git runs git on the private repository with copyEnv and no hooks.
 func (r *CopyRepo) git(ctx context.Context, stdin io.Reader, args ...string) (string, error) {

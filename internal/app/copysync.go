@@ -37,8 +37,8 @@ func (e *notSyncedError) Error() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "the workspace was not synced: %s changed both on this Mac and in the VM since the last sync:\n", plural(len(e.conflicts), "file"))
 	b.WriteString(listPaths(e.conflicts, maxListed, "  ", "\n"))
-	b.WriteString("\nNothing in the VM was changed. To keep the VM's versions, commit them in the VM or copy them somewhere, then sync again; " +
-		"to take this Mac's version of exactly these files, run 'devkit sync --overwrite' (the VM's other changes are kept).")
+	b.WriteString("\nNothing in the VM was changed. Run 'devkit sync --overwrite' to take this Mac's version of exactly these files; " +
+		"the VM's other changes are kept. To keep the VM's versions, commit them in the VM or copy them out first.")
 	return b.String()
 }
 
@@ -71,7 +71,7 @@ func syncCopy(ctx context.Context, cfg *project.Config, cwd, ws string, overwrit
 		fmt.Printf("Warning: the VM left these alone, as they lead outside the workspace or through a symlink: %s\n", listPaths(res.Skipped, 5, "", ", "))
 	}
 	if len(res.Kept) > 0 {
-		fmt.Printf("Kept the VM's own changes to %s that now differ from this Mac: %s\n", plural(len(res.Kept), "file"), listPaths(res.Kept, 5, "", ", "))
+		fmt.Printf("Kept the VM's own changes, which now differ from this Mac: %s\n", listPaths(res.Kept, 5, "", ", "))
 	}
 	return syncGit(ctx, name, cwd, ws, false, cfg.Exclude)
 }

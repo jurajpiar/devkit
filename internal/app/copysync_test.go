@@ -48,7 +48,7 @@ func TestSyncKeepsVMEditsAndRefusesConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "Kept the VM's own changes to 1 file that now differ from this Mac: b.txt") {
+	if !strings.Contains(out, "Kept the VM's own changes, which now differ from this Mac: b.txt") {
 		t.Errorf("sync should say which VM changes it kept:\n%s", out)
 	}
 

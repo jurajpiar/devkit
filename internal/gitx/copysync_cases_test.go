@@ -605,3 +605,57 @@ func TestCopySyncReportsWhatGitCannotCarry(t *testing.T) {
 	}
 	f.repo.Discard(context.Background(), snap)
 }
+
+// A file whose time changed in the VM, but not its content, is not a VM
+// change: the Mac's next version of it arrives.
+func TestCopySyncIgnoresATimestampAlone(t *testing.T) {
+	f := newCopyFixture(t)
+	put(t, filepath.Join(f.mac, "a.txt"), "a\n")
+	f.mustSync()
+	later := time.Now().Add(time.Hour)
+	must(t, os.Chtimes(f.vm.ws("a.txt"), later, later))
+	put(t, filepath.Join(f.mac, "a.txt"), "a, the Mac's\n")
+	res := f.mustSync()
+	f.wantVM("a.txt", "a, the Mac's\n")
+	if len(res.Kept) != 0 {
+		t.Errorf("kept: %q", res.Kept)
+	}
+}
+
+// A project could carry a .devkit/sync.git of its own making: devkit uses
+// its own config there, and no objects from anywhere else.
+func TestCopyRepoTrustsNothingItFinds(t *testing.T) {
+	mac := t.TempDir()
+	dir := filepath.Join(mac, ".devkit", "sync.git")
+	gitT(t, mac, "init", "-q", "--bare", dir)
+	elsewhere := t.TempDir()
+	gitT(t, elsewhere, "init", "-q", "--bare")
+	must(t, os.WriteFile(filepath.Join(dir, "config"), []byte("[core]\n\tbare = true\n\tsharedRepository = 0666\n[include]\n\tpath = /nonexistent\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(dir, "objects", "info", "alternates"), []byte(filepath.Join(elsewhere, "objects")+"\n"), 0o644))
+	r, err := OpenCopyRepo(context.Background(), filepath.Join(mac, ".devkit"))
+	must(t, err)
+	if got := read(t, filepath.Join(r.Dir, "config")); got != copyRepoConfig {
+		t.Errorf("config left as found:\n%s", got)
+	}
+	if exists(filepath.Join(dir, "objects", "info", "alternates")) {
+		t.Error("alternates left in place")
+	}
+}
+
+// A sync interrupted while git held the VM's index must not block every
+// later one; a lock that is not stale is still respected.
+func TestCopySyncRecoversFromAStaleLock(t *testing.T) {
+	f := newCopyFixture(t)
+	put(t, filepath.Join(f.mac, "a.txt"), "a\n")
+	f.mustSync()
+	lock := filepath.Join(f.vm.vmRepo(), "index.lock")
+	put(t, lock, "")
+	put(t, filepath.Join(f.mac, "a.txt"), "a, changed\n")
+	if _, err := DeliverCopy(context.Background(), f.repo, f.snapshot(), f.vm, `$HOME/workspace`, false); err == nil {
+		t.Error("a sync must not take a lock that may be another sync's")
+	}
+	old := time.Now().Add(-time.Hour)
+	must(t, os.Chtimes(lock, old, old))
+	f.mustSync()
+	f.wantVM("a.txt", "a, changed\n")
+}
