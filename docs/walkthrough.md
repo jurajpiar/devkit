@@ -77,7 +77,11 @@ Wrote .../example-repo/devkit.yaml
   ssh port:   2225
 
 Next: cd example-repo && devkit up
+$ cd example-repo
 ```
+
+Every command from here on is run in that directory, the one holding
+`devkit.yaml`.
 
 Your Mac clones with your own git credentials, so private repositories work,
 but the clone is bare: the directory holds `devkit.yaml` and `.devkit/` and
@@ -282,7 +286,8 @@ To push to your fork rather than the upstream, add the remote on the Mac
 Mind the rule from step 4 if you edit in the VM, and the third habit below
 if the commits you are pulling came from the VM.
 
-**B:**
+**B:** your Mac fetches and hands the new commits to the VM, which never
+talks to the remote itself.
 
 ```console
 $ devkit sync
@@ -291,8 +296,14 @@ Fetching main on your Mac
 Up to date with origin/main
 ```
 
-Your Mac fetches; the VM is fast-forwarded. The VM never talks to the remote
-itself.
+When there are new commits, `sync` updates `origin/main` in the VM and
+fast-forwards `main`. It does not touch the branch you are working on: after
+step 6 you are on `fix-typo`, and `sync` says so (`you are on fix-typo, which
+is unchanged`). Bring the new commits into your branch yourself, in the VM:
+
+```console
+~/workspace$ git rebase origin/main      # or: git merge origin/main
+```
 
 ## 8. Tighten it when you can
 
