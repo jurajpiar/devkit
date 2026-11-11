@@ -577,9 +577,10 @@ The runtime is a control, not a default: the API filter allows only the
 configured gVisor runtime by name, so `docker run --runtime=runc` (or the
 other gVisor mode) is refused. The runtime guard stands in front of `runsc`
 as it does in front of `runc` (see above): the daemon's `runsc` and
-`runsc-hostnet` are the guard, which runs the real `runsc`, then checks the
-mounts of the container's gofer, and that gVisor's sandbox holds none of the
-VM's own, before the container's first process starts. A bind source
+`runsc-hostnet` are the guard, which runs the real `runsc`, waits for the
+container's gofer and gVisor's sandbox to finish setting up, checks the
+gofer's mounts and that the sandbox holds none of the VM's own, and checks
+both again when the container is started, before its first process runs. A bind source
 swapped for a symlink while a container starts is refused as it is under
 `runc`. Switching back to `runc` takes gVisor out of the daemon's
 configuration and leaves its files installed.

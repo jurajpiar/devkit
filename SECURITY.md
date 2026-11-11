@@ -264,17 +264,25 @@ are those of the container's gofer, the host process that opens its files for
 gVisor's sandbox; the guard recognises it by what a container cannot forge
 (the real `runsc` by device and inode, the guard's own uid, the sandbox's
 parent, the container's bundle), refuses unless exactly one process is all
-of these, and requires the sandbox's own mount table to be a single new
-tmpfs.
+of these, and requires the sandbox's own mount table to hold only a new
+tmpfs at its root and, until the container starts, a new tmpfs at `/proc`
+and a new proc at `/proc/sandbox-proc`.
 `docker cp` is refused for a container with a bind mount: to copy, the daemon
 makes the container's mounts itself, outside the runtime and so outside the
 guard, and followed a bind source swapped for a symlink after the check.
 
-Limits: under gVisor the guard checks what `runsc create` leaves behind, so it
-relies on gVisor making a container's bind mounts, in the gofer, before
-`create` returns. The pinned release does (recorded on a real VM, and checked
-by the end-to-end tests); a release that made them later would not be
-checked, so a gVisor upgrade must pass those tests first. A container made
+Limits: under gVisor, `runsc create` returns while the gofer and the sandbox
+are still building their mount tables. After `create` the guard waits, up to
+five seconds, for each table to reach its final form (the gofer's root the
+container's overlay, the sandbox's a new tmpfs, each alone at `/`), judges
+the first final table, and refuses if either never gets there. It relies on
+the gofer making every bind mount before it moves into the container's root,
+as the pinned release does (recorded on a real VM, and checked by the
+end-to-end tests). As a check that does not rest on that, the guard reads
+both tables again when the shim asks `runsc start` to run the container, as
+`runsc state` names them, and refuses unless they are final and pass. A bind
+made after `start` would not be checked, so a gVisor upgrade must pass those
+tests first. A container made
 before the filter is
 started through it only if its runtime, privileges and ports pass, not the
 rest of what the filter refuses at creation; one the
