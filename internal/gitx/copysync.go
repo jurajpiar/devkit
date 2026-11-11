@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // A copied project reaches the VM as snapshots: the Mac records its
@@ -117,6 +118,42 @@ func OpenCopyRepo(ctx context.Context, dir string) (*CopyRepo, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// ErrCopySyncRunning is LockCopyRepo's answer while another sync of the
+// same project holds the lock.
+var ErrCopySyncRunning = errors.New("another devkit sync of this project is running; try again once it has finished")
+
+// LockCopyRepo takes the lock of the private repository at dir, without
+// waiting, for the whole of a sync: two syncs at once would each prune the
+// other's snapshot. The lock is a file beside the repository, released by
+// the returned function or when the process ends.
+func LockCopyRepo(dir string) (func(), error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := os.Lstat(filepath.Dir(dir)); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing %s for devkit's sync snapshots: it is a symlink", filepath.Dir(dir))
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(dir+".lock", os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrCopySyncRunning
+		}
+		return nil, fmt.Errorf("lock %s: %w", dir+".lock", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // copyRepoConfig is the whole config of the Mac's private repository.

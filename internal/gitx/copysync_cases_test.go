@@ -811,3 +811,16 @@ func TestCopySyncOverwriteOfAFileTheMacMadeADirectory(t *testing.T) {
 	}
 	f.wantVM("x/y", "y\n")
 }
+
+func TestLockCopyRepoIsExclusive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state", CopySyncRepoDir)
+	unlock, err := LockCopyRepo(dir)
+	must(t, err)
+	if _, err := LockCopyRepo(dir); !errors.Is(err, ErrCopySyncRunning) {
+		t.Fatalf("a second lock while the first is held: %v", err)
+	}
+	unlock()
+	unlock2, err := LockCopyRepo(dir)
+	must(t, err)
+	unlock2()
+}

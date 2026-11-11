@@ -72,7 +72,13 @@ func (e *notSyncedError) remedy() string {
 func syncCopy(ctx context.Context, cfg *project.Config, cwd, ws string, overwrite bool) error {
 	name := cfg.VMName()
 	// Beside the VM's other host-side state, where a project cannot plant
-	// anything, and gone with the VM on devkit rm.
+	// anything, and gone with the VM on devkit rm. One sync at a time, from
+	// the snapshot until the VM's answer is recorded.
+	unlock, err := gitx.LockCopyRepo(copyRepoDir(cfg))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	repo, err := gitx.OpenCopyRepo(ctx, copyRepoDir(cfg))
 	if err != nil {
 		return err

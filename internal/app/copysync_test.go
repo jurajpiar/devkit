@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jurajpiar/devkit/internal/fakelima"
+	"github.com/jurajpiar/devkit/internal/gitx"
 )
 
 // copyProject is a copied project whose VM is running, provisioned, and a
@@ -236,5 +237,35 @@ func TestUpComesUpWhenSomethingIsInTheWay(t *testing.T) {
 	}
 	if strings.Contains(out, "--overwrite") || strings.Contains(out, "\x1b") {
 		t.Errorf("no --overwrite advice and no control characters from the VM:\n%q", out)
+	}
+}
+
+// Two syncs of one project at once would prune each other's snapshots:
+// the second is refused, and changes nothing.
+func TestSyncRefusesASecondSyncAtOnce(t *testing.T) {
+	f, dir, guest := copyProject(t)
+	if out, err := syncOut(t); err != nil {
+		t.Fatalf("first sync: %v\n%s", err, out)
+	}
+	must(t, os.WriteFile(filepath.Join(dir, "main.txt"), []byte("changed\n"), 0o644))
+	repo := filepath.Join(vmStateDir(demoVM), "sync.git")
+	refs := gitIn(t, repo, "for-each-ref")
+	ws := listDir(t, filepath.Join(guest, "workspace"))
+	unlock, err := gitx.LockCopyRepo(repo)
+	must(t, err)
+	f.Reset()
+	_, err = syncOut(t)
+	if err == nil || !strings.Contains(err.Error(), "another devkit sync of this project is running") {
+		t.Fatalf("want the lock refused, got %v", err)
+	}
+	if mentions(f.Calls(), "devkit-sync") || hasVerb(f.Calls(), "copy") {
+		t.Errorf("nothing may reach the VM: %q", f.Calls())
+	}
+	if gitIn(t, repo, "for-each-ref") != refs || listDir(t, filepath.Join(guest, "workspace")) != ws {
+		t.Error("a refused sync changed the snapshots or the workspace")
+	}
+	unlock()
+	if out, err := syncOut(t); err != nil {
+		t.Fatalf("once the lock is free, sync works: %v\n%s", err, out)
 	}
 }
