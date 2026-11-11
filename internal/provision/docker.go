@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"encoding/json"
 	"net"
 	"strings"
 
@@ -164,3 +165,41 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())`
+
+// dockerDaemonJSON is the daemon's root-owned configuration. Published ports
+// bind to the VM's loopback and no container process gains privileges
+// through setuid programs. With a gVisor runtime both gVisor runtimes are
+// registered and the configured one is the default; runc stays available,
+// since Docker always has it. --ignore-cgroups is how runsc was proven
+// under the rootless daemon; it also means memory and CPU limits set on a
+// container are not enforced under gVisor.
+func dockerDaemonJSON(c *project.Config) string {
+	if c == nil || !c.Tools.ContainerRuntime.Gvisor() {
+		// Byte for byte what it was before gVisor, so that Docker VMs which
+		// do not use it are not reported stale.
+		return `{"no-new-privileges": true, "ip": "127.0.0.1"}`
+	}
+	type runtime struct {
+		Path        string   `json:"path"`
+		RuntimeArgs []string `json:"runtimeArgs"`
+	}
+	d := struct {
+		NoNewPrivileges bool               `json:"no-new-privileges"`
+		IP              string             `json:"ip"`
+		Runtimes        map[string]runtime `json:"runtimes"`
+		DefaultRuntime  string             `json:"default-runtime"`
+	}{
+		NoNewPrivileges: true,
+		IP:              "127.0.0.1",
+		Runtimes: map[string]runtime{
+			"runsc":         {GvisorRunsc, []string{"--ignore-cgroups"}},
+			"runsc-hostnet": {GvisorRunsc, []string{"--ignore-cgroups", "--network=host"}},
+		},
+		DefaultRuntime: c.Tools.ContainerRuntime.DockerName(),
+	}
+	b, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		panic(err) // fixed types: cannot fail
+	}
+	return string(b)
+}

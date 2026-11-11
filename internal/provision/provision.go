@@ -122,6 +122,11 @@ func render(src string, p Params) (string, error) {
 		DockerProxy:        dockerProxy(),
 		DockerConfigScript: dockerConfigScript(p.Config),
 		ContainerPreload:   containerPreload,
+		DockerDaemonJSON:   dockerDaemonJSON(p.Config),
+
+		GvisorRelease:     GvisorRelease,
+		GvisorArm64SHA512: GvisorArm64SHA512,
+		GvisorAmd64SHA512: GvisorAmd64SHA512,
 	}
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
@@ -146,6 +151,19 @@ const (
 	NixVersion  = "2.35.4"
 	NixArm64SHA = "14a940a2d0ae5b2c623dc2ca168311c9367fd4bc416f6ded0c1087089d6de934"
 	NixAmd64SHA = "ff66236d2f7e2a21f3350e73668e021ac6a8881ef277a38e16e952bfb22718c3"
+)
+
+// gVisor, for tools.container_runtime: gvisor and gvisor-hostnet, is
+// installed by root from one release archive per architecture in Google's
+// release bucket. The checksums were taken from the .sha512 file published
+// beside each archive, at the same origin, so they pin the bytes devkit was
+// tested with, not who published them. Bump the release and both together.
+const (
+	GvisorRelease     = "20261102.0"
+	GvisorArm64SHA512 = "e829ca32eef36f4e960460a6dcb094d7945ab507e9bfe0275f09467ab9bfeb846528fddfd42349ad64bb4f5b02148e1065c06e573feb8f6a8b3f47efa30a7d2e"
+	GvisorAmd64SHA512 = "3c400f72be459b57b99b1c4f69be96bcd67eef3caf2078e595fc98e688b6b9a3af7802646b3dde7da8a9aba96d34f86be303e0430c7868ab2d13becdd403c0c1"
+	// GvisorRunsc is where root installs runsc; gvisor-bin/ sits beside it.
+	GvisorRunsc = "/usr/local/bin/runsc"
 )
 
 // Guest paths shared with the CLI.
@@ -786,6 +804,62 @@ for f in /etc/apparmor.d/*; do
   done <<< "$names"
   if [ "$loaded" = 1 ]; then apparmor_parser -R "$f"; fi
 done
+{{- if .Config.Tools.ContainerRuntime.Gvisor}}
+
+# ---- gVisor: pinned release, verified by SHA-512 ----
+step "checking gVisor (downloaded when its pinned release changes)"
+# tools.container_runtime runs containers under gVisor's runsc. The archive
+# holds runsc, its containerd shim, and gvisor-bin/, helpers runsc looks for
+# beside itself. The checksum of the archive that was installed is recorded
+# once everything is in place, so a half-done install is redone on the next
+# boot, and an installed runsc is never taken on its version string alone.
+GVISOR_RELEASE="{{.GvisorRelease}}"
+GVISOR_ARCH="$(uname -m)"
+case "$GVISOR_ARCH" in
+  aarch64) want="{{.GvisorArm64SHA512}}" ;;
+  x86_64)  want="{{.GvisorAmd64SHA512}}" ;;
+  *) warn "unsupported architecture $GVISOR_ARCH"; exit 1 ;;
+esac
+GVISOR_STAMP=/etc/devkit/gvisor.sha512
+if [ "$(cat "$GVISOR_STAMP" 2>/dev/null || true)" != "$want" ] || [ ! -x /usr/local/bin/runsc ] \
+  || [ ! -x /usr/local/bin/containerd-shim-runsc-v1 ] || [ ! -d /usr/local/bin/gvisor-bin ]; then
+  rm -f "$GVISOR_STAMP"
+  # Left by an install that failed part way; never where runsc looks.
+  rm -rf /usr/local/bin/.gvisor-bin.*
+  tmp="$(mktemp -d /var/lib/devkit/gvisor.XXXXXX)"
+  "${CURL[@]}" -o "$tmp/gvisor.tar.zstd" \
+    "https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${GVISOR_ARCH}/gvisor.tar.zstd"
+  # Checked before anything in the archive is unpacked.
+  if ! printf '%s  %s\n' "$want" "$tmp/gvisor.tar.zstd" | sha512sum -c --quiet - >/dev/null 2>&1; then
+    warn "refused gVisor ${GVISOR_RELEASE} with SHA-512 $(sha512sum "$tmp/gvisor.tar.zstd" | awk '{print $1}') (expected $want)"
+    rm -rf "$tmp"; exit 1
+  fi
+  mkdir "$tmp/x"
+  tar --zstd -xf "$tmp/gvisor.tar.zstd" -C "$tmp/x" --no-same-owner
+  for f in runsc containerd-shim-runsc-v1 gvisor-bin/gvisor_sentry; do
+    if [ ! -f "$tmp/x/$f" ]; then
+      warn "the gVisor ${GVISOR_RELEASE} archive has no $f"
+      rm -rf "$tmp"; exit 1
+    fi
+  done
+  # The helpers are copied to a directory beside their final place and
+  # renamed into it, so runsc never finds a partly copied set.
+  new="$(mktemp -d /usr/local/bin/.gvisor-bin.XXXXXX)"
+  cp -R "$tmp/x/gvisor-bin/." "$new/"
+  chown -R root:root "$new"
+  chmod -R go-w "$new"
+  chmod 755 "$new"
+  if [ -e /usr/local/bin/gvisor-bin ] || [ -L /usr/local/bin/gvisor-bin ]; then
+    mv -T /usr/local/bin/gvisor-bin "$new.old"
+  fi
+  mv -T "$new" /usr/local/bin/gvisor-bin
+  rm -rf "$new.old"
+  install -m 755 -o root -g root "$tmp/x/runsc" "$tmp/x/containerd-shim-runsc-v1" /usr/local/bin/
+  rm -rf "$tmp"
+  echo "$want" > "$GVISOR_STAMP"
+  chmod 644 "$GVISOR_STAMP"
+fi
+{{- end}}
 
 # The daemon's settings and its launcher are root's: the account must not be
 # able to change either. Published ports bind to the VM's loopback, and no
@@ -793,7 +867,7 @@ done
 # docker run asks otherwise.
 install -d -m 0755 /etc/devkit/docker
 cat > /etc/devkit/docker/daemon.json <<'EOF'
-{"no-new-privileges": true, "ip": "127.0.0.1"}
+{{.DockerDaemonJSON}}
 EOF
 chmod 644 /etc/devkit/docker/daemon.json
 # The workspace is shared by an ID-mapped mount of it over itself, in the
@@ -1255,6 +1329,8 @@ type templateData struct {
 	HostProxyIP, HostProxyPort                                                 string
 	DockerAccount, DockerHome, DockerSocket, DockerConfigHelper                string
 	DockerProxy, DockerConfigScript, ContainerPreload                          string
+	DockerDaemonJSON                                                           string
+	GvisorRelease, GvisorArm64SHA512, GvisorAmd64SHA512                        string
 }
 
 // containerPreload loads the kernel modules rootless containers use, in
@@ -1289,7 +1365,8 @@ func splitHostProxy(p Params) (string, string, error) {
 
 // RootHosts are the hosts root's provisioning fetches from: Ubuntu's
 // archive (apt, the security pocket, ca-certificates), the toolchain
-// manager's release archive, and the hosts the manager itself needs. Under
+// manager's release archive, the hosts the manager itself needs, and
+// gVisor's release bucket when a gVisor runtime is configured. Under
 // network.enforce: host the proxy on the Mac allows them on top of the
 // project's network.allow, because root's downloads go through it.
 func RootHosts(c *project.Config) []string {
@@ -1303,7 +1380,12 @@ func RootHosts(c *project.Config) []string {
 	case project.ManagerNix:
 		hosts = append(hosts, "releases.nixos.org")
 	}
-	return append(hosts, project.ManagerHosts[c.Tools.Manager]...)
+	hosts = append(hosts, project.ManagerHosts[c.Tools.Manager]...)
+	if c.Tools.Containers.Docker() && c.Tools.ContainerRuntime.Gvisor() {
+		// gVisor's release archive.
+		hosts = append(hosts, "storage.googleapis.com")
+	}
+	return hosts
 }
 
 // shellQuote wraps s in single quotes for use as one shell word, with any
