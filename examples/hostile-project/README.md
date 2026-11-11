@@ -1,22 +1,22 @@
-# hostile-project
+# Hostile project example
 
-A project whose code actively tries to break out of the devkit sandbox, so you
-can watch the sandbox stop it. It is the manual counterpart to the automated
-escape suite in `tests/e2e/escape_test.go`.
+This example tests the devkit sandbox by attempting actions that its default
+policy should block. It is the manual counterpart to the automated
+[escape tests](../../tests/e2e/escape_test.go).
 
 `probe.sh` runs as the sandbox user and, one attempt at a time, tries to reach
 your Mac, the open internet, your files, and the sandbox's own firewall and
 proxy. It judges each outcome against the policy root applied at boot, which
 it reads from `/etc/devkit/network.conf`:
 
-- `[held]` the sandbox stopped it.
-- `[note]` it worked and the policy allows it: `open` mode, `allow_host`, DNS.
-- `[LEAKED]` it worked and the policy says it must not. Enforcement failed;
-  this should never appear.
+- `[held]`: the attempt was blocked.
+- `[note]`: the attempt worked and the policy allows it.
+- `[LEAKED]`: a protection checked by the probe did not hold. This is unexpected
+  with the default policy; deliberately enabling sudo also produces this result.
 
-It is a reporter, not an exploit. There is no working payload, and it sends no
-data anywhere. The `postinstall` hook runs the same script, so `devkit up` also
-shows you install-time code being sandboxed.
+The script makes network probes and checks permissions; it does not contain
+a working exploit payload. The `postinstall` hook runs the same script, so
+`devkit up` also demonstrates the controls during dependency installation.
 
 ## Run it
 
@@ -28,7 +28,11 @@ devkit shell ./probe.sh   # run the probe again on demand
 devkit logs               # the proxy's view: every host it allowed or blocked
 ```
 
-## What you should see, per mode
+## Expected results
+
+These results assume guest enforcement and the example's other default
+settings. Certificate checks come from `devkit audit`, separately from the
+network probe.
 
 | Attempt | `allowlist` (default) | `open` | `none` |
 |---|---|---|---|
@@ -41,8 +45,7 @@ devkit logs               # the proxy's view: every host it allowed or blocked
 | Read host files or Lima secrets | held | held | held |
 | sudo, edit the firewall, kill the proxy | held | held | held |
 
-One of these is `note`, not `held`, on purpose, so the example teaches the
-real boundary rather than pretending there is none:
+Some settings deliberately allow an attempt and produce a `note`:
 
 - **DNS, only if you ask for it.** By default only the proxy resolves names
   and the sandbox cannot send a query, so this row is `held`. With
@@ -53,26 +56,29 @@ real boundary rather than pretending there is none:
   the audited proxy and still in `devkit logs`; the firewall keeps rejecting
   anything that skips the proxy.
 
-## Loosen the policy and watch
+## Compare policy settings
 
-Change `devkit.yaml`, run `devkit up`, run the probe again. A `held` turns
-into a `note` where you opened the door, and nowhere else:
+Change one setting in `devkit.yaml`, run `devkit up`, then run the probe
+again. These settings change the expected results:
 
 - `network.allow_host: true`: packets to your Mac now leave the VM, and any
   port with a listener on the Mac opens.
 - `network.mode: open`: example.com is fetched, and `devkit logs` shows it.
-- `network.mode: none`: DNS stops resolving, and the proxy is off.
+- `network.mode: none`: outbound traffic and DNS are blocked, and the proxy
+  is off. Keep `allow_host: false` for this comparison.
 - `sudo: true`: the sudo check reports `LEAKED`, which is accurate. Root in
   the VM can switch the firewall off; the config says so on that line.
 
-`LEAKED` for anything else means devkit has a bug. Please report it.
+An unexpected `LEAKED` result needs investigation. Report suspected
+vulnerabilities privately, as described in [SECURITY.md](../../SECURITY.md#reporting).
 
 ## The vendored trust store
 
-`certs/vendored-ca-bundle.pem` is the other half of the demonstration, the
-one the probe cannot run because it is about trust rather than reach. It
-vendors the Izenpe.com root, which Ubuntu's `ca-certificates` still carries
-but Mozilla no longer trusts for TLS, the way a dependency might ship its own
-bundle. Run `devkit audit` in this project and it is named as stale, with the
-`network.distrust` entry that would remove it from the system bundle too. A
-fresh VM without this file audits clean.
+`certs/vendored-ca-bundle.pem` demonstrates a dependency shipping its own
+certificate bundle. It contains the Izenpe.com root, chosen as a fixture for
+the stale-root check.
+
+Run `devkit audit` to compare it with the Mozilla root store used by the
+audit. If the root is absent from that store, the audit reports it and
+suggests a `network.distrust` entry to remove it from the system bundle too.
+This checks certificate trust; `probe.sh` checks connectivity and permissions.

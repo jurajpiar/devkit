@@ -1,41 +1,38 @@
 # devkit
 
-One disposable virtual machine per project, so untrusted code and coding
-agents can run without reaching your files, your services or the open
-internet. macOS on Apple silicon, built on [Lima](https://lima-vm.io/).
+devkit runs each project in a disposable Ubuntu virtual machine on your Mac. It
+is designed for untrusted code and coding agents, with controls over host access
+and outbound network traffic. It uses [Lima](https://lima-vm.io/) and requires
+macOS on Apple silicon.
 
-> **Proof of concept.** Much of this code base was written with heavy AI
-> assistance and has not had an independent review. Use with care until it is
-> lifted out of PoC state, if ever. Expect rough edges; see
-> [SECURITY.md](SECURITY.md) for what is and is not guaranteed.
+> **Proof of concept.** Much of the code was written with AI assistance and
+> has not had an independent review. Expect rough edges and read the
+> [security model](SECURITY.md) before relying on its protections.
 
 ## What you get
 
-**Your Mac is out of reach.** A pull request's `npm install`, a Cargo build
-script or an agent with shell access runs in its own Ubuntu VM with no shared
-folders, no route to your Mac and no sudo. Files go in, never out: devkit has
-no code path that copies anything from the VM to your Mac. The worst case is
-a trashed VM, which `devkit rm` deletes.
+- **An isolated workspace.** By default, the VM has no shared host folders,
+  no general sudo access and no access to services on your Mac. Delete it
+  with `devkit rm` when you are finished.
+- **Controlled network access.** Project traffic goes through an allowlist
+  proxy. `devkit logs` shows the hosts it allowed or blocked. You can disable
+  outbound access after installing dependencies.
+- **Managed toolchains.** [mise](https://mise.jdx.dev) installs language
+  toolchains and locks their download checksums after the first install.
+  `--toolchain nix` uses a `flake.nix` instead. Dependency installation uses
+  project lockfiles where available.
+- **Familiar tools.** Use a shell or connect VS Code, Cursor or Zed over SSH.
+  Ports you list in `network.forward` are exposed on your Mac's `127.0.0.1`.
 
-**The internet is allowlisted and logged.** Only the hosts you name are
-reachable. Every connection leaves through one proxy, which writes the host
-to a log you can read with `devkit logs`. Nothing else can open a connection,
-because the firewall only lets the proxy's own user out. One flag air-gaps the
-machine once dependencies are in.
-
-**Toolchains and dependencies are pinned.** Node, Go, Rust, Python, Ruby and
-Java are installed by [mise](https://mise.jdx.dev) from a release devkit pins
-by hash, checked against upstream signatures where they exist, and then locked
-to the exact checksums seen on first install. Dependencies come from the
-lockfile and nothing newer. Prefer Nix? `--toolchain nix` uses a `flake.nix`
-instead.
-
-**It works like a normal machine.** `devkit init` reads your version files and
-writes one YAML file. `devkit up` builds the VM in about a minute. VS Code,
-Cursor and Zed connect over SSH, and ports your app listens on appear on
-`127.0.0.1`.
+Start with [Quick start](#quick-start), then see
+[Configuration](#configuration), [Toolchains](#toolchains) or the [command
+reference](#commands). Contributors can use the [contributing
+guide](CONTRIBUTING.md).
 
 ## Quick start
+
+You need Go 1.23 or newer to build from source. `make install` also builds the
+proxy that runs inside the VM.
 
 ```bash
 brew install lima
@@ -45,20 +42,20 @@ devkit doctor               # checks Lima, the proxy binary and the host
 
 cd ~/code/some-project
 devkit init                 # detects the languages used, writes devkit.yaml
-devkit up                   # creates the VM, copies the code in, installs toolchains and dependencies
+devkit up                   # creates the VM and installs the project
 devkit shell                # a shell inside the VM, in ~/workspace
 devkit logs                 # every host the sandbox tried to reach, allowed or blocked
 devkit rm                   # delete the VM and everything in it
 ```
 
-The first `devkit up` downloads the Ubuntu image (about 220 MB, checked
-against a pinned digest), provisions the machine and installs the toolchains,
-which takes a few minutes. After that, `up` takes seconds. Edit `devkit.yaml`
-and run `devkit up` again to apply changes; the VM restarts if it has to.
-If provisioning fails (a package that does not exist, a mirror that cannot be
-reached), `up` names the step that failed, stops the VM rather than leave it
-running without its firewall, and exits non-zero; fix the cause and run it
-again. `devkit shell` and `devkit sync` refuse a VM in that state.
+The first `devkit up` downloads the Ubuntu image (about 220 MB, checked against
+a pinned digest), provisions the machine and installs the toolchains, which
+takes a few minutes. After that, `up` takes seconds. Edit `devkit.yaml` and run
+`devkit up` again to apply changes; the VM restarts if it has to.
+
+If provisioning fails, `up` names the failed step, stops the VM and exits with a
+non-zero status. Fix the cause and run it again. `devkit shell` and `devkit
+sync` refuse to use a VM whose provisioning did not finish.
 
 Shell completion comes from `devkit completion`:
 
@@ -67,12 +64,10 @@ devkit completion fish > ~/.config/fish/completions/devkit.fish
 devkit completion zsh > "${fpath[1]}/_devkit"        # or: eval "$(devkit completion zsh)"
 ```
 
-To work from an IDE, connect with Remote-SSH to the host `devkit-<name>`.
-devkit maintains that entry in `~/.ssh/config`, and `devkit connect` prints
-the steps. Building from source needs Go 1.23 or newer; `make install` also
-cross-compiles the proxy that runs inside the VM.
+To work from an IDE, connect with Remote-SSH to the host `devkit-<name>`. devkit
+maintains that entry in `~/.ssh/config`, and `devkit connect` prints the steps.
 
-## How it works, in one picture
+## How it works
 
 ```mermaid
 sequenceDiagram
@@ -104,192 +99,77 @@ sequenceDiagram
     FW-->>Code: rejected, only the proxy resolves names
 ```
 
-Three things make this hold. The VM has no shared folders and no sudo, so the
-code sees an empty Ubuntu machine. A firewall written by root at boot lets
-only the proxy's own user open connections, so a program that ignores the
-proxy settings is rejected rather than let out; on every restart, until that
-firewall is in place, a boot hold stops the sandbox opening any connection at
-all, loopback included. And the proxy decides by
-hostname and logs every attempt, which is what `devkit logs` shows. It does
-not inspect content; TLS passes through untouched. Names are the proxy's job
-too: by default the sandbox cannot send a DNS query at all, so a query name
-cannot carry data out. `dns: resolvers` reopens DNS to the whole VM, for tools
-that resolve a name before they use the proxy, and that channel with it.
-`none` mode rejects everything, DNS included.
+The default setup has three layers:
 
-To see this for yourself rather than take it on trust, `examples/hostile-project`
-is a project whose code tries to break out and reports, line by line, whether
-each attempt was stopped. Run it, then loosen `devkit.yaml` and watch the
-boundary give way exactly where you told it to.
+1. **A separate VM.** Project code runs in Ubuntu without shared host folders
+   or general sudo access.
+2. **A firewall.** Only the proxy's account may open outbound connections.
+   Programs that ignore the proxy settings are blocked. On later boots, a
+   temporary network block protects the sandbox until the firewall is ready.
+3. **An allowlist proxy.** It checks hostnames and logs each request. It does
+   not inspect the content of TLS connections.
 
-## How escapes are stopped
+By default, only the proxy can resolve DNS names. `dns: resolvers` lets the
+whole VM use DNS, which also allows code to send data through query names.
+`none` mode blocks outbound traffic, including DNS, unless you explicitly allow
+host access.
 
-Every arrow is something a malicious dependency or a misbehaving agent can try
-from inside the VM, as the sandbox user. It travels right, towards your Mac and
-the internet, until the first component that refuses it. One arrow gets
-through: the audited path to an allowed host.
+The [hostile project example](examples/hostile-project/README.md) demonstrates
+these controls and reports whether each attempted escape was blocked.
+
+## Security at a glance
+
+By default, project code runs without shared host folders or general sudo
+access. It can reach allowed hosts only through the logged proxy. Root inside
+the VM can remove those guest controls; the VM boundary still separates the
+guest kernel from your Mac.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/escape-map-dark.svg">
   <img alt="Ten escape attempts, each stopped at the layer that blocks it, and the one allowed path: HTTPS to an allowed host on port 443, logged" src="docs/escape-map-light.svg">
 </picture>
 
-Each stop is asserted by a test, most of them written red first: the escape
-succeeded, then the design changed until it failed. The end-to-end suite
-checks them on a real VM; the firewall rows are also checked in about a second
-by `TestNetnsFirewall`, which loads the real rules into Linux network
-namespaces, and the proxy rows by the proxy's unit tests. The third column is the part that matters when you read this as an
-attacker: what it would still take to get through. Almost every answer is one
-of four things, root in the guest, a loosening you chose in `devkit.yaml`, an
-allowed host the attacker already controls, or a hypervisor escape.
-
-| Attack vector | Stopped by | Still possible only if | Proven by |
-|---|---|---|---|
-| Direct connection to the internet | Firewall: only uid `devkit-proxy` may egress | Root in the guest flushes the firewall, or you set `sudo: true` | `direct connections bypassing the proxy are rejected`; `TestNetnsFirewall` |
-| Proxy to another host, or to port 22 | Proxy: allowlist, ports 80 and 443 only | You list the host or port in `network.allow` or use `open` mode; or the attacker controls an allowed host, which the policy trusts by design | `allowed hosts are reachable on web ports only`; `TestProxyRefusesConnectToNonWebPort`, `TestHTTPAllowsOnlyWebPortsWithoutAPortEntry` |
-| DNS query with data in the name | Firewall: port 53 only for the proxy's account; resolver stub off | You set `dns: resolvers`; or root in the guest; an allowed host the attacker controls makes DNS unnecessary anyway | `DNS is not a side channel`; `TestNetnsFirewall` |
-| Send from a source port the proxy just used, riding its tracked DNS flow | Firewall: connection state is trusted only for root and the proxy; every other account may only reply on connections made to it | Root in the guest, or `sudo: true` | `DNS cannot ride another account's tracked connections`; `TestNetnsFirewall` |
-| Connect to your Mac | Firewall: host rejected for every account, the proxy included | You set `allow_host: true`; or root in the guest, the one case the suite leaves red | `host is unreachable under every address form`; `TestNetnsFirewall` |
-| Code planted in a login file (`~/.bashrc`, `~/.ssh/rc`) that runs during the next boot, before the firewall exists | Boot hold: until the firewall is applied, no new connection from the sandbox user or its container UIDs, loopback included, and no upstream DNS from systemd-resolved | Root in the guest, or `sudo: true` | `TestBootWindowIsClosed`; `TestNetnsFirewall` |
-| Listen for your Mac to connect | Lima: forward nothing unless listed in `network.forward` | You list the port; or your IDE's own SSH tunnelling forwards it for you, which Lima never sees | `guest listeners are not forwarded to the Mac unless configured` |
-| Read or write your files | Lima: `mounts: []`; devkit never copies out of the VM on its own | You use `source: mount` with `mount_writable: true`, approve a `devkit push` and then merge its commits into your checkout, or pull output across yourself; or a hypervisor escape | `nothing from the VM lands on the host` |
-| Get code onto your remote, and from there into CI or your checkout | `devkit push` only: the VM holds no credentials; you review the commits, the changed files that run outside the VM are flagged, and nothing is pushed until you say yes | You approve it; the review is the gate, see "What git in the VM changes" below | `TestPushReviewsThenPushesWithHostCredentialsAndNoHooks`, `TestReviewShowsEveryCommitWhateverItsText`, `TestReviewShowsWhatAForcedPushRemoves` |
-| Exploit git on your Mac with a crafted bundle | devkit parses the header itself; `git index-pack --strict` checks every object; size capped at 512 MiB; no hooks run | A bug in git's own pack parsing, the code every `git fetch` from an untrusted remote runs | `TestImportRejectsAMaliciousTree`, `TestImportChecksObjectsEvenWhenTheRepoDisablesFsck` |
-| Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | Root in the guest; or the devkit binary or devkit.yaml on your Mac is tampered with, which is outside the sandbox entirely | `policy files are root-only` |
-| Become root | No sudo; io_uring, unprivileged BPF and `AF_ALG` off; unprivileged user namespaces refused (unless `containers: true`); module loading locked after provisioning; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied`, `TestKernelLockdown` |
-| Root reaches your Mac's loopback services | Nothing inside the guest | The row above; your files still need a hypervisor escape on top | `TestRootInGuestReachesHost`, kept red on purpose |
+The [escape-test reference](docs/escape-tests.md) lists each attempted escape,
+its control, its tests and the conditions under which it can still succeed. The
+[security model](SECURITY.md) explains the remaining risks.
 
 ### Enforcement on the Mac: `network.enforce: host`
 
-Every control in the table above lives inside the guest, so root in the guest
-can remove it. `network.enforce: host` (opt-in; the default is `guest`) adds
-a layer root in the guest cannot reach. All of the VM's traffic leaves through
-Lima's host agent, a process on your Mac. devkit starts the VM with
-`limactl start` under a macOS sandbox profile (`sandbox-exec`), which the host
-agent inherits: it may open connections to Lima's own sockets and, over TCP
-only, to the VM's SSH forward and one devkit proxy on the Mac's loopback, and
-to nothing else. That
-proxy, `devkit hostproxy`, runs the same allowlist code, resolves names, and
-keeps its log on the Mac, where `devkit logs` reads it. In the guest, root's
-downloads and the in-guest proxy go through it; the in-guest firewall and
-proxy stay as the inner layer, and nothing in the guest may send a DNS query.
-It needs no root on the Mac.
+This opt-in mode also enforces the network policy on your Mac, so guest root
+cannot remove it. Lima's host agent runs under a macOS sandbox profile and sends
+outbound requests through a devkit proxy on the Mac. It needs no root access on
+the Mac. `devkit logs` reads the host proxy's log; requests blocked by the guest
+proxy remain in the guest log.
 
-What that buys, with root in the guest and the firewall flushed and the
-in-guest proxy stopped, as `TestHostEnforcement` checks with raw sockets:
+Host enforcement is new and uses Apple's deprecated `sandbox-exec`. devkit
+refuses to start in this mode if the required support is missing. It cannot be
+combined with `allow_host: true`, `dns: resolvers` or `mode: none`. Always start
+the VM through devkit: a manual `limactl start` bypasses the profile. If an
+outbound firewall such as LuLu blocks the host proxy, allow the `devkit` binary
+there.
 
-| Attack vector, as root in the guest | Under `enforce: host` | Still possible only if |
-|---|---|---|
-| Direct connection to the internet, any port, IPv4 or IPv6 | Refused on the Mac: the host agent may not dial it | A host the host proxy allows (below) |
-| DNS query with data in the name, to any resolver or to Lima's own | No answer: the Mac's resolver socket is out of the host agent's reach | An allowed host the attacker controls makes DNS unnecessary anyway |
-| Connect to your Mac's loopback services | Refused on the Mac, except the host proxy and the VM's own SSH forward, which leads back into the guest | A gap in the profile or in Lima; the host proxy itself refuses addresses of the Mac: loopback, link-local and any address on one of its interfaces, such as its LAN address, by IP or by a name that resolves to one |
-| Rewrite the in-guest policy or swap the in-guest proxy | Possible, and no longer enough: the host proxy's allowlist is outside the guest | You change `devkit.yaml` on the Mac |
-| Through the host proxy to another host or port | Refused by the host proxy, ports 80 and 443 only unless listed | The host is in `network.allow` or is one root's provisioning needs: Ubuntu's archive, ports and security hosts and the toolchain manager's download hosts; or `open` mode |
+See [host enforcement](SECURITY.md#enforcement-on-the-mac-networkenforce-host)
+for the full policy, provisioning exceptions and untested paths.
 
-The other rows of the escape table, and the in-guest layer for code without
-root, are unchanged.
+### Reviewing code from the VM
 
-Limits, stated plainly:
+`devkit push` imports a checked Git bundle, shows a review and asks before
+pushing with your Mac's credentials (`--yes` skips the prompt). Read the changes
+carefully: pushed code can run in CI or in your local checkout, and commit
+authorship does not prove who wrote it. See [Git review and
+credentials](SECURITY.md#git-review-and-credentials).
 
-- **It is opt-in and new.** The default stays `guest` until host mode has
-  more use behind it.
-- **`sandbox-exec` is deprecated by Apple.** It works on current macOS. If it
-  disappears, `devkit up` refuses to start the VM rather than run it
-  unprotected; it never falls back to guest mode silently. The same goes for
-  any host that is not macOS.
-- **An outbound firewall on the Mac** such as LuLu must be told to allow the
-  `devkit` binary, which is the host proxy; until it is, downloads hang.
-- **A VM started by hand** (`limactl start`) runs without the profile and is
-  unprotected. devkit records Lima's host agent at each start it makes, and
-  `up`, `shell`, `sync`, `logs` and `audit` warn loudly when the running one
-  is not it. `devkit down`, then `devkit up`, fixes it.
-- **Not attacked:** the vsock channel between Lima's guest agent and host
-  agent. The profile confines what the host agent dials, not what it does
-  when asked over that channel.
-- **ICMP** cannot leave the Mac: a process under the profile is refused when
-  it tries to send one, which a test checks on the Mac itself. Inside the
-  guest a ping either gets no reply or is answered by Lima's own network
-  stack, depending on the environment; neither means it reached anything.
-- **Not combinable** with `allow_host: true`, `dns: resolvers` or
-  `mode: none`; devkit refuses those at validation. The first two need the
-  VM to reach something on the Mac other than the proxy; `none` would leave
-  the first boot no way to install its base packages.
-- **Logs.** The host log records every request that leaves, root's
-  included. A request the in-guest proxy refuses never reaches it; those
-  stay in the VM's own log, which `devkit up` still summarises.
+### Responding to a kernel crash
 
-### What git in the VM changes
+From the VM's first restart, devkit reads guest kernel crash reports from Lima's
+serial log on the Mac. Commands warn about unacknowledged reports; `devkit
+audit` exits with status 1 even if the VM is stopped.
 
-Git in the VM, `devkit push` and `devkit clone` widen the attack surface in
-one deliberate place and narrow it in another. Before them, nothing the VM
-wrote could leave except to an allowed host.
-
-**Wider, by design.**
-- **Commits the VM wrote can reach your remote.** That is the point of `devkit
-  push`, and its only gate is your review. A malicious dependency can change
-  files that an agent then commits, and rely on a long diff to hide it. The
-  review lists every commit, the diffstat, the commits a forced push would
-  remove, and the changed files that run outside the VM. It cannot judge the
-  code for you.
-- **Authorship from the VM proves nothing.** The VM commits as you: it gets
-  your `user.name` and `user.email`, and can write any author it likes, so
-  the review's "other author" note catches only the careless case.
-- **Pushed commits run elsewhere.** CI runs them, with whatever secrets your
-  workflows expose to that branch. If you bring them into your checkout on
-  the Mac (`git merge refs/devkit/...`), your husky hooks, direnv, editor tasks
-  and npm scripts there run code the VM wrote. That is the risk of checking
-  out any untrusted pull request, and the one place where devkit's rule that
-  project code never runs on the Mac depends on you.
-
-**New on the Mac, and narrow.**
-- **Parsing untrusted bytes.** A bundle from the VM is read by devkit's
-  header parser and `git index-pack --strict`, the same code as any `git
-  fetch` from an untrusted remote, capped at 512 MiB. Text from the VM is
-  stripped of control characters and bidi overrides before it is shown.
-- **devkit runs git on your Mac.** In a copied project's directory (to build
-  the snapshot), and against your remotes (clone, sync, `ls-remote`, push),
-  with your own git config and credentials, as when you run git there
-  yourself, but with hooks disabled.
-
-**Narrower.**
-- **Cloning** is safer than `git clone`: bare, so no project file is written
-  out on the Mac; https and ssh only; no submodules, hooks or templates.
-- **Credentials stay out of the VM.** Without `devkit push`, the way to push
-  from the VM was a token or an agent inside it, usable by every dependency.
-
-**To keep the gate meaningful:** push to a feature branch and merge through a
-pull request with branch protection; don't expose CI secrets to branches from
-the VM; read the flagged files; and don't merge `refs/devkit/...` into your
-Mac's checkout and then run the project's tooling there unless you have read
-what it changes.
-
-### Kernel crashes, seen from the Mac
-
-A failed attempt at a kernel exploit often crashes the guest kernel before
-one succeeds. devkit points the guest kernel's console at the serial port
-Lima records on the Mac (`~/.lima/<vm>/serialv.log`) and reads the crash
-reports there, on the Mac: nothing runs in the guest to find them, and the
-sandbox user can neither write to that console nor stop the kernel from
-writing to it.
-
-- **From the first restart.** The kernel setting is written on the first
-  boot and takes effect on the next one; `devkit up` says so. Until then a
-  VM cannot report crashes, and `devkit audit` says that rather than "none".
-- **What you see.** `up`, `shell`, `sync`, `logs` and `audit` warn about
-  every crash report you have not acknowledged and show its first lines; a
-  VM whose kernel has panicked, which Lima still lists as Running, is named
-  as such (`devkit ls` too), and `devkit down` forces it off. `devkit
-  audit` counts an unacknowledged report as a finding (exit 1), with the VM
-  stopped too.
-- **What to do.** A crash can be a failed attempt to break out, or simply a
-  kernel bug. If you cannot explain it, discard the VM with `devkit rm`;
-  otherwise acknowledge it with `devkit audit --ack-crashes`.
-- **The limit.** This catches the noisy attempt, not the clean one. An
-  exploit that works first time crashes nothing, and once it has root it
-  can silence the console. A report is a reason to act; no report proves
-  nothing.
-
-Where the picture ends, and the risks that remain, are in [SECURITY.md](SECURITY.md).
+If you cannot explain a crash, discard the VM with `devkit rm`. Otherwise,
+acknowledge it with `devkit audit --ack-crashes`. A crash may be a failed
+exploit or an ordinary bug. The absence of a crash report does not prove the VM
+is safe. See [kernel crash
+reports](SECURITY.md#kernel-crash-reports-read-on-the-mac).
 
 ## Configuration
 
@@ -338,52 +218,72 @@ network:
 # sudo: false                     # root inside the VM can disable the firewall
 ```
 
-**Source methods**
+### Source methods
 
 | `source` | What happens | Notes |
 |---|---|---|
-| `copy` | The directory is copied into the VM on `up` and `sync` | Default. Host is never touched again. A git checkout gets a `.git` like a fresh clone's, see below. |
-| `git` | Made by `devkit clone <url>`: your Mac clones bare, the VM checks out | Private repos work with your own credentials; the files are never written out on the Mac. `sync` fetches on the Mac and fast-forwards the VM. A `devkit.yaml` from `devkit init <url>` has no Mac-side clone; the VM then clones a public repo through the proxy. |
+| `copy` | The directory is copied into the VM on `up` and `sync` | Default. Sync does not copy VM changes back to your working tree. A git checkout gets a `.git` like a fresh clone's, see below. |
+| `git` | `devkit clone <url>` creates a bare clone on the Mac; the VM checks out the files | Supports private repositories. `sync` fetches on the Mac and fast-forwards the VM. |
 | `mount` | The directory is mounted read-only | Opt in. `mount_writable: true` lets the sandbox edit your files. |
 
-**Git in a copied project.** Your `.git` is never copied. When the directory
-is the top of a git checkout, the VM instead gets the `.git` a fresh clone
-would have: your current commit and branch, with `origin` pointing at your
-remote with any token stripped, and nothing else. No history, so a secret
-deleted in an earlier commit stays on the Mac; no other branches, tags, stash
-or reflog; no hooks; none of your `.git/config`. Uncommitted changes arrive as
-changes, so `git status`, `git diff`, `git commit` and tools such as husky
-work inside. A repository already in the VM is kept on later `sync`s, since it
-may hold commits the Mac has never seen. Files in that one commit arrive even
-if `exclude` names them.
+If you use `devkit init <url>` instead of `devkit clone`, there is no bare clone
+on the Mac. In that case, the VM clones a public repository through the proxy.
 
-**Cloning.** `devkit clone https://github.com/org/repo` (or just `devkit
-github.com/org/repo`) makes `repo/` holding `devkit.yaml` and a bare,
-one-commit clone in `.devkit/repo.git`, fetched with your own git credentials
-so private repositories work. Bare means none of the project's files are
-written out on your Mac, which rules out the class of git bugs that run code
-on checkout; the VM checks out on `devkit up`. Languages are detected from
-marker files read out of git objects. Only https and ssh are accepted, for the
-clone and any redirect; `git://`, which GitHub no longer serves, is rewritten
-to `https://`. `devkit sync` fetches new upstream commits on the Mac and
-hands them to the VM, which never talks to the remote itself.
+### Git in a copied project
 
-**Pushing from the VM.** The VM holds no credentials, and should not: a token
-or SSH agent inside is usable by every dependency that runs there. `devkit
-push` brings the work out instead. The VM writes a git bundle of the branch.
-Your Mac has git check every object in it (malformed trees such as one with a
-`.git` entry are refused), stores the branch as `refs/devkit/<project>/<branch>`,
-outside your branches and work tree, and shows the commits, their authors,
-the diffstat and any changed file that runs outside the VM: CI workflows, git
-and editor hooks, `.envrc`, `package.json` scripts, task runners. After you
-say yes it pushes with your normal git credentials. No git hooks run on the
-Mac: a pre-push hook such as husky's would run the project's own code there,
-and it already ran in the VM. The push never forces; `--force-with-lease`
-replaces the remote branch only if it is still where it was when you reviewed.
-Commits from the VM are unsigned; a branch that requires signatures needs
-them re-signed on the Mac.
+Your host `.git` directory is never copied. If the project directory is the root
+of a Git checkout, devkit creates a separate repository in the VM with:
 
-**Network modes**
+- Your current commit and branch, without earlier history, other branches,
+  tags, stash or reflog.
+- An `origin` remote with any embedded token removed.
+- None of your host Git hooks or `.git/config`.
+
+Uncommitted changes arrive as working-tree changes. You can use `git status`,
+`git diff` and `git commit`, and run tools such as husky inside the VM. Later
+syncs preserve the VM's repository because it may contain new commits. Files in
+the copied commit are included even if `exclude` names them.
+
+### Cloning a repository
+
+`devkit clone https://github.com/org/repo` creates a `repo/` directory with
+`devkit.yaml` and a bare, one-commit clone in `.devkit/repo.git`. The shorthand
+`devkit github.com/org/repo` does the same thing.
+
+Cloning uses your Mac's Git credentials, so private repositories work. No
+project files are checked out on the Mac: devkit detects languages from Git
+objects, and the VM checks out the files on `devkit up`.
+
+Only HTTPS and SSH are accepted for clones and redirects. `git://` URLs are
+rewritten to `https://`. For a project created with `devkit clone`, `devkit
+sync` fetches upstream commits on the Mac and passes them into the VM; the VM
+does not need to contact the remote.
+
+### Pushing from the VM
+
+Use `devkit push` to publish work without giving the VM your credentials:
+
+1. The VM writes a Git bundle of the branch.
+2. Git on your Mac checks every object and rejects malformed data, such as a
+   tree containing a `.git` entry.
+3. devkit stores the branch under `refs/devkit/<project>/<branch>`, outside
+   your local branches and working tree.
+4. The review shows commits, authors, a diffstat and changed files that may
+   run outside the VM: CI workflows, hooks, editor tasks, `.envrc`,
+   `package.json` scripts and task runners.
+5. After confirmation, your Mac pushes with your normal credentials.
+   `--yes` skips the confirmation prompt.
+
+No Git hooks run on the Mac during the push. A pre-push hook such as husky's
+would execute project code there; hooks belong inside the VM.
+
+Pushes do not force by default. `--force-with-lease` replaces the remote branch
+only if it has not changed since your review. VM commits are unsigned; branches
+that require signatures need those commits re-signed on the Mac. See [Git review
+and credentials](SECURITY.md#git-review-and-credentials) for the risks of
+publishing or checking out code written in the VM.
+
+### Network modes
 
 | `mode` | Outbound traffic | Use |
 |---|---|---|
@@ -391,73 +291,83 @@ them re-signed on the Mac.
 | `open` | Any host, via the audited proxy; the firewall still rejects direct connections | Trusted code, want the log |
 | `none` | Nothing, not even DNS | Air-gap after dependencies are installed: `devkit up --network none` |
 
-Allowed hosts are hostnames: `example.com` exact, `*.example.com` one
-level, `**.example.com` any depth. An entry allows the web ports, 80 and 443,
-and nothing else on that host; `host:port` allows exactly one other port.
-Anything else is rejected at validation. By default only the proxy may resolve
-names: it looks up allowed hosts itself, and the sandbox cannot send a DNS
-query at all, so a query name cannot carry data out. `dns: resolvers` reopens
-DNS to the whole VM for tools that resolve a name before they use the proxy.
+Allowed hosts are hostnames: `example.com` exact, `*.example.com` one level,
+`**.example.com` any depth. An entry allows the web ports, 80 and 443, and
+nothing else on that host; `host:port` allows exactly one other port. Anything
+else is rejected at validation. By default only the proxy may resolve names: it
+looks up allowed hosts itself, and the sandbox cannot send a DNS query at all,
+so a query name cannot carry data out. `dns: resolvers` reopens DNS to the whole
+VM for tools that resolve a name before they use the proxy.
 
-Nothing the sandbox listens on is reachable from your Mac unless its port is in
-`forward`. A page served from the sandbox and opened in your browser would run
-with the browser's unrestricted network, so forwarding is opt-in per port.
+Lima forwards only the ports listed in `network.forward`. An IDE may also create
+its own SSH tunnels, independently of this setting. A page served from the
+sandbox and opened in your browser would run with the browser's unrestricted
+network, so forwarding is opt-in per port.
 
-The guest applies Ubuntu's security pocket on every boot, before the firewall
+With `allow_host: true`, project code can reach the Mac directly at
+`host.lima.internal`, bypassing the proxy and its log. This also opens a path to
+host services in `none` mode, including any DNS resolver on the host.
+
+### Kernel updates and restrictions
+
+The guest applies Ubuntu's security updates on every boot, before the firewall
 comes up, so a VM does not stay at its image's patch level. Expect the cost on
 the first boot after a kernel update lands: `devkit up` took about a minute
 longer than usual the day one did (1 m 45 s against 46 s). Later boots only
-check the pocket and take seconds. The new kernel is installed to disk and runs
+check for updates and take seconds. The new kernel is installed to disk and runs
 from the next boot. `devkit up` does not reboot a VM whose configuration is
-unchanged, so run `devkit down && devkit up` to boot into a new kernel; the
-boot that installed it says so. `vm.security_updates: false` turns the step off;
+unchanged, so run `devkit down && devkit up` to boot into a new kernel; the boot
+that installed it says so. `vm.security_updates: false` turns the step off;
 `devkit up --no-security-updates` writes that for you, so the next boots are
 quick again and the VM says so in its policy stamp.
 
-Two more kernel controls. Unprivileged user namespaces are refused outright
+Two additional controls reduce the kernel features available to project code.
+Unprivileged user namespaces are refused outright
 (`kernel.unprivileged_userns_clone = 0`), including to the programs Ubuntu's
 AppArmor profiles exempt, such as `rootlesskit` or `podman` installed from
-`tools.packages`; root is unaffected. `containers: true` leaves them open,
-under AppArmor's restriction alone, because rootless containerd needs them.
-Kernel module loading is locked, for root too, as the last step of
-provisioning, after the firewall is up and what the configuration needs is
-loaded; every boot locks it again. A tool that needs a module nothing loaded
-beforehand then fails; set `vm.lock_modules: false` for that project.
+`tools.packages`; root is unaffected. `containers: true` leaves them open, under
+AppArmor's restriction alone, because rootless containerd needs them. Kernel
+module loading is locked, for root too, as the last step of provisioning, after
+the firewall is up and what the configuration needs is loaded; every boot locks
+it again. A tool that needs a module nothing loaded beforehand then fails; set
+`vm.lock_modules: false` for that project.
 
-**Trust store.** The VM trusts what Ubuntu's `ca-certificates` package
-trusts, refreshed by root on every boot, so a VM created before a CA was
-removed upstream catches up on its next start. `network.distrust` names roots
-to remove on top of that, for the cases where the distro lags the browsers.
-Runtimes that bring their own root list (Node, Python's certifi, pip, curl)
-are pointed at the system bundle instead, so both the distro's updates and
-your `distrust` list apply to them. `devkit up` ends with a short trust audit;
-`devkit audit --deep` scans every file. See SECURITY.md for what it catches.
+### Trust and image audits
+
+The VM trusts what Ubuntu's `ca-certificates` package trusts, refreshed by root
+on every boot, so a VM created before a CA was removed upstream catches up on
+its next start. `network.distrust` names roots to remove on top of that, for the
+cases where the distro lags the browsers. Runtimes that bring their own root
+list (Node, Python's certifi, pip, curl) are pointed at the system bundle
+instead, so both the distro's updates and your `distrust` list apply to them.
+`devkit up` ends with a short trust audit; `devkit audit --deep` scans every
+file. See the [audit details](SECURITY.md#tls-trust-and-certificate-audits) for
+its limits.
 
 The audit also lists container images the project does not pin by digest. It
 reads every `image:` in the compose files (`compose.yaml`,
 `docker-compose.*.yml` and the like, with their `.env`) and every `FROM` and
 `COPY --from` in Dockerfiles and Containerfiles, so it needs no Docker. A
-reference counts as pinned only with `@sha256:` and a 64-character digest; a
-tag or a bare name is unpinned, because the same tag can be different code
-tomorrow. A reference whose variable has no value devkit can see, such as
-`${IMAGE:?}` or a build `ARG` without a default, is reported as unresolved
-rather than assumed fine. This part is a report: unpinned or unresolved
-images do not change `devkit audit`'s exit status.
+reference counts as pinned only with `@sha256:` and a 64-character digest; a tag
+or a bare name is unpinned, because the same tag can be different code tomorrow.
+A reference whose variable has no value devkit can see, such as `${IMAGE:?}` or
+a build `ARG` without a default, is reported as unresolved rather than assumed
+fine. This part is a report: unpinned or unresolved images do not change `devkit
+audit`'s exit status.
 
-The sandbox cannot reach your Mac in any mode unless `allow_host` is true. With
-`allow_host: true` the VM reaches the host directly at `host.lima.internal`,
-bypassing the proxy and its log.
+### Dependencies
 
-**Dependencies** are installed from whichever lockfile is present and from
-nothing else: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install
---frozen-lockfile`, `go mod download`, `cargo fetch --locked`, `uv sync
---frozen`, `bundle install`, and so on. Set `install:` when the guess is wrong.
-A Node project without a lockfile gets `npm install` and a reminder to commit
-the result.
+Dependencies are installed using the detected lockfile: `npm ci`, `pnpm install
+--frozen-lockfile`, `yarn install --frozen-lockfile`, `go mod download`, `cargo
+fetch --locked`, `uv sync --frozen`, `bundle install`, and so on. Set `install:`
+when the guess is wrong. A Node project without a lockfile gets `npm install`
+and a reminder to commit the result.
 
-**Services** run databases inside the VM without a container engine and
-without anything on your Mac. `services: [postgres]` gives Ubuntu's
-PostgreSQL 16 with a role and database `dev`, password `dev`, on port 5432:
+### Services
+
+Services run databases inside the VM without a container engine and without
+anything on your Mac. `services: [postgres]` gives Ubuntu's PostgreSQL 16 with a
+role and database `dev`, password `dev`, on port 5432:
 `postgres://dev:dev@127.0.0.1:5432/dev`. Set any of them per project:
 
 ```yaml
@@ -471,34 +381,35 @@ services:
 
 Root installs the package at provisioning and tells Ubuntu not to create a
 cluster of its own. The cluster belongs to the sandbox user, lives in
-`~/.local/share/devkit/postgres`, and runs as a systemd user unit that starts
-at boot. It listens only on the VM's 127.0.0.1, so nothing outside the VM can
-reach it unless you add the port to `network.forward`, and it makes no
-connections of its own. The sandbox user administers it over a local socket
-(`psql -h $XDG_RUNTIME_DIR -p 5433 -d postgres`); the app logs in over TCP as
-the role above. The password is for development inside the VM: the only
-thing that can reach the port is the sandbox itself. Remove the service from
-`devkit.yaml` and the next `devkit up` stops it and keeps the data.
+`~/.local/share/devkit/postgres`, and runs as a systemd user unit that starts at
+boot. It listens only on the VM's 127.0.0.1, so nothing outside the VM can reach
+it unless you add the port to `network.forward`, and it makes no connections of
+its own. The sandbox user administers it over a local socket (`psql -h
+$XDG_RUNTIME_DIR -p 5433 -d postgres`); the app logs in over TCP as the role
+above. The password is for development inside the VM: the only thing that can
+reach the port is the sandbox itself. Remove the service from `devkit.yaml` and
+the next `devkit up` stops it and keeps the data.
 
-**Containers** are opt-in. With `containers: true` the VM gets rootless
-containerd and `nerdctl` for databases and services. It also leaves
-unprivileged user namespaces open, which rootless containerd needs, and loads
-the bridge, overlay and netfilter modules containers use before module
-loading is locked.
+### Containers
+
+Containers are opt-in. With `containers: true` the VM gets rootless containerd
+and `nerdctl` for databases and services. It also leaves unprivileged user
+namespaces open, which rootless containerd needs, and loads the bridge, overlay
+and netfilter modules containers use before module loading is locked.
 
 ## Toolchains
 
 `tools.manager` decides how language toolchains get into the VM. `devkit init`
 picks `mise` unless `--toolchain` or `DEVKIT_TOOLCHAIN` says otherwise, and
 seeds versions from the files it finds: `.nvmrc`, `engines.node`, `go.mod`,
-`rust-toolchain.toml`, `.python-version`, `.ruby-version`, `.java-version`.
-A Bun project, one with `bun.lock`, `.bun-version`, `bunfig.toml` or
-`packageManager: "bun@..."`, gets Bun, beside Node when it has a
-`package.json`, and its dependencies install with `bun install
---frozen-lockfile`. An `engines` range seeds its lower bound only when that
-bound is inclusive, otherwise the default.
+`rust-toolchain.toml`, `.python-version`, `.ruby-version`, `.java-version`. A
+Bun project, one with `bun.lock`, `.bun-version`, `bunfig.toml` or
+`packageManager: "bun@..."`, gets Bun, beside Node when it has a `package.json`,
+and its dependencies install with `bun install --frozen-lockfile`. An `engines`
+range seeds its lower bound only when that bound is inclusive, otherwise the
+default.
 
-| | `mise` | `nix` | `none` |
+| Feature | `mise` | `nix` | `none` |
 |---|---|---|---|
 | What you edit | `tools.versions` in `devkit.yaml` | `flake.nix` in the repo | `tools.packages` |
 | Languages | Node, Go, Python, Ruby, Rust, Java, Zig, Bun, Deno, and CLIs from the aqua registry | Everything in nixpkgs | Whatever Ubuntu 24.04 ships |
@@ -507,38 +418,41 @@ bound is inclusive, otherwise the default.
 | Disk per VM | A 30 MB binary plus each toolchain | A few hundred MB for Nix plus each toolchain's own closure | Nothing extra |
 | Learning curve | None | You will edit `flake.nix` eventually | None |
 
-**mise.** Root installs a pinned, hash-checked mise release at boot and
-locks its settings in `/etc/mise/config.toml`: plugin backends (asdf, vfox)
-are disabled because they are unreviewed shell scripts, provenance is checked
-on every install, and releases younger than three days are skipped. The
-sandbox user then installs `tools.versions` through the audited proxy. The
-first `devkit up` records every download's URL and checksum in the VM's
-`mise.lock`; every later `up` installs with `--locked` and refuses anything
-else. Change a version and run `devkit up --relock`. The lock lives and dies
-with the VM, because devkit never copies anything from the VM to your Mac. A
-`mise.toml` or `.nvmrc` in the repository layers on top, as mise normally
-does.
+### mise
 
-**nix.** Root installs a pinned, hash-checked multi-user Nix once; the daemon
-fetches through the proxy, so `devkit logs` shows it. `devkit init --toolchain
-nix` writes a `flake.nix` with a dev shell for the toolchains it detected,
-unless the repo already has one. `devkit up` evaluates it, and `devkit shell`
-drops you into `nix develop`. Commit a `flake.lock` from the host (`nix flake
-lock`) when you want the inputs pinned for everyone; the one the VM writes
-stays in the VM. IDE terminals over SSH are not inside the dev shell; run
-`nix develop` there.
+Root installs a pinned, hash-checked mise release at boot and locks its settings
+in `/etc/mise/config.toml`: plugin backends (asdf, vfox) are disabled because
+they are unreviewed shell scripts, provenance is checked on every install, and
+releases younger than three days are skipped. The sandbox user then installs
+`tools.versions` through the audited proxy. The first `devkit up` records every
+download's URL and checksum in the VM's `mise.lock`; every later `up` installs
+with `--locked` and refuses anything else. Change a version and run `devkit up
+--relock`. The lock lives and dies with the VM, because devkit does not export
+it to your Mac. A `mise.toml` or `.nvmrc` in the repository layers on top, as
+mise normally does.
 
-**none.** Only `tools.packages` from apt. Right for C and C++ projects, where
+### Nix
+
+Root installs a pinned, hash-checked multi-user Nix once; the daemon fetches
+through the proxy, so `devkit logs` shows it. `devkit init --toolchain nix`
+writes a `flake.nix` with a dev shell for the toolchains it detected, unless the
+repo already has one. `devkit up` evaluates it, and `devkit shell` drops you
+into `nix develop`. Commit a `flake.lock` from the host (`nix flake lock`) when
+you want the inputs pinned for everyone; the one the VM writes stays in the VM.
+IDE terminals over SSH are not inside the dev shell; run `nix develop` there.
+
+### System packages (`none`)
+
+Only `tools.packages` from apt. Right for C and C++ projects, where
 `build-essential`, `cmake` and `clang` from Ubuntu are usually what you want,
 and for anything else you would rather install by hand with `install:`.
 
 Rust is the weak spot in every column: `rustup-init` is fetched without a
-signature check by mise, and nixpkgs' `rustc` is fine but `rustup` is not
-there. Java through mise checks a catalogue checksum only; prefer
-`packages: [openjdk-21-jdk]` under `none` or `mise` when that matters.
-Solidity tooling is covered by npm (Hardhat) and by `binaries.soliditylang.org`
-for solc, which both Hardhat and Foundry verify; install Foundry with
-`install:` and pin its version.
+signature check by mise, and nixpkgs' `rustc` is fine but `rustup` is not there.
+Java through mise checks a catalogue checksum only; prefer `packages:
+[openjdk-21-jdk]` under `none` or `mise` when that matters. Solidity tooling is
+covered by npm (Hardhat) and by `binaries.soliditylang.org` for solc, which both
+Hardhat and Foundry verify; install Foundry with `install:` and pin its version.
 
 ## Commands
 
@@ -573,8 +487,9 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
   binary. Root inside the VM copies the staged binary to a private location and
   installs it only if its SHA-256 matches the one recorded at provisioning time.
 - In `allowlist` and `open` modes the firewall rejects every outbound packet
-  except those from the proxy's user, DNS to the configured resolvers, and the
-  host when `allow_host` is set. In `none` mode it rejects everything.
+  except permitted proxy traffic, DNS according to `network.dns`, and
+  host traffic when `allow_host` is set. In `none` mode it rejects outbound
+  traffic except explicitly allowed host access.
 - Under `network.enforce: host` the proxy's user may reach only the host
   proxy at `192.168.5.2:<port>`, there is no DNS for anyone, and
   `limactl start` runs under the profile in `~/.devkit/<vm>/network.sb`. The
@@ -635,6 +550,6 @@ tests/e2e             creates a real VM and checks the guarantees
   privilege escalation reaching the host's loopback; see SECURITY.md for the
   trade-offs.
 
-## License
+## Licence
 
 MIT
