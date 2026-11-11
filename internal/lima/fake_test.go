@@ -2,6 +2,7 @@ package lima
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -92,5 +93,32 @@ func TestFakeRecordsMultilineCommandsAsOneCall(t *testing.T) {
 	calls := f.Calls()
 	if len(calls) != 2 || calls[0][len(calls[0])-1] != cmd || calls[1][0] != "shell" {
 		t.Errorf("want two calls with the multi-line command intact, got %q", calls)
+	}
+}
+
+// List must not ask limactl for whole instances (the plain "json" format):
+// that prints each instance's config, provisioning scripts included, on one
+// line, and limactl fails the entire listing once a line passes 64 KiB. It
+// must still ask for every field Instance holds.
+func TestListAsksOnlyForTheFieldsInstanceHolds(t *testing.T) {
+	f := fakelima.Install(t)
+	if _, err := List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.Calls()
+	if len(calls) != 1 || len(calls[0]) != 3 || calls[0][0] != "list" || calls[0][1] != "--format" {
+		t.Fatalf("calls = %q, want one list --format <template>", calls)
+	}
+	format := calls[0][2]
+	if format == "json" || format == "yaml" || strings.Contains(format, "{{json .}}") || strings.Contains(format, ".Config") {
+		t.Fatalf("list asks for whole instances: %q", format)
+	}
+	typ := reflect.TypeFor[Instance]()
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		tag := field.Tag.Get("json")
+		if want := fmt.Sprintf(`"%s":{{json .%s}}`, tag, field.Name); !strings.Contains(format, want) {
+			t.Errorf("list format %q lacks %s", format, want)
+		}
 	}
 }

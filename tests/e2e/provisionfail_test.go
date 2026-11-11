@@ -230,7 +230,9 @@ func guest(t *testing.T, vm, cmd, stdin string) string {
 // limaStatus is the instance's status as limactl reports it, "" if absent.
 func limaStatus(t *testing.T, vm string) string {
 	t.Helper()
-	out, err := exec.Command("limactl", "list", "--format", "json").Output()
+	// Not the plain "json" format: limactl fails the whole listing once one
+	// instance's config passes 64 KiB on a line.
+	out, err := exec.Command("limactl", "list", "--format", `{"Name":{{json .Name}},"Status":{{json .Status}}}`).Output()
 	if err != nil {
 		t.Fatalf("limactl list: %v", err)
 	}
