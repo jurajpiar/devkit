@@ -102,12 +102,29 @@ func TestDockerGvisor(t *testing.T) {
 		if out := sh("docker run --rm --cap-add NET_ADMIN busybox:1.36 true"); ok(out) || !strings.Contains(out, "devkit") {
 			t.Errorf("--cap-add NET_ADMIN should be refused by the filter: %s", out)
 		}
-		// Under gVisor nothing checks the mounts as made, so the filter
-		// must not pass a bind source it cannot see through. A symlink in
-		// a directory only the sandbox user may enter is one.
+		// A bind source the filter cannot see through: a symlink in a
+		// directory only the sandbox user may enter. Whichever layer
+		// refuses it, it must not be mounted.
 		out := sh(`cd ~/workspace && rm -rf priv && mkdir -m 700 priv && ln -s /etc priv/l && docker run --rm -v "$PWD/priv/l:/x" busybox:1.36 ls /x/passwd; rc=$?; rm -rf priv; (exit $rc)`)
 		if ok(out) || !strings.Contains(out, "devkit") {
 			t.Errorf("a bind source the filter cannot resolve should be refused under gVisor: %s", out)
+		}
+		// The swap the filter cannot see at all: a real directory when the
+		// container is created, a symlink to the daemon's sockets when it
+		// starts. Only a check of the mounts as made refuses this, and
+		// gVisor's runtime has to be behind one as runc is. The container
+		// also mounts the workspace and tries to leave a file there, so a
+		// process that ran at all is seen.
+		out = sh(`cd ~/workspace && rm -rf swap ran && docker rm -f gv-swap >/dev/null 2>&1; mkdir swap && docker create --name gv-swap -v "$PWD:/w" -v "$PWD/swap:/s" busybox:1.36 sh -c 'touch /w/ran; ls /s' >/dev/null && rmdir swap && ln -s /var/lib/devkit-docker/run swap && docker start -a gv-swap; rc=$?; ls ran 2>/dev/null && echo PROCESS-RAN; docker rm -f gv-swap >/dev/null 2>&1; rm -rf swap ran; (exit $rc)`)
+		if ok(out) || strings.Contains(out, "PROCESS-RAN") || strings.Contains(out, "docker.sock") {
+			t.Errorf("under gVisor a directory swapped for a symlink after the request was mounted, or the container's process ran: %s", out)
+		}
+		if !strings.Contains(out, "a mount comes from outside the workspace") {
+			t.Errorf("the swapped mount should be refused by devkit's runtime guard under gVisor: %s", out)
+		}
+		// And an ordinary bind still works behind that check.
+		if out := sh(`cd ~/workspace && docker run --rm -v "$PWD:/w" -v gv-vol:/v --tmpfs /t --init busybox:1.36 sh -c 'echo x > /w/gv-ok && cat /w/gv-ok' && rm -f gv-ok; docker volume rm gv-vol >/dev/null 2>&1`); !hasLine(out, "x") {
+			t.Errorf("an ordinary workspace bind, volume, tmpfs and --init should work under gVisor: %s", out)
 		}
 	}
 
