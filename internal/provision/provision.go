@@ -114,6 +114,14 @@ func render(src string, p Params) (string, error) {
 		AuditScript:   AuditScript,
 		HostProxyIP:   hostIP,
 		HostProxyPort: hostPort,
+
+		DockerAccount:      DockerAccount,
+		DockerHome:         DockerHome,
+		DockerSocket:       DockerSocket,
+		DockerConfigHelper: DockerConfigHelper,
+		DockerProxy:        dockerProxy(),
+		DockerConfigScript: dockerConfigScript(p.Config),
+		ContainerPreload:   containerPreload,
 	}
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
@@ -236,6 +244,21 @@ HOLD_SLICE="user-$SANDBOX_UID.slice"
 step "holding the sandbox user off the network until the firewall is applied"
 systemctl set-property --runtime "$HOLD_SLICE" IPAddressDeny=any
 systemctl set-property --runtime systemd-resolved.service IPAddressDeny=any
+{{- if .Config.Tools.Containers.Docker}}
+# tools.containers: docker runs the daemon under an account of its own. That
+# account's user manager starts at boot (linger), and its containers' traffic
+# leaves through processes it owns, so it is held like the sandbox user. The
+# account is made here, before anything can start under it; this needs no
+# package and no network.
+DOCKER_ACCOUNT={{.DockerAccount}}
+DOCKER_HOME={{.DockerHome}}
+id "$DOCKER_ACCOUNT" >/dev/null 2>&1 || useradd --system --user-group --no-create-home --home-dir "$DOCKER_HOME" --shell /usr/sbin/nologin "$DOCKER_ACCOUNT"
+grep -q "^$DOCKER_ACCOUNT:" /etc/subuid || usermod --add-subuids 2000000000-2000065535 "$DOCKER_ACCOUNT"
+grep -q "^$DOCKER_ACCOUNT:" /etc/subgid || usermod --add-subgids 2000000000-2000065535 "$DOCKER_ACCOUNT"
+DOCKER_UID="$(id -u "$DOCKER_ACCOUNT")"
+DOCKER_SLICE="user-$DOCKER_UID.slice"
+systemctl set-property --runtime "$DOCKER_SLICE" IPAddressDeny=any
+{{- end}}
 
 # ---- logind stall guard ----
 # Lima's boot script terminates the user's sessions to apply /etc/environment
@@ -459,6 +482,12 @@ create_main_cluster = false
 EOF
 systemctl disable --now postgresql >/dev/null 2>&1 || true
 {{- end}}
+{{- if .Config.Tools.Containers.Docker}}
+# tools.containers: docker. The packages would start the rootful daemon as
+# they install, as root and before the firewall. Masked first, so it never
+# runs; the rootless daemon below does not use these units.
+systemctl mask docker.service docker.socket containerd.service >/dev/null
+{{- end}}
 if [ -n "$WANT_PKGS" ] && [ "$(cat /var/lib/devkit/.packages 2>/dev/null || true)" != "$WANT_PKGS" ]; then
   $APT update
   $APT install -y --no-install-recommends $WANT_PKGS
@@ -477,9 +506,10 @@ step "restricting the kernel attack surface"
 # tools.packages entry can reopen namespaces with working capabilities.
 # kernel.unprivileged_userns_clone, an Ubuntu kernel switch, refuses the
 # namespace itself to unprivileged users, exempted or not; root is
-# unaffected. tools.containers: true leaves it open, because Lima's rootless
-# containerd needs user namespaces. The file is rewritten on every boot, so
-# turning containers off closes them again.
+# unaffected. tools.containers leaves it open, because rootless containers
+# need user namespaces: with true, Lima's containerd runs as the sandbox user;
+# with docker, AppArmor below closes them to every account but Docker's. The
+# file is rewritten on every boot, so turning containers off closes them again.
 cat > /etc/sysctl.d/90-devkit.conf <<'EOF'
 kernel.io_uring_disabled = 2
 kernel.unprivileged_bpf_disabled = 1
@@ -489,7 +519,7 @@ kernel.yama.ptrace_scope = 1
 kernel.kptr_restrict = 1
 kernel.dmesg_restrict = 1
 kernel.apparmor_restrict_unprivileged_userns = 1
-kernel.unprivileged_userns_clone = {{if .Config.Tools.Containers}}1{{else}}0{{end}}
+kernel.unprivileged_userns_clone = {{if .Config.Tools.Containers.Enabled}}1{{else}}0{{end}}
 kernel.sysrq = 0
 EOF
 sysctl -q -p /etc/sysctl.d/90-devkit.conf || true
@@ -497,7 +527,7 @@ sysctl -q -p /etc/sysctl.d/90-devkit.conf || true
 # one at boot, so a kernel that is not Ubuntu's cannot fail here. Where the
 # switch exists it is applied on its own, and a failure to set it aborts.
 if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
-  sysctl -q -w kernel.unprivileged_userns_clone={{if .Config.Tools.Containers}}1{{else}}0{{end}}
+  sysctl -q -w kernel.unprivileged_userns_clone={{if .Config.Tools.Containers.Enabled}}1{{else}}0{{end}}
 else
   note "this kernel has no kernel.unprivileged_userns_clone; unprivileged user namespaces are only restricted by AppArmor"
 fi
@@ -635,6 +665,15 @@ else
   rm -f /etc/profile.d/devkit-proxy.sh /etc/apt/apt.conf.d/99devkit-proxy
   sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d}' /etc/environment
 fi
+# tools.containers: docker. Every kind of session, login shell or not, finds
+# the daemon's socket, by the same two routes as the proxy settings.
+sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^DOCKER_HOST=/d}' /etc/environment
+{{- if .Config.Tools.Containers.Docker}}
+echo "export DOCKER_HOST=unix://{{.DockerSocket}}" > /etc/profile.d/devkit-docker.sh
+echo "DOCKER_HOST=unix://{{.DockerSocket}}" >> /etc/environment
+{{- else}}
+rm -f /etc/profile.d/devkit-docker.sh
+{{- end}}
 # Keep Lima's block at the end of /etc/environment, and never edit inside it:
 # the proxy edits above skip it. Lima's boot script rewrites that block on
 # every boot and, if the file then differs, terminates the user's sessions,
@@ -661,6 +700,210 @@ else
 fi
 systemctl daemon-reload
 systemctl try-restart nix-daemon.service 2>/dev/null || true
+{{- end}}
+{{- if .Config.Tools.Containers.Docker}}
+
+# ---- Docker: rootless, under an account of its own ----
+step "setting up Docker under its own account"
+# tools.containers: docker. The daemon runs as devkit-docker, never as root
+# and never as the sandbox user: rootless Docker needs user namespaces with
+# capabilities in them, and only that account is given them (see AppArmor
+# below). The rootful units stay masked; one an earlier install started is
+# stopped.
+for u in docker.socket docker.service containerd.service; do
+  if systemctl is-active --quiet "$u"; then systemctl stop "$u"; fi
+done
+systemctl mask docker.service docker.socket containerd.service >/dev/null
+DOCKER_GID="$(id -g "$DOCKER_ACCOUNT")"
+SANDBOX_GID="$(id -g "$DEVKIT_USER")"
+# The account's home is traversable, so the sandbox user reaches the socket
+# in run/; the image store under .local stays the account's alone.
+install -d -o "$DOCKER_ACCOUNT" -g "$DOCKER_ACCOUNT" -m 0711 "$DOCKER_HOME"
+install -d -o "$DOCKER_ACCOUNT" -g "$DOCKER_ACCOUNT" -m 0700 "$DOCKER_HOME/.local" "$DOCKER_HOME/.local/share"
+install -d -o "$DOCKER_ACCOUNT" -g "$DOCKER_ACCOUNT" -m 0750 "$DOCKER_HOME/run"
+chmod 0711 "$DOCKER_HOME"
+chmod 0750 "$DOCKER_HOME/run"
+# The socket is outside the account's runtime directory, which logind remakes
+# 0700 at each boot. The default ACL gives the sandbox user read and write on
+# the socket the daemon creates there. Anyone who can use the socket can ask
+# the daemon for anything the account may do; the API is not filtered yet.
+setfacl -m "u:$DEVKIT_USER:rx" -m "d:u:$DEVKIT_USER:rw" "$DOCKER_HOME/run"
+# Traversal only, so the daemon can reach the workspace's path. Nothing in the
+# home is readable this way, and the workspace itself carries no ACL: it is
+# shared by the ID-mapped mount in the daemon's own namespace (see below).
+setfacl -m "u:$DOCKER_ACCOUNT:x" "$DEVKIT_HOME"
+# Its user manager and D-Bus session, which the systemd cgroup driver needs.
+# Its slice is held above, so nothing it starts has network yet.
+loginctl enable-linger "$DOCKER_ACCOUNT"
+
+# User namespaces stay on in the kernel for this account and close to every
+# other. Ubuntu's AppArmor restriction denies capabilities inside a user
+# namespace to every program its profiles do not exempt, and the exemption is
+# by path. The three Docker needs are made executable by the account only,
+# through dpkg-statoverride so that package upgrades keep it; every other
+# exempting profile is disabled, so a package that ships an exempted program
+# opens nothing. What devkit changes is recorded, and turning Docker off
+# undoes exactly that.
+if [ ! -r /sys/kernel/security/apparmor/profiles ]; then
+  warn "AppArmor is not active, so it cannot close user namespaces to the sandbox user; refusing tools.containers: docker"
+  exit 1
+fi
+DOCKER_OVERRIDES=/etc/devkit/docker-statoverrides
+DOCKER_DISABLED=/etc/devkit/docker-apparmor-disabled
+touch "$DOCKER_OVERRIDES" "$DOCKER_DISABLED"
+chmod 644 "$DOCKER_OVERRIDES" "$DOCKER_DISABLED"
+for p in rootlesskit runc slirp4netns; do
+  [ -f "/etc/apparmor.d/$p" ] || continue
+  for b in $(sed -n 's/^profile [^ ]* \(\/[^ ]*\) flags=(unconfined).*/\1/p' "/etc/apparmor.d/$p"); do
+    [ -e "$b" ] || continue
+    # The owner and mode before the first override, to put back later.
+    if ! awk -v p="$b" '$1==p{f=1} END{exit !f}' "$DOCKER_OVERRIDES"; then
+      stat -c '%n %U %G %a' "$b" >> "$DOCKER_OVERRIDES"
+    fi
+    have="$(dpkg-statoverride --list "$b")" || have=""
+    if [ "$have" != "root $DOCKER_ACCOUNT 0750 $b" ]; then
+      dpkg-statoverride --force-all --update --add root "$DOCKER_ACCOUNT" 0750 "$b"
+    fi
+  done
+done
+loaded_profiles="$(sed 's/ ([^()]*)$//' /sys/kernel/security/apparmor/profiles)"
+for f in /etc/apparmor.d/*; do
+  [ -f "$f" ] || continue
+  n="$(basename "$f")"
+  case "$n" in rootlesskit|runc|slirp4netns) continue ;; esac
+  grep -q 'flags=(unconfined)' "$f" && grep -qE '^\s*userns,' "$f" || continue
+  if [ ! -e "/etc/apparmor.d/disable/$n" ] && [ ! -L "/etc/apparmor.d/disable/$n" ]; then
+    ln -s "$f" "/etc/apparmor.d/disable/$n"
+    echo "$n" >> "$DOCKER_DISABLED"
+  fi
+  # A disabled profile is not loaded at the next boot; this one's is unloaded
+  # now, since the boot loaded it before this script ran.
+  names="$(sed -n 's/^[[:space:]]*profile[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$f")"
+  [ -n "$names" ] || names="$(apparmor_parser -N "$f")"
+  loaded=0
+  while IFS= read -r name; do
+    if [ -n "$name" ] && grep -qxF -- "$name" <<< "$loaded_profiles"; then loaded=1; fi
+  done <<< "$names"
+  if [ "$loaded" = 1 ]; then apparmor_parser -R "$f"; fi
+done
+
+# The daemon's settings and its launcher are root's: the account must not be
+# able to change either. Published ports bind to the VM's loopback, and no
+# container process gains privileges through setuid programs, unless a
+# docker run asks otherwise.
+install -d -m 0755 /etc/devkit/docker
+cat > /etc/devkit/docker/daemon.json <<'EOF'
+{"no-new-privileges": true, "ip": "127.0.0.1"}
+EOF
+chmod 644 /etc/devkit/docker/daemon.json
+# The workspace is shared by an ID-mapped mount of it over itself, in the
+# daemon's own mount namespace: through it the account, and so container
+# root, is the sandbox user on disk, and the account's subordinate IDs are
+# the sandbox user's. Nothing changes on disk and nothing outside the
+# workspace is shared.
+subid() { awk -F: -v u="$1" '$1==u {print $2 " " $3; exit}' "$2"; }
+IDMAP="u:$SANDBOX_UID:$DOCKER_UID:1 g:$SANDBOX_GID:$DOCKER_GID:1"
+read -r U_SUB U_SUBN <<< "$(subid "$DEVKIT_USER" /etc/subuid)"
+read -r G_SUB G_SUBN <<< "$(subid "$DEVKIT_USER" /etc/subgid)"
+read -r DU_SUB DU_SUBN <<< "$(subid "$DOCKER_ACCOUNT" /etc/subuid)"
+read -r DG_SUB DG_SUBN <<< "$(subid "$DOCKER_ACCOUNT" /etc/subgid)"
+if [ -n "$U_SUB" ] && [ -n "$DU_SUB" ]; then
+  n="$U_SUBN"; if [ "$DU_SUBN" -lt "$n" ]; then n="$DU_SUBN"; fi
+  IDMAP="$IDMAP u:$U_SUB:$DU_SUB:$n"
+fi
+if [ -n "$G_SUB" ] && [ -n "$DG_SUB" ]; then
+  n="$G_SUBN"; if [ "$DG_SUBN" -lt "$n" ]; then n="$DG_SUBN"; fi
+  IDMAP="$IDMAP g:$G_SUB:$DG_SUB:$n"
+fi
+# The mount must exist before the daemon first starts, so the workspace is
+# made here if devkit's user provisioning has not made it yet.
+WS="$DEVKIT_HOME/{{.WorkspaceDir}}"
+if [ ! -e "$WS" ] && [ ! -L "$WS" ]; then
+  install -d -o "$DEVKIT_USER" -g "$SANDBOX_GID" -m 0755 "$WS"
+fi
+DOCKER_RUN="/run/user/$DOCKER_UID"
+cat > /usr/local/sbin/devkit-dockerd <<EOF
+#!/bin/sh
+# Written by devkit's provisioning on every boot. devkit-dockerd.service runs
+# this as root in a mount namespace of its own (PrivateMounts=yes): it mounts
+# the workspace over itself ID-mapped, then becomes $DOCKER_ACCOUNT and starts
+# rootless Docker.
+set -eu
+W="\$(readlink -f '$WS')"
+if [ ! -d "\$W" ] || [ "\$(stat -c %u "\$W")" != "$SANDBOX_UID" ]; then
+  echo "devkit-dockerd: the workspace \$W is not a directory of the sandbox user's" >&2
+  exit 1
+fi
+mount --bind -o "X-mount.idmap=$IDMAP" "\$W" "\$W"
+exec setpriv --reuid $DOCKER_UID --regid $DOCKER_GID --init-groups \\
+  env HOME=$DOCKER_HOME XDG_RUNTIME_DIR=$DOCKER_RUN DBUS_SESSION_BUS_ADDRESS=unix:path=$DOCKER_RUN/bus \\
+  PATH=/usr/bin:/usr/sbin:/bin:/sbin{{if ne .Config.Network.Mode "none"}} \\
+  HTTP_PROXY={{.DockerProxy}} HTTPS_PROXY={{.DockerProxy}} NO_PROXY=localhost,127.0.0.1{{end}} \\
+  rootlesskit --state-dir=$DOCKER_RUN/dockerd-rootless --net=slirp4netns --mtu=65520 \\
+  --slirp4netns-sandbox=auto --slirp4netns-seccomp=auto --disable-host-loopback=false \\
+  --port-driver=builtin --copy-up=/etc --copy-up=/run --propagation=rslave \\
+  sh -c "rm -f /run/docker /run/containerd /run/xtables.lock; exec dockerd --config-file=/etc/devkit/docker/daemon.json --host=unix://{{.DockerSocket}} --data-root=$DOCKER_HOME/.local/share/docker --exec-root=$DOCKER_RUN/docker --pidfile=$DOCKER_RUN/docker.pid"
+EOF
+chmod 755 /usr/local/sbin/devkit-dockerd
+# No [Install] section: nothing starts the daemon at boot. This script starts
+# it once the firewall is applied and the hold is lifted (see below), so a
+# container that restarts with the VM gets nothing before the firewall.
+cat > /etc/systemd/system/devkit-dockerd.service <<EOF
+[Unit]
+Description=devkit: rootless Docker under the $DOCKER_ACCOUNT account
+Requires=user@$DOCKER_UID.service
+After=user@$DOCKER_UID.service
+
+[Service]
+ExecStart=/usr/local/sbin/devkit-dockerd
+PrivateMounts=yes
+Delegate=yes
+Restart=on-failure
+RestartSec=2
+EOF
+systemctl daemon-reload
+
+# The client's proxy settings, which Docker hands to containers and builds.
+# Run by the sandbox user, from the user provisioning and again by devkit up
+# after it syncs the workspace.
+cat > {{.DockerConfigHelper}} <<'DKEOF'
+{{.DockerConfigScript}}
+DKEOF
+chmod 755 {{.DockerConfigHelper}}
+{{- else}}
+
+# ---- Docker off: undo what tools.containers: docker set up ----
+# The account and its images stay; its daemon stops, and every change devkit
+# recorded to AppArmor and to file modes is put back. The rootful units stay
+# masked while their packages are installed.
+if [ -f /etc/systemd/system/devkit-dockerd.service ]; then
+  step "removing Docker's daemon (tools.containers is not docker)"
+  systemctl stop devkit-dockerd.service
+  rm -f /etc/systemd/system/devkit-dockerd.service /usr/local/sbin/devkit-dockerd
+  systemctl daemon-reload
+fi
+if [ -f /etc/devkit/docker-statoverrides ]; then
+  while read -r path owner group mode; do
+    [ -n "$path" ] || continue
+    if dpkg-statoverride --list "$path" >/dev/null; then dpkg-statoverride --remove "$path"; fi
+    if [ -e "$path" ]; then chown "$owner:$group" "$path"; chmod "$mode" "$path"; fi
+  done < /etc/devkit/docker-statoverrides
+  rm -f /etc/devkit/docker-statoverrides
+fi
+if [ -f /etc/devkit/docker-apparmor-disabled ]; then
+  while read -r n; do
+    [ -n "$n" ] || continue
+    if [ -L "/etc/apparmor.d/disable/$n" ]; then rm -f "/etc/apparmor.d/disable/$n"; fi
+    if [ -f "/etc/apparmor.d/$n" ]; then apparmor_parser -r "/etc/apparmor.d/$n"; fi
+  done < /etc/devkit/docker-apparmor-disabled
+  rm -f /etc/devkit/docker-apparmor-disabled
+fi
+if id {{.DockerAccount}} >/dev/null 2>&1; then
+  loginctl disable-linger {{.DockerAccount}}
+  home_acl="$(getfacl -cp "$DEVKIT_HOME" 2>/dev/null)" || home_acl=""
+  if grep -q '^user:{{.DockerAccount}}:' <<< "$home_acl"; then setfacl -x "u:{{.DockerAccount}}" "$DEVKIT_HOME"; fi
+fi
+rm -f {{.DockerConfigHelper}}
 {{- end}}
 
 # ---- name resolution: who may ask, and through what ----
@@ -775,6 +1018,10 @@ chmod 755 /usr/local/sbin/devkit-firewall
 RESOLVE_UID="$(id -u systemd-resolve 2>/dev/null || true)"
 # The sandbox's rootless containers run processes as its subordinate UIDs.
 SUBUIDS="$(awk -F: -v u="$DEVKIT_USER" '$1==u{print $2"-"($2+$3-1); exit}' /etc/subuid 2>/dev/null || true)"
+{{- if .Config.Tools.Containers.Docker}}
+# Docker's account is held too: its slirp4netns carries every container's
+# traffic, and its user manager starts at boot.
+{{- end}}
 cat > /usr/local/sbin/devkit-boot-hold <<EOF
 #!/bin/sh
 # Loopback is held too: the egress proxy and systemd-resolved listen there,
@@ -789,7 +1036,7 @@ modprobe nf_conntrack 2>/dev/null || true
 for t in iptables ip6tables; do
   \$t -P OUTPUT ACCEPT 2>/dev/null || true
   \$t -F OUTPUT 2>/dev/null || true
-  for who in $SANDBOX_UID $SUBUIDS; do
+  for who in $SANDBOX_UID $SUBUIDS{{if .Config.Tools.Containers.Docker}} $DOCKER_UID{{end}}; do
     \$t -A OUTPUT -m owner --uid-owner \$who -m conntrack --ctdir REPLY -j ACCEPT 2>/dev/null || true
     \$t -A OUTPUT -m owner --uid-owner \$who -j REJECT 2>/dev/null || true
   done
@@ -910,6 +1157,35 @@ systemctl set-property --runtime "$HOLD_SLICE" IPAddressAllow=any
 systemctl revert "$HOLD_SLICE"
 systemctl revert systemd-resolved.service
 systemctl restart systemd-resolved
+{{- if .Config.Tools.Containers.Docker}}
+systemctl set-property --runtime "$DOCKER_SLICE" IPAddressAllow=any
+systemctl revert "$DOCKER_SLICE"
+
+# ---- Docker: started once the firewall decides ----
+# Never earlier: its containers' traffic leaves through slirp4netns under the
+# account's ID, which only the firewall confines. It starts here on every
+# boot and nowhere else, and before the module lock, since the daemon loads
+# what it needs as it starts and creates its default bridge. A daemon that
+# does not answer on its socket aborts provisioning.
+{{- if .Config.VM.LockModulesOn}}
+# What containers will need (bridges, veth pairs, overlay, NAT and the
+# netfilter matches), loaded before the daemon sets up its bridge from inside
+# its user namespace, and because nothing can load after the lock below. A
+# module this kernel does not have is skipped.
+{{.ContainerPreload}}
+{{- end}}
+step "starting Docker"
+systemctl start devkit-dockerd.service
+docker_up=0
+for _ in $(seq 1 90); do
+  if timeout 10 docker --host "unix://{{.DockerSocket}}" info >/dev/null 2>&1; then docker_up=1; break; fi
+  sleep 1
+done
+if [ "$docker_up" != 1 ]; then
+  warn "Docker did not answer on its socket: $(journalctl -u devkit-dockerd.service -n 5 --no-pager -o cat 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+  exit 1
+fi
+{{- end}}
 {{- if .Config.VM.LockModulesOn}}
 
 # ---- lock kernel module loading: the last step that could need a module ----
@@ -921,13 +1197,11 @@ systemctl restart systemd-resolved
 # drop-in, which is applied early in boot and would refuse every module the
 # boot loads after it. vm.lock_modules: false turns it off.
 step "locking kernel module loading"
-{{- if .Config.Tools.Containers}}
+{{- if .Config.Tools.Containers.Containerd}}
 # What rootless containers will need later (bridges, veth pairs, overlay,
 # NAT and the netfilter matches CNI uses), loaded now because nothing can
 # load afterwards. A module this kernel does not have is skipped.
-for m in bridge br_netfilter veth overlay nf_nat nf_conntrack_netlink tap tun xfrm_user xt_MASQUERADE xt_addrtype xt_comment xt_conntrack xt_mark xt_multiport xt_nat xt_owner xt_tcpudp ipt_REJECT ip6t_REJECT iptable_nat ip6table_nat iptable_filter ip6table_filter nft_chain_nat nft_compat; do
-  modprobe -q "$m" 2>/dev/null || true
-done
+{{.ContainerPreload}}
 {{- end}}
 sysctl -q -w kernel.modules_disabled=1
 {{- else}}
@@ -948,6 +1222,11 @@ if [ ! -e "$HOME/{{.WorkspaceDir}}" ]; then
 fi
 {{- else}}
 mkdir -p "$HOME/{{.WorkspaceDir}}"
+{{- end}}
+{{- if .Config.Tools.Containers.Docker}}
+# The proxy Docker's client hands to containers and builds, with the
+# workspace's Compose services exempt. devkit up runs it again after a sync.
+{{.DockerConfigHelper}}
 {{- end}}
 {{- if eq .Config.Tools.Manager "mise"}}
 # Toolchain versions from devkit.yaml. The lockfile beside this file pins
@@ -974,7 +1253,15 @@ type templateData struct {
 	NixVersion, NixArm64SHA, NixAmd64SHA                                       string
 	AuditScript                                                                string
 	HostProxyIP, HostProxyPort                                                 string
+	DockerAccount, DockerHome, DockerSocket, DockerConfigHelper                string
+	DockerProxy, DockerConfigScript, ContainerPreload                          string
 }
+
+// containerPreload loads the kernel modules rootless containers use, in
+// either engine, before module loading is locked.
+const containerPreload = `for m in bridge br_netfilter veth overlay nf_nat nf_conntrack_netlink tap tun xfrm_user xt_MASQUERADE xt_addrtype xt_comment xt_conntrack xt_mark xt_multiport xt_nat xt_owner xt_tcpudp ipt_REJECT ip6t_REJECT iptable_nat ip6table_nat iptable_filter ip6table_filter nft_chain_nat nft_compat; do
+  modprobe -q "$m" 2>/dev/null || true
+done`
 
 // splitHostProxy checks Params.HostProxy against the config and returns its
 // address and port. Host mode needs it and guest mode must not have it, so
