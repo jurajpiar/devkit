@@ -108,6 +108,38 @@ func TestRenderConfigContainers(t *testing.T) {
 	}
 }
 
+// devkit init names container_runtime in a comment after the containers
+// line, so that the first match of an uncommented setting is the one a user
+// (or the e2e test) adds. Each edit in the acceptance test's sequence parses.
+func TestRenderConfigContainerRuntime(t *testing.T) {
+	c := project.Default()
+	c.Name = "demo"
+	out := renderConfig(c)
+	if !strings.Contains(out, "\n  containers: false ") || !strings.Contains(out, "\n  # container_runtime: runc ") ||
+		strings.Index(out, "# container_runtime:") < strings.Index(out, "containers: false") {
+		t.Fatalf("init should name container_runtime in a comment after containers:\n%s", out)
+	}
+	got, err := project.Parse([]byte(out))
+	if err != nil || got.Tools.ContainerRuntime != project.RuntimeRunc {
+		t.Fatalf("the default should parse as runc: %v", err)
+	}
+	cfg := strings.Replace(out, "containers: false", "containers: docker\n  container_runtime: gvisor\n  # was: false", 1)
+	for _, step := range []struct {
+		from, to string
+		want     project.ContainerRuntime
+	}{
+		{"", "", project.RuntimeGvisor},
+		{"container_runtime: gvisor", "container_runtime: gvisor-hostnet", project.RuntimeGvisorHostnet},
+		{"container_runtime: gvisor-hostnet", "container_runtime: runc", project.RuntimeRunc},
+	} {
+		cfg = strings.Replace(cfg, step.from, step.to, 1)
+		got, err := project.Parse([]byte(cfg))
+		if err != nil || got.Tools.ContainerRuntime != step.want {
+			t.Fatalf("want %s: %v\n%s", step.want, err, cfg)
+		}
+	}
+}
+
 func TestSSHBlockAddRemove(t *testing.T) {
 	c := project.Default()
 	c.Name = "demo"

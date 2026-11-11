@@ -149,6 +149,7 @@ func renderConfig(c *project.Config) string {
 		fmt.Fprintf(&b, "  # versions: { node: \"22\", go: \"1.27\" }\n")
 	}
 	fmt.Fprintf(&b, "  containers: false     # true: rootless containerd + nerdctl; docker: rootless Docker under its own account\n")
+	fmt.Fprintf(&b, "  # container_runtime: runc  # with containers: docker, gvisor or gvisor-hostnet runs containers under gVisor (see README: Docker)\n")
 	if len(c.Tools.Packages) > 0 {
 		fmt.Fprintf(&b, "  packages: [%s]\n", strings.Join(c.Tools.Packages, ", "))
 	} else {

@@ -308,6 +308,7 @@ tools:
     node: "22"
     go: "1.27"
   containers: false     # true: rootless containerd + nerdctl; docker: rootless Docker
+  # container_runtime: runc  # with docker: gvisor | gvisor-hostnet, see Docker
   packages: [pkg-config]  # extra apt packages
 
 # install: make deps    # replaces the lockfile-based install devkit picks
@@ -552,6 +553,50 @@ but it is more than the sandbox user can do on its own. Turning
 `containers: docker` off stops the daemon and puts back what devkit changed
 in AppArmor and file modes; the account and its images are kept.
 
+**gVisor.** `tools.container_runtime` chooses what runs Docker's containers.
+`runc`, the default, runs them on the VM's kernel, as Docker normally does.
+`gvisor` makes gVisor's `runsc` the daemon's default runtime: a container's
+system calls reach gVisor's kernel, which runs in user space, and only a small
+filtered set of calls reaches the VM's kernel. It needs `containers: docker`.
+
+```yaml
+tools:
+  containers: docker
+  container_runtime: gvisor   # runc | gvisor | gvisor-hostnet
+```
+
+With `gvisor` a container also gets gVisor's own network stack. Docker's
+built-in DNS does not answer there, so Compose services cannot reach one
+another by name. `gvisor-hostnet` runs `runsc` with `--network=host`: socket
+calls go to the VM kernel's network stack, inside the container's own network
+namespace, so service names work, while file, process and memory calls stay
+behind gVisor. What it gives up is gVisor's network stack: the VM kernel's
+networking code is within a container's reach again. In both modes a container still has
+only the network described above: the firewall and the proxy apply as they do
+to `runc`. `--cap-add NET_ADMIN` configures gVisor's network stack, not the
+VM's.
+
+What it costs, from one run of each on an arm64 Mac, without KVM: starting
+and stopping a container, and file I/O, took about as long as under `runc`;
+spawning processes was about 3.5 times slower. `runsc` runs with
+`--ignore-cgroups`, so memory and CPU limits set on a container are not
+enforced under gVisor. Builds are not covered: `docker build` runs its `RUN`
+steps with BuildKit, which has its own `runc` worker.
+
+The runtime is a default, not a control, until the Docker API is filtered:
+`docker run --runtime=runc` still runs a container on the VM's kernel, since
+both runtimes stay registered. Switching back to `runc` takes gVisor out of
+the daemon's configuration and leaves its files installed.
+
+Root installs gVisor at boot from Google's release bucket,
+`storage.googleapis.com/gvisor/releases/release/<release>/<arch>/`, one
+archive per architecture, with the release and the archive's SHA-512 pinned in
+`internal/provision/provision.go`. The archive is checked before it is
+unpacked, and it is downloaded again only when the pin changes. The pinned
+checksum was taken from the `.sha512` file published beside the archive, at
+the same origin, so it pins the bytes devkit was tested with, not who
+published them.
+
 ## Toolchains
 
 `tools.manager` decides how language toolchains get into the VM. `devkit init`
@@ -657,6 +702,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 | mise | GitHub release pinned in `internal/provision/provision.go` | SHA-256 pinned; the pin was taken from the release's `SHASUMS256.txt` after checking its GPG signature (fingerprint `2485 3EC9 F655 CE80 B48E 6C3A 8B81 C9D1 7413 A06D`). No install script is run |
 | Toolchains via mise | nodejs.org, dl.google.com, GitHub releases, as mise documents per tool | mise's per-tool checks (Node: `SHASUMS256.txt` plus OpenPGP; Go: published `.sha256`; Python, Ruby: GitHub attestations), then pinned by URL and checksum in the VM's `mise.lock` |
 | Nix | releases.nixos.org, version pinned in `internal/provision/provision.go` | SHA-256 pinned, cross-checked against the hash in the official installer |
+| gVisor (`container_runtime: gvisor` or `gvisor-hostnet`) | storage.googleapis.com, release pinned in `internal/provision/provision.go` | SHA-512 pinned, taken from the `.sha512` file beside the archive: it pins the bytes, not the publisher |
 | Nix packages | cache.nixos.org, flake inputs | Nix verifies the cache's Ed25519 signature; `flake.lock` pins every input by hash |
 | apt packages | Ubuntu archives | Ubuntu's signing keys shipped in the image |
 | Project dependencies | Whatever the lockfile says, inside the sandbox | Lockfile integrity hashes, enforced by `npm ci` and friends |
@@ -666,6 +712,8 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 Bump the image deliberately: update the release path and both digests together
 from the `SHA256SUMS` file for that release. Bump mise and Nix the same way:
 verify the upstream signature, then change the version and both hashes.
+gVisor's pin has no signature check behind it: change the release and both
+SHA-512 pins together, from the `.sha512` files for that release.
 
 ## Project layout
 
