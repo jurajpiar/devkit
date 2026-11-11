@@ -3,6 +3,7 @@ package dockerfilter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,7 +74,7 @@ type storedContainer struct {
 		Runtime         string
 		Privileged      bool
 		Binds           []string
-		Mounts          []struct{ Type string }
+		Mounts          []struct{ Type, Source string }
 		PortBindings    map[string][]PortBinding
 		PublishAllPorts bool
 		NetworkMode     string
@@ -84,6 +85,8 @@ type storedContainer struct {
 	Mounts []struct {
 		Type   string
 		Source string
+		// Name is a volume's name (64 hex digits for an anonymous one).
+		Name string
 	}
 	NetworkSettings struct {
 		Networks map[string]json.RawMessage
@@ -169,7 +172,9 @@ func checkStart(f *Filter, ctx context.Context, out *http.Request, _ []byte) ([]
 // mount. The daemon makes a container's mounts itself to copy files
 // through them, without the runtime, so the guard never sees those mounts:
 // a bind source the user has since swapped for a symlink would be followed
-// to wherever it leads. Volumes and tmpfs are the daemon's own and pass.
+// to wherever it leads. A tmpfs is the daemon's own and passes; so does a
+// volume, once the daemon has shown it to be a plain local one (see
+// plainVolumes).
 func checkArchive(f *Filter, ctx context.Context, out *http.Request, _ []byte) ([]byte, error) {
 	i := idSegment(out)
 	c, err := f.inspectContainer(ctx, strings.Split(out.URL.Path, "/")[i])
@@ -179,6 +184,9 @@ func checkArchive(f *Filter, ctx context.Context, out *http.Request, _ []byte) (
 	if err := ownMountsOnly(c); err != nil {
 		return nil, refuse("docker cp is not available for a container with %v: Docker would make that mount itself, outside the runtime guard. "+
 			"The files of a bind mount are in the workspace already; for the rest, use docker exec (for example, docker exec <container> cat <file>)", err)
+	}
+	if err := f.plainVolumes(ctx, c); err != nil {
+		return nil, err
 	}
 	pinContainer(out, i, c.ID)
 	return nil, nil
@@ -204,6 +212,72 @@ func ownMountsOnly(c *storedContainer) error {
 		if err != nil || src != "" && !nameRe.MatchString(src) {
 			return fmt.Errorf("a bind mount (%s)", b)
 		}
+	}
+	return nil
+}
+
+// plainVolumes refuses unless every volume of c is a local volume without
+// options. The filter refuses volume options, but a volume made before it
+// existed may be a local one with type=none,o=bind,device=<path>: a bind
+// mount by another name, which the daemon makes itself for docker cp. Each
+// volume is asked about by name, the daemon's own Mounts list first and the
+// container's settings after, as in ownMountsOnly.
+func (f *Filter) plainVolumes(ctx context.Context, c *storedContainer) error {
+	var names []string
+	for _, m := range c.Mounts {
+		if m.Type == "volume" {
+			if !nameRe.MatchString(m.Name) {
+				return refuse("docker cp is not available for a container with a volume mount the filter cannot name (%q)", m.Name)
+			}
+			names = append(names, m.Name)
+		}
+	}
+	for _, m := range c.HostConfig.Mounts {
+		if m.Type == "volume" && m.Source != "" {
+			names = append(names, m.Source)
+		}
+	}
+	for _, b := range c.HostConfig.Binds {
+		if src, _, err := splitBind(b); err == nil && src != "" {
+			names = append(names, src)
+		}
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		if err := f.plainVolume(ctx, n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *Filter) plainVolume(ctx context.Context, name string) error {
+	if !nameRe.MatchString(name) {
+		return refuse("docker cp is not available for a container with the volume %q, whose name the filter does not recognise", name)
+	}
+	var v struct {
+		Name    string
+		Driver  string
+		Options map[string]string
+	}
+	err := f.inspect(ctx, "the volume "+name, "/volumes/"+url.PathEscape(name), &v)
+	if a := (*answer)(nil); errors.As(err, &a) {
+		return refuse("the filter could not look at the volume %s first: the daemon answered %d", name, a.status)
+	}
+	if err != nil {
+		return err
+	}
+	if v.Name != name {
+		return refuse("the daemon answered for the volume %q when asked about %s", v.Name, name)
+	}
+	if v.Driver != "local" || len(v.Options) != 0 {
+		return refuse("docker cp is not available for a container with the volume %s, which has the driver %q and options %v, having been made before devkit refused them: "+
+			"Docker would make that mount itself, outside the runtime guard. Use docker exec (for example, docker exec <container> cat <file>), "+
+			"or move the data to a volume made through devkit", name, v.Driver, v.Options)
 	}
 	return nil
 }

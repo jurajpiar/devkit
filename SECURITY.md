@@ -270,6 +270,10 @@ and a new proc at `/proc/sandbox-proc`.
 `docker cp` is refused for a container with a bind mount: to copy, the daemon
 makes the container's mounts itself, outside the runtime and so outside the
 guard, and followed a bind source swapped for a symlink after the check.
+For the same reason it is refused for a container with a volume that the
+daemon does not show, when asked by name, to be a `local` one without
+options: a volume made before the filter existed may be
+`type=none,o=bind,device=<path>`, a bind mount by another name.
 
 Limits: under gVisor, `runsc create` returns while the gofer and the sandbox
 are still building their mount tables. After `create` the guard waits, up to

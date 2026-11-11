@@ -507,8 +507,10 @@ mount is refused. To copy files, the daemon makes the container's mounts
 itself, without the runtime and so without the check below, and it would
 follow a bind source you had since replaced with a symlink. The files of a
 bind mount are in the workspace already; for the rest, `docker exec
-<container> cat <file>` or `tar` works. Containers with only volumes are
-copied to and from as usual.
+<container> cat <file>` or `tar` works. Containers with only tmpfs mounts
+and plain volumes are copied to and from as usual; a volume made before
+devkit, with a driver other than `local` or with options (which can bind a
+path), is refused like a bind mount.
 
 The filter checks the request, but the daemon resolves a bind's path later,
 when the container starts, and the workspace is yours to rearrange in

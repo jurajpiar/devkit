@@ -20,6 +20,12 @@ func (h *harness) setInspect(status int, body string) {
 	h.daemon.inspectStatus, h.daemon.inspect = status, body
 }
 
+func (h *harness) setVolumes(v map[string]string) {
+	h.daemon.mu.Lock()
+	defer h.daemon.mu.Unlock()
+	h.daemon.volumes = v
+}
+
 func (h *harness) setNetworks(n map[string]string) {
 	h.daemon.mu.Lock()
 	defer h.daemon.mu.Unlock()
@@ -30,7 +36,7 @@ func (h *harness) setNetworks(n map[string]string) {
 func (h *harness) calls() []received {
 	var out []received
 	for _, r := range h.daemon.requests() {
-		if r.Method == "GET" && (strings.HasSuffix(r.URI, "/json") || strings.HasPrefix(r.URI, "/networks/")) {
+		if r.Method == "GET" && (strings.HasSuffix(r.URI, "/json") || strings.HasPrefix(r.URI, "/networks/") || strings.HasPrefix(r.URI, "/volumes/")) {
 			continue
 		}
 		out = append(out, r)
@@ -104,18 +110,76 @@ func TestArchiveRefusedWithABindMount(t *testing.T) {
 	}
 	allowed := map[string]string{
 		"no mounts":           `{"Id":"` + ctrID + `","HostConfig":{"Binds":null},"Mounts":[]}`,
-		"volumes and a tmpfs": `{"Id":"` + ctrID + `","HostConfig":{"Binds":["data:/d","/anon","/anon2:ro"],"Mounts":[{"Type":"volume"},{"Type":"tmpfs"}]},"Mounts":[{"Type":"volume","Source":"/var/lib/x/volumes/data/_data"},{"Type":"tmpfs","Source":""}]}`,
+		"volumes and a tmpfs": `{"Id":"` + ctrID + `","HostConfig":{"Binds":["data:/d","/anon","/anon2:ro"],"Mounts":[{"Type":"volume"},{"Type":"tmpfs"}]},"Mounts":[{"Type":"volume","Source":"/var/lib/x/volumes/data/_data","Name":"data"},{"Type":"tmpfs","Source":""}]}`,
 	}
 	for name, insp := range allowed {
 		for _, method := range []string{"GET", "HEAD", "PUT"} {
 			h := newHarness(t)
 			h.setInspect(200, insp)
+			h.setVolumes(map[string]string{"data": `{"Name":"data","Driver":"local","Options":null}`})
 			if st, body := h.raw(t, method, "/v1.52/containers/web/archive?path=/s", ""); st == http.StatusForbidden {
 				t.Errorf("%s, %s: %d %s", name, method, st, body)
 			}
 			if got := h.daemon.last(t); got.Method != method || got.URI != "/v1.52/containers/"+ctrID+"/archive?path=%2Fs" {
 				t.Errorf("%s, %s: forwarded %s %s, want the full ID", name, method, got.Method, got.URI)
 			}
+		}
+	}
+}
+
+// docker cp asks the daemon about each volume of the container and passes
+// only a local one without options: one made before the filter, with
+// type=none,o=bind,device=<path>, is a bind mount the daemon would make
+// itself. Any answer other than such a volume refuses, and nothing is
+// forwarded.
+func TestArchiveChecksVolumes(t *testing.T) {
+	anon := strings.Repeat("ef", 32)
+	inMounts := `{"Id":"` + ctrID + `","HostConfig":{},"Mounts":[{"Type":"volume","Name":"data","Source":"/v/data/_data"},{"Type":"volume","Name":"` + anon + `"}]}`
+	plain := map[string]string{
+		"data": `{"Name":"data","Driver":"local","Options":{}}`,
+		anon:   `{"Name":"` + anon + `","Driver":"local","Options":null}`,
+	}
+	with := func(name, body string) map[string]string {
+		m := map[string]string{}
+		for k, v := range plain {
+			m[k] = v
+		}
+		if body == "" {
+			delete(m, name)
+		} else {
+			m[name] = body
+		}
+		return m
+	}
+	for _, c := range []struct {
+		name    string
+		insp    string
+		volumes map[string]string
+		ok      bool
+	}{
+		{"plain local volumes", inMounts, plain, true},
+		{"a bind volume", inMounts, with("data", `{"Name":"data","Driver":"local","Options":{"type":"none","o":"bind","device":"/etc"}}`), false},
+		{"an anonymous volume with options", inMounts, with(anon, `{"Name":"`+anon+`","Driver":"local","Options":{"device":"/etc"}}`), false},
+		{"another driver", inMounts, with("data", `{"Name":"data","Driver":"nfs","Options":null}`), false},
+		{"no driver", inMounts, with("data", `{"Name":"data","Options":null}`), false},
+		{"another volume's answer", inMounts, with("data", `{"Name":"other","Driver":"local"}`), false},
+		{"an unparsable answer", inMounts, with("data", `{"Name":`), false},
+		{"no such volume", inMounts, with("data", ""), false},
+		{"a volume with no name", `{"Id":"` + ctrID + `","HostConfig":{},"Mounts":[{"Type":"volume","Source":"/v/x/_data"}]}`, plain, false},
+		{"a named volume in Binds only", `{"Id":"` + ctrID + `","HostConfig":{"Binds":["data:/d"]},"Mounts":[]}`,
+			with("data", `{"Name":"data","Driver":"local","Options":{"o":"bind"}}`), false},
+		{"a named volume in HostConfig.Mounts only", `{"Id":"` + ctrID + `","HostConfig":{"Mounts":[{"Type":"volume","Source":"data"}]},"Mounts":[]}`,
+			with("data", `{"Name":"data","Driver":"local","Options":{"o":"bind"}}`), false},
+	} {
+		h := newHarness(t)
+		h.setInspect(200, c.insp)
+		h.setVolumes(c.volumes)
+		st, body := h.raw(t, "GET", "/v1.52/containers/web/archive?path=/s", "")
+		if (st != http.StatusForbidden) != c.ok {
+			t.Errorf("%s: %d %s", c.name, st, body)
+		}
+		if got := h.calls(); !c.ok && len(got) != 0 {
+			t.Errorf("%s: forwarded %v", c.name, got)
 		}
 	}
 }

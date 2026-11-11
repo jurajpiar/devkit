@@ -49,6 +49,8 @@ type fakeDaemon struct {
 	// networks, when set, answers GET /networks/{name}: the body for each
 	// name, and 404 for any other.
 	networks map[string]string
+	// volumes, when set, answers GET /volumes/{name} the same way.
+	volumes map[string]string
 }
 
 func newFakeDaemon(t *testing.T, dir string) *fakeDaemon {
@@ -82,7 +84,7 @@ func (d *fakeDaemon) serve(c net.Conn) {
 		body, _ := io.ReadAll(req.Body)
 		d.mu.Lock()
 		d.got = append(d.got, received{req.Method, req.RequestURI, req.Header, body})
-		up, insp, st, nets := d.upgraded, d.inspect, d.inspectStatus, d.networks
+		up, insp, st, nets, vols := d.upgraded, d.inspect, d.inspectStatus, d.networks, d.volumes
 		d.mu.Unlock()
 		if st == 0 {
 			st = 200
@@ -96,11 +98,16 @@ func (d *fakeDaemon) serve(c net.Conn) {
 			fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", st, http.StatusText(st), len(insp), insp)
 			continue
 		}
-		if segs := strings.Split(req.URL.Path, "/"); req.Method == "GET" && nets != nil && len(segs) == 3 && segs[1] == "networks" {
-			body, ok := nets[segs[2]]
+		if segs := strings.Split(req.URL.Path, "/"); req.Method == "GET" && len(segs) == 3 &&
+			(nets != nil && segs[1] == "networks" || vols != nil && segs[1] == "volumes") {
+			objs := nets
+			if segs[1] == "volumes" {
+				objs = vols
+			}
+			body, ok := objs[segs[2]]
 			code := 200
 			if !ok {
-				code, body = 404, `{"message":"network `+segs[2]+` not found"}`
+				code, body = 404, `{"message":"`+strings.TrimSuffix(segs[1], "s")+` `+segs[2]+` not found"}`
 			}
 			fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", code, http.StatusText(code), len(body), body)
 			continue
