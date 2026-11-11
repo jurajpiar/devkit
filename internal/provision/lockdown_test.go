@@ -32,15 +32,16 @@ func sysctlDropIn(t *testing.T, s string) string {
 
 // Unprivileged user namespaces are refused outright, not only stripped of
 // capabilities by AppArmor, whose stock profiles exempt programs a
-// tools.packages entry can install. Rootless containers need them.
+// tools.packages entry can install. Rootless containers, in either mode,
+// need them.
 func TestUserNamespacesClosedUnlessContainers(t *testing.T) {
-	for _, containers := range []bool{false, true} {
+	for _, containers := range allContainers {
 		s, err := System(params(func(c *project.Config) { c.Tools.Containers = containers }))
 		if err != nil {
 			t.Fatal(err)
 		}
 		want := "0"
-		if containers {
+		if containers.Enabled() {
 			want = "1"
 		}
 		d := sysctlDropIn(t, s)
@@ -64,10 +65,13 @@ else`
 	}
 }
 
+// allContainers is every value of tools.containers.
+var allContainers = []project.Containers{project.ContainersOff, project.ContainersContainerd, project.ContainersDocker}
+
 // lockVariants is every network mode and manager, guest and host
-// enforcement, with and without containers.
+// enforcement, with each container engine and without.
 func lockVariants(t *testing.T, mod func(*project.Config), check func(t *testing.T, s string)) {
-	for _, containers := range []bool{false, true} {
+	for _, containers := range allContainers {
 		for _, mode := range []string{project.NetworkAllowlist, project.NetworkOpen, project.NetworkNone} {
 			for _, mgr := range []string{project.ManagerMise, project.ManagerNix, project.ManagerNone} {
 				for _, host := range []bool{false, true} {
@@ -78,8 +82,8 @@ func lockVariants(t *testing.T, mod func(*project.Config), check func(t *testing
 					if host {
 						name += "-host"
 					}
-					if containers {
-						name += "-containers"
+					if containers.Enabled() {
+						name += "-containers-" + string(containers)
 					}
 					t.Run(name, func(t *testing.T) {
 						set := func(c *project.Config) {
@@ -200,9 +204,11 @@ func TestLockdownScriptsParse(t *testing.T) {
 	dir := t.TempDir()
 	off := false
 	for name, p := range map[string]Params{
-		"containers":      params(func(c *project.Config) { c.Tools.Containers = true }),
+		"containers":      params(func(c *project.Config) { c.Tools.Containers = project.ContainersContainerd }),
+		"docker":          params(func(c *project.Config) { c.Tools.Containers = project.ContainersDocker }),
+		"docker-host":     hostParams(func(c *project.Config) { c.Tools.Containers = project.ContainersDocker }),
 		"lock-off":        params(func(c *project.Config) { c.VM.LockModules = &off }),
-		"containers-host": hostParams(func(c *project.Config) { c.Tools.Containers = true }),
+		"containers-host": hostParams(func(c *project.Config) { c.Tools.Containers = project.ContainersContainerd }),
 	} {
 		s, err := System(p)
 		if err != nil {

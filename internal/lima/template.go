@@ -93,7 +93,7 @@ env:
 # Rootless containers inside the VM are opt-in.
 containerd:
   system: false
-  user: {{.Config.Tools.Containers}}
+  user: {{.Config.Tools.Containers.Containerd}}
 
 ssh:
   localPort: {{.Config.SSHPort}}
