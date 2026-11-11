@@ -947,8 +947,10 @@ exec setpriv --reuid $DOCKER_UID --regid $DOCKER_GID --init-groups \\
 EOF
 chmod 755 /usr/local/sbin/devkit-dockerd
 # No [Install] section: nothing starts the daemon at boot. This script starts
-# it once the firewall is applied and the hold is lifted (see below), so a
-# container that restarts with the VM gets nothing before the firewall.
+# it once the firewall is applied and the hold is lifted (see below), or, when
+# devkit's guest binary is not installed yet, the install step does once this
+# script has finished, so a container that restarts with the VM gets nothing
+# before the firewall.
 cat > /etc/systemd/system/devkit-dockerd.service <<EOF
 [Unit]
 Description=devkit: rootless Docker under the $DOCKER_ACCOUNT account
@@ -1326,11 +1328,30 @@ rm -f "$f"
 want="$(cat /etc/devkit/egress.sha256)"
 got="$(sha256sum "$tmp" | awk '{print $1}')"
 if [ -n "$want" ] && [ "$got" = "$want" ]; then
+{{- if .Config.Tools.Containers.Docker}}
+  prev="$(sha256sum {{.EgressBinary}} 2>/dev/null | awk '{print $1}')"
+{{- end}}
   install -m 755 -o root -g root "$tmp" {{.EgressBinary}}
 {{- if or (ne .Config.Network.Mode "none") (not .Config.Tools.Containers.Docker)}}
   systemctl restart {{.EgressService}} || true
 {{- end}}
 {{- if .Config.Tools.Containers.Docker}}
+  # Every runtime in daemon.json is this binary under a guard's name, so the
+  # system script starts the daemon only once it is installed; when it was
+  # missing or another build, the daemon starts here. Only once this boot's
+  # provisioning has finished: /run is emptied at every boot and only the
+  # firewall writes firewall-at there, after provisioning has removed the
+  # stamp, which it writes back as its last step, after the hold is lifted.
+  # Both present means the firewall decides, as when provisioning starts it.
+  # A binary that changed under a running daemon gets a restart, so the
+  # daemon never keeps probing what it found at its start.
+  if [ -f /run/devkit/firewall-at ] && [ -s /etc/devkit/provision.id ]; then
+    if ! systemctl is-active --quiet devkit-dockerd.service; then
+      systemctl start devkit-dockerd.service || true
+    elif [ "$prev" != "$got" ]; then
+      systemctl restart devkit-dockerd.service || true
+    fi
+  fi
   # The binary is Docker's API filter too, started afresh on its next
   # connection; the runtime guard runs it anew for each container.
   systemctl stop {{.FilterUnit}}.service || true
@@ -1392,33 +1413,42 @@ systemctl revert "$DOCKER_SLICE"
 
 # ---- Docker: started once the firewall decides ----
 # Never earlier: its containers' traffic leaves through slirp4netns under the
-# account's ID, which only the firewall confines. It starts here on every
-# boot and nowhere else, and before the module lock, since the daemon loads
-# what it needs as it starts and creates its default bridge. A daemon that
-# does not answer on its socket aborts provisioning.
+# account's ID, which only the firewall confines. It starts here, before the
+# module lock, since the daemon loads what it needs as it starts and creates
+# its default bridge. A daemon that does not answer on its socket aborts
+# provisioning.
 {{- if .Config.VM.LockModulesOn}}
 # What containers will need (bridges, veth pairs, overlay, NAT and the
 # netfilter matches), loaded before the daemon sets up its bridge from inside
 # its user namespace, and because nothing can load after the lock below. A
-# module this kernel does not have is skipped.
+# module this kernel does not have is skipped. Loaded whether or not the
+# daemon starts here: when it starts later, from the install step, the lock
+# is already on.
 {{.ContainerPreload}}
 {{- end}}
-step "starting Docker"
-systemctl start devkit-dockerd.service
-docker_up=0
-for _ in $(seq 1 90); do
-  if timeout 10 docker --host "unix://{{.DockerSocket}}" info >/dev/null 2>&1; then docker_up=1; break; fi
-  sleep 1
-done
-if [ "$docker_up" != 1 ]; then
-  warn "Docker did not answer on its socket: $(journalctl -u devkit-dockerd.service -n 5 --no-pager -o cat 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
-  exit 1
-fi
-# Then through the API filter, as the sandbox user reaches it, so that a
-# broken filter fails provisioning. On a first boot the guest binary that
-# carries the filter is not installed yet: devkit up installs it and waits
-# for the filter then.
-if [ "$(sha256sum {{.EgressBinary}} 2>/dev/null | awk '{print $1}')" = "$(cat /etc/devkit/egress.sha256)" ]; then
+# Every runtime in daemon.json is devkit's guest binary under a guard's name.
+# On a first boot, or after a devkit upgrade, the binary installed here is
+# missing or not the one this script expects: devkit up installs it after
+# this script, and a daemon started now would find its runtimes dangling
+# (with gVisor it gives up and crashes). The daemon then starts from the
+# install step instead, once the binary is in place, and never here.
+GUEST_WANT="$(cat /etc/devkit/egress.sha256)"
+GUEST_OK=0
+if [ -n "$GUEST_WANT" ] && [ "$(sha256sum {{.EgressBinary}} 2>/dev/null | awk '{print $1}')" = "$GUEST_WANT" ]; then GUEST_OK=1; fi
+if [ "$GUEST_OK" = 1 ]; then
+  step "starting Docker"
+  systemctl start devkit-dockerd.service
+  docker_up=0
+  for _ in $(seq 1 90); do
+    if timeout 10 docker --host "unix://{{.DockerSocket}}" info >/dev/null 2>&1; then docker_up=1; break; fi
+    sleep 1
+  done
+  if [ "$docker_up" != 1 ]; then
+    warn "Docker did not answer on its socket: $(journalctl -u devkit-dockerd.service -n 5 --no-pager -o cat 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+    exit 1
+  fi
+  # Then through the API filter, as the sandbox user reaches it, so that a
+  # broken filter fails provisioning.
   filter_up=0
   for _ in $(seq 1 30); do
     if timeout 10 setpriv --reuid="$SANDBOX_UID" --regid="$SANDBOX_GID" --init-groups curl -q -fsS -o /dev/null --unix-socket {{.FilterSocket}} http://docker/info; then filter_up=1; break; fi
@@ -1429,7 +1459,7 @@ if [ "$(sha256sum {{.EgressBinary}} 2>/dev/null | awk '{print $1}')" = "$(cat /e
     exit 1
   fi
 else
-  note "Docker's API filter starts once devkit up has installed devkit's guest binary"
+  note "Docker starts once devkit up has installed devkit's guest binary"
 fi
 {{- end}}
 {{- if .Config.VM.LockModulesOn}}
@@ -1510,7 +1540,12 @@ type templateData struct {
 
 // containerPreload loads the kernel modules rootless containers use, in
 // either engine, before module loading is locked.
-const containerPreload = `for m in bridge br_netfilter veth overlay nf_nat nf_conntrack_netlink tap tun xfrm_user xt_MASQUERADE xt_addrtype xt_comment xt_conntrack xt_mark xt_multiport xt_nat xt_owner xt_tcpudp ipt_REJECT ip6t_REJECT iptable_nat ip6table_nat iptable_filter ip6table_filter nft_chain_nat nft_compat; do
+//
+// On a first boot under Docker the daemon starts after the lock, so this is
+// everything it loads as it starts as well: llc and stp under the bridge,
+// conntrack, and the nf_tables expressions iptables-nft uses for the
+// daemon's own rules, besides the xt_ matches.
+const containerPreload = `for m in bridge llc stp br_netfilter veth overlay nf_conntrack nf_nat nf_conntrack_netlink tap tun xfrm_user nf_tables nft_ct nft_masq nft_nat nft_reject nft_reject_inet xt_MASQUERADE xt_addrtype xt_comment xt_conntrack xt_mark xt_multiport xt_nat xt_owner xt_tcpudp ipt_REJECT ip6t_REJECT iptable_nat ip6table_nat iptable_filter ip6table_filter nft_chain_nat nft_compat; do
   modprobe -q "$m" 2>/dev/null || true
 done`
 

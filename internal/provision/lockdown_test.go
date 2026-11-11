@@ -14,7 +14,7 @@ const (
 	moduleLock    = "\nsysctl -q -w kernel.modules_disabled=1\n"
 	moduleLockOff = `note "kernel module loading is not locked (vm.lock_modules: false)"`
 	// The first and last modules of the container preload list.
-	preloadFirst = "bridge br_netfilter veth overlay"
+	preloadFirst = "bridge llc stp br_netfilter veth overlay"
 	preloadLast  = "nft_chain_nat nft_compat"
 )
 
@@ -186,7 +186,8 @@ func TestModulePreloadOnlyWithContainers(t *testing.T) {
 		if first < 0 || last < first || last > lock {
 			t.Fatalf("preload: first=%d last=%d lock=%d", first, last, lock)
 		}
-		list := "bridge br_netfilter veth overlay nf_nat nf_conntrack_netlink tap tun xfrm_user " +
+		list := "bridge llc stp br_netfilter veth overlay nf_conntrack nf_nat nf_conntrack_netlink tap tun xfrm_user " +
+			"nf_tables nft_ct nft_masq nft_nat nft_reject nft_reject_inet " +
 			"xt_MASQUERADE xt_addrtype xt_comment xt_conntrack xt_mark xt_multiport xt_nat xt_owner xt_tcpudp " +
 			"ipt_REJECT ip6t_REJECT iptable_nat ip6table_nat iptable_filter ip6table_filter nft_chain_nat nft_compat"
 		if !strings.Contains(s, "for m in "+list+"; do\n") {

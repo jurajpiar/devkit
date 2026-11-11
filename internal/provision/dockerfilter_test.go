@@ -181,7 +181,6 @@ func TestDockerFilterUnits(t *testing.T) {
 		tail := s[wait:stamp]
 		for _, want := range []string{
 			`timeout 10 setpriv --reuid="$SANDBOX_UID" --regid="$SANDBOX_GID" ` + filterWait,
-			`if [ "$(sha256sum ` + EgressBinary + ` 2>/dev/null | awk '{print $1}')" = "$(cat /etc/devkit/egress.sha256)" ]; then`,
 			"if [ \"$filter_up\" != 1 ]; then\n    warn \"Docker's API filter did not answer",
 		} {
 			if !strings.Contains(tail, want) {

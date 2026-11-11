@@ -277,9 +277,11 @@ func installProxy(ctx context.Context, cfg *project.Config, bin []byte, sha stri
 }
 
 // waitForGuestBinary waits for the egress proxy when the VM has network,
-// and for Docker's API filter when it has Docker. On a first boot the
-// filter could not be checked by provisioning, which ran before the binary
-// was installed: this is where a broken filter fails devkit up then.
+// and for Docker through its API filter when it has Docker. On a first boot,
+// or after an upgrade, provisioning ran before this binary was installed and
+// left Docker unstarted (its runtimes are this binary); the install step
+// starts it, and this is where a daemon or filter that does not come up
+// fails devkit up then.
 func waitForGuestBinary(ctx context.Context, cfg *project.Config) error {
 	if cfg.Network.Mode != project.NetworkNone {
 		if err := waitForService(ctx, cfg.VMName()); err != nil {
@@ -292,9 +294,16 @@ func waitForGuestBinary(ctx context.Context, cfg *project.Config) error {
 	return nil
 }
 
+// dockerWait bounds devkit up's wait for Docker through its API filter.
+const dockerWait = 120 * time.Second
+
 func waitForDockerFilter(ctx context.Context, name string) error {
+	// docker version fails unless the daemon answers through the filter.
 	check := "timeout 10 docker --host unix://" + provision.FilterSocket + " version >/dev/null 2>&1 && echo filter-ok"
-	deadline := time.Now().Add(60 * time.Second)
+	// The daemon may be cold-starting here (the install step just started
+	// it), so this allows what provisioning allows the start and the
+	// filter together.
+	deadline := time.Now().Add(dockerWait)
 	for time.Now().Before(deadline) {
 		out, _ := lima.Exec(ctx, name, check)
 		if strings.TrimSpace(out) == "filter-ok" {
@@ -302,8 +311,9 @@ func waitForDockerFilter(ctx context.Context, name string) error {
 		}
 		time.Sleep(time.Second)
 	}
-	out, _ := lima.Exec(ctx, name, "systemctl status --no-pager "+provision.FilterUnit+".socket "+provision.FilterUnit+".service 2>&1 | tail -n 20")
-	return fmt.Errorf("Docker's API filter did not answer inside the VM:\n%s", out)
+	out, _ := lima.Exec(ctx, name, "systemctl status --no-pager devkit-dockerd.service "+provision.FilterUnit+".socket "+provision.FilterUnit+".service 2>&1 | tail -n 30; "+
+		"journalctl -u devkit-dockerd.service -n 10 --no-pager -o cat 2>/dev/null")
+	return fmt.Errorf("Docker did not answer through its API filter inside the VM within %s:\n%s", dockerWait, out)
 }
 
 func waitForService(ctx context.Context, name string) error {

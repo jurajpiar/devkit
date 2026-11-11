@@ -23,24 +23,27 @@ import (
 // pinned here. gVisor left it as it was before gVisor existed; the API
 // filter and the runtime guard changed it (daemon.json registers the guard
 // as the default runtime), so these are the filter branch's render, and
-// Docker VMs provisioned before it are reported stale once.
+// Docker VMs provisioned before it are reported stale once. They changed
+// again when the daemon's start became conditional on devkit's guest binary
+// being installed (else the install step starts it) and the preload list
+// grew.
 func TestDockerRuncScriptIsPinned(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":      "222bf1d97d01ff8f",
-		"allowlist-mise-host": "b9192ef2ee6bd8db",
-		"allowlist-nix":       "065a22b6c5d914cc",
-		"allowlist-nix-host":  "5f73f91e5991002f",
-		"allowlist-none":      "36667c68c1de014f",
-		"allowlist-none-host": "60bff9cf89d155b4",
-		"none-mise":           "bce0b80f7b0d7e4e",
-		"none-nix":            "b66d4551f5c28d14",
-		"none-none":           "0911c5d428558aba",
-		"open-mise":           "eb719b16f0b70a19",
-		"open-mise-host":      "7549baecc325a43e",
-		"open-nix":            "b920f261659b7740",
-		"open-nix-host":       "8e30d81c22ba0b7c",
-		"open-none":           "215e075ed9d594b5",
-		"open-none-host":      "a947c4b2735a0586",
+		"allowlist-mise":      "b8510f6ddd05668d",
+		"allowlist-mise-host": "ea76b1c0bc91acdc",
+		"allowlist-nix":       "b3c889b9f057d5d3",
+		"allowlist-nix-host":  "9c59df72ba8fc5e9",
+		"allowlist-none":      "24fe9bfc85b9f5ef",
+		"allowlist-none-host": "9245d332b2831302",
+		"none-mise":           "fcce7f30a2a38fd1",
+		"none-nix":            "c9543322dc3fc3f8",
+		"none-none":           "bf50bd6ca80d3542",
+		"open-mise":           "a09eae8468930f5e",
+		"open-mise-host":      "c5e87e7d3fa644af",
+		"open-nix":            "9eec8b615630652c",
+		"open-nix-host":       "77816f0325fa3b68",
+		"open-none":           "40e8e3de8829c119",
+		"open-none-host":      "d7f3063b4f43f403",
 	}
 	var got []string
 	dockerVariants(t, func(t *testing.T, p Params, s string) {

@@ -69,10 +69,15 @@ func index(t *testing.T, s, want string) int {
 }
 
 const (
-	dockerHold      = `systemctl set-property --runtime "$DOCKER_SLICE" IPAddressDeny=any`
-	dockerLift      = `systemctl set-property --runtime "$DOCKER_SLICE" IPAddressAllow=any`
-	dockerRevert    = `systemctl revert "$DOCKER_SLICE"`
-	dockerStart     = "\nsystemctl start devkit-dockerd.service\n"
+	dockerHold   = `systemctl set-property --runtime "$DOCKER_SLICE" IPAddressDeny=any`
+	dockerLift   = `systemctl set-property --runtime "$DOCKER_SLICE" IPAddressAllow=any`
+	dockerRevert = `systemctl revert "$DOCKER_SLICE"`
+	dockerStart  = "\n  systemctl start devkit-dockerd.service\n"
+	// The daemon starts in the system script only when devkit's guest binary,
+	// which every runtime in daemon.json is, is installed and the expected one.
+	dockerGuestOK   = `if [ -n "$GUEST_WANT" ] && [ "$(sha256sum ` + EgressBinary + ` 2>/dev/null | awk '{print $1}')" = "$GUEST_WANT" ]; then GUEST_OK=1; fi`
+	dockerGuarded   = "\nif [ \"$GUEST_OK\" = 1 ]; then\n  step \"starting Docker\"\n"
+	dockerDeferred  = "\nelse\n  note \"Docker starts once devkit up has installed devkit's guest binary\"\nfi\n"
 	dockerLinger    = `loginctl enable-linger "$DOCKER_ACCOUNT"`
 	dockerMask      = "systemctl mask docker.service docker.socket containerd.service >/dev/null"
 	dockerUnit      = "cat > /etc/systemd/system/devkit-dockerd.service <<EOF\n"
@@ -162,6 +167,19 @@ func TestDockerOrdering(t *testing.T) {
 		if !(fw < revert && revert < restart && restart < lift && lift < dRevert && dRevert < start && start < wait && wait < filterWait && filterWait < lock && lock < stamp) {
 			t.Errorf("order: firewall=%d revert=%d resolved=%d lift=%d drevert=%d start=%d wait=%d filter=%d lock=%d stamp=%d", fw, revert, restart, lift, dRevert, start, wait, filterWait, lock, stamp)
 		}
+		// The start, its waits and the filter's are all under the condition
+		// that devkit's guest binary is installed and the expected one;
+		// otherwise the script only says so, before the module lock.
+		guestOK, guarded, deferred := index(t, s, dockerGuestOK), index(t, s, dockerGuarded), index(t, s, dockerDeferred)
+		if !(dRevert < guestOK && guestOK < guarded && guarded < start && filterWait < deferred && (lock < 0 || deferred < lock)) {
+			t.Errorf("guard: drevert=%d test=%d if=%d start=%d filter=%d else=%d lock=%d", dRevert, guestOK, guarded, start, filterWait, deferred, lock)
+		}
+		if strings.Contains(s[guarded:deferred], "\nfi\n") || strings.Contains(s[guarded:deferred], "\nelse\n") {
+			t.Errorf("the start must stay inside the condition:\n%s", s[guarded:deferred])
+		}
+		if !strings.Contains(s, `GUEST_WANT="$(cat /etc/devkit/egress.sha256)"`+"\nGUEST_OK=0\n"+dockerGuestOK+dockerGuarded) {
+			t.Error("GUEST_OK must start at 0 and be set by the hash test just before the start")
+		}
 		// The unit exists before it starts, and a workspace before the
 		// daemon's mount of it.
 		if unit, ws := index(t, s, dockerUnit), index(t, s, `install -d -o "$DEVKIT_USER" -g "$SANDBOX_GID" -m 0755 "$WS"`); !(ws < unit && unit < start) {
@@ -169,7 +187,7 @@ func TestDockerOrdering(t *testing.T) {
 		}
 		// The wait is bounded and its failure aborts; the lift is never excused.
 		tail := s[lift:stamp]
-		if !strings.Contains(tail, "for _ in $(seq 1 90); do") || !strings.Contains(tail, "if [ \"$docker_up\" != 1 ]; then\n  warn ") || !strings.Contains(tail, "  exit 1\nfi\n") {
+		if !strings.Contains(tail, "for _ in $(seq 1 90); do") || !strings.Contains(tail, "if [ \"$docker_up\" != 1 ]; then\n    warn ") || !strings.Contains(tail, "    exit 1\n  fi\n") {
 			t.Errorf("the daemon's start must be waited for, boundedly, and abort on failure:\n%s", tail)
 		}
 		if strings.Contains(s[lift:dRevert], "||") || strings.Contains(s[start:wait], "||") {
@@ -190,7 +208,17 @@ func TestDockerOrdering(t *testing.T) {
 		if n := strings.Count(s, "IPAddressDeny=any") - strings.Count(filterUnit, "IPAddressDeny=any\n"); n != 3 {
 			t.Errorf("IPAddressDeny=any should be set on the two slices and resolved only, found %d", n)
 		}
-		// Nothing but this script starts the daemon.
+		// Nothing but this script, and the install step under its own
+		// condition (TestDockerStartFromInstall), starts the daemon.
+		inst, err := heredocBody(s, installProxyOpen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, verb := range []string{"start", "restart"} {
+			if n, m := strings.Count(s, "systemctl "+verb+" devkit-dockerd"), strings.Count(inst, "systemctl "+verb+" devkit-dockerd"); n-m != map[string]int{"start": 1, "restart": 0}[verb] {
+				t.Errorf("systemctl %s devkit-dockerd: %d in the script, %d of them in the install step", verb, n, m)
+			}
+		}
 		unit, err := heredocBody(s, dockerUnit)
 		if err != nil {
 			t.Fatal(err)
@@ -216,6 +244,66 @@ func TestDockerOrdering(t *testing.T) {
 			t.Errorf("docker needs user namespaces on in the kernel:\n%s", d)
 		}
 	})
+}
+
+// When provisioning left the daemon unstarted because devkit's guest binary
+// was missing or another build, the install step starts it once the binary
+// is in place, and only once this boot's provisioning has finished: the
+// firewall's mark in /run and the stamp both present. A replaced binary
+// under a running daemon restarts it. Every other configuration's install
+// step leaves the daemon alone. The install script parses.
+func TestDockerStartFromInstall(t *testing.T) {
+	const provisioned = "  if [ -f /run/devkit/firewall-at ] && [ -s /etc/devkit/provision.id ]; then\n"
+	const startBlock = provisioned +
+		"    if ! systemctl is-active --quiet devkit-dockerd.service; then\n" +
+		"      systemctl start devkit-dockerd.service || true\n" +
+		"    elif [ \"$prev\" != \"$got\" ]; then\n" +
+		"      systemctl restart devkit-dockerd.service || true\n" +
+		"    fi\n" +
+		"  fi\n"
+	dir := t.TempDir()
+	dockerAndGvisorVariants(t, func(t *testing.T, p Params, s string) {
+		inst, err := heredocBody(s, installProxyOpen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(inst, startBlock) != 1 {
+			t.Fatalf("the install step should start the daemon only once provisioned:\n%s", inst)
+		}
+		// prev is the hash before the install; the start follows the install
+		// and precedes the filter's restart, all under the hash match.
+		match := strings.Index(inst, `if [ -n "$want" ] && [ "$got" = "$want" ]; then`)
+		prev := strings.Index(inst, `prev="$(sha256sum `+EgressBinary+` 2>/dev/null | awk '{print $1}')"`)
+		install := strings.Index(inst, `install -m 755 -o root -g root "$tmp" `+EgressBinary)
+		start := strings.Index(inst, startBlock)
+		filter := strings.Index(inst, "systemctl restart "+FilterUnit+".socket")
+		refused := strings.Index(inst, "\nelse\n")
+		if !(match >= 0 && match < prev && prev < install && install < start && start < filter && filter < refused) {
+			t.Errorf("order: match=%d prev=%d install=%d start=%d filter=%d else=%d\n%s", match, prev, install, start, filter, refused, inst)
+		}
+		path := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "-")+"-install.sh")
+		os.WriteFile(path, []byte(inst), 0o644)
+		if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
+			t.Errorf("the install script does not parse: %s\n%s", out, inst)
+		}
+	})
+	for _, v := range []project.Containers{project.ContainersOff, project.ContainersContainerd} {
+		for _, mode := range []string{project.NetworkAllowlist, project.NetworkOpen} {
+			s := mustSystem(t, params(func(c *project.Config) { c.Tools.Containers = v; c.Network.Mode = mode }))
+			inst, err := heredocBody(s, installProxyOpen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(inst, "devkit-dockerd") || strings.Contains(inst, "prev=") {
+				t.Errorf("containers %q, %s: the install step must leave Docker alone:\n%s", v, mode, inst)
+			}
+			path := filepath.Join(dir, string(v)+"-"+mode+"-install.sh")
+			os.WriteFile(path, []byte(inst), 0o644)
+			if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
+				t.Errorf("the install script does not parse: %s", out)
+			}
+		}
+	}
 }
 
 // The daemon gets the in-guest proxy as containers reach it, and nothing
