@@ -108,6 +108,15 @@ func TestSyncReportsWhatItCannotCopy(t *testing.T) {
 	if !strings.Contains(out, `Not copied, a named pipe: "a-pipe"`) {
 		t.Errorf("a file that cannot be copied must be reported:\n%s", out)
 	}
+	must(t, os.WriteFile("devkit.yaml", []byte("name: demo\nexclude: [node_modules]\nnetwork:\n  mode: open\n"), 0o644))
+	gitIn(t, dir, "init", "-q")
+	out, err = syncOut(t)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if n := strings.Count(out, "a .git path"); n != 1 || !strings.Contains(out, "more") {
+		t.Errorf("the .git paths git cannot carry should be one line, capped:\n%s", out)
+	}
 }
 
 func TestSyncOverwriteIsForCopiedProjects(t *testing.T) {

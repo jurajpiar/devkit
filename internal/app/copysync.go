@@ -57,8 +57,18 @@ func syncCopy(ctx context.Context, cfg *project.Config, cwd, ws string, overwrit
 	if err != nil {
 		return err
 	}
+	// Grouped by reason: an exclude list without .git would otherwise
+	// print every file of the repository.
+	var whys []string
+	skipped := map[string][]string{}
 	for _, s := range snap.Skipped {
-		fmt.Printf("Not copied, %s: %s\n", s.Why, reviewable(fmt.Sprintf("%q", s.Path)))
+		if skipped[s.Why] == nil {
+			whys = append(whys, s.Why)
+		}
+		skipped[s.Why] = append(skipped[s.Why], fmt.Sprintf("%q", s.Path))
+	}
+	for _, why := range whys {
+		fmt.Printf("Not copied, %s: %s\n", why, listPaths(skipped[why], 5, "", ", "))
 	}
 	res, err := gitx.DeliverCopy(ctx, repo, snap, limaGuest{name}, ws, overwrite)
 	if err != nil {
