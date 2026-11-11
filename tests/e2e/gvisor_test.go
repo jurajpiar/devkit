@@ -164,8 +164,9 @@ func TestDockerGvisor(t *testing.T) {
 		setYAML(t, cfg, "container_runtime: gvisor-hostnet", "container_runtime: runc")
 		s.mustRun("up", "--no-sync", "--no-install")
 		guestKernel = vmKernel()
-		if out := sh("docker info --format '{{.DefaultRuntime}}'"); !hasLine(out, "runc") {
-			t.Errorf("default runtime should be runc again: %s", out)
+		// runc behind devkit's guard, which checks the mounts as made.
+		if out := sh("docker info --format '{{.DefaultRuntime}}'"); !hasLine(out, "devkit-runc") {
+			t.Errorf("default runtime should be the guarded runc again: %s", out)
 		}
 		if out := sh("docker run --rm busybox:1.36 uname -r"); !hasLine(out, guestKernel) {
 			t.Errorf("a container should run on the VM's kernel again: %s", out)
