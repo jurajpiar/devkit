@@ -87,6 +87,16 @@ func ParseRunsc(args, runtimeArgs []string) (*Invocation, error) {
 	if inv.Sub == "create" && inv.Bundle == "" {
 		return nil, errors.New("create: no --bundle, so the container's gofer cannot be recognised")
 	}
+	// start is checked again, so its container must be known: the shim
+	// gives "start <id>" and nothing else. Global holds everything before
+	// the subcommand, so what follows it starts one further on.
+	if inv.Sub == "start" {
+		rest := args[len(inv.Global)+1:]
+		if len(rest) != 1 || !validID(rest[0]) || strings.HasPrefix(rest[0], "-") {
+			return nil, fmt.Errorf("start: want exactly one container ID, got %q", rest)
+		}
+		inv.ID = rest[0]
+	}
 	return inv, nil
 }
 

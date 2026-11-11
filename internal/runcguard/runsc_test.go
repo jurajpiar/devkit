@@ -3,6 +3,7 @@ package runcguard
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,6 +178,11 @@ func TestParseRunsc(t *testing.T) {
 				t.Errorf("%s %v: %v", rt, args, err)
 			}
 		}
+		// start names its container, which the guard checks again.
+		args := append(append([]string{}, prefix...), "--root", gvRoot, "--log", "/l", "--log-format", "json", "--systemd-cgroup", "start", gvSwapID)
+		if inv, err := ParseRunsc(args, prefix); err != nil || inv.ID != gvSwapID || inv.Sub != "start" || !reflect.DeepEqual(inv.Global, args[:len(args)-2]) {
+			t.Errorf("%s %v: %+v %v", rt, args, inv, err)
+		}
 	}
 	plain, hostnet := gvArgs["runsc"], gvArgs["runsc-hostnet"]
 	for what, c := range map[string]struct {
@@ -193,6 +199,10 @@ func TestParseRunsc(t *testing.T) {
 		"create without a bundle":             {append(append([]string{}, plain...), "create", "--pid-file", "/p", "x"), plain},
 		"create without a pid file":           {append(append([]string{}, plain...), "create", "--bundle", "/b/x", "x"), plain},
 		"too short for the prefix":            {[]string{}, hostnet},
+		"start without an ID":                 {append(append([]string{}, plain...), "--root", "/r", "start"), plain},
+		"start with two IDs":                  {append(append([]string{}, plain...), "--root", "/r", "start", "x", "y"), plain},
+		"start with a flag":                   {append(append([]string{}, plain...), "--root", "/r", "start", "--detach", "x"), plain},
+		"start of a path":                     {append(append([]string{}, plain...), "--root", "/r", "start", "../x"), plain},
 	} {
 		if inv, err := ParseRunsc(c.args, c.prefix); err == nil {
 			t.Errorf("%s: %v should not parse: %+v", what, c.args, inv)
@@ -210,7 +220,7 @@ func TestRunscGuardPassesThroughOtherSubcommands(t *testing.T) {
 	runc, runsc := fakeRunc(t), fakeRunc(t)
 	for rt, prefix := range gvArgs {
 		for _, sub := range [][]string{
-			{"start", "x"}, {"state", "x"}, {"kill", "x", "9"}, {"delete", "--force", "x"}, {"exec", "--process", "/p.json", "x"},
+			{"state", "x"}, {"kill", "x", "9"}, {"delete", "--force", "x"}, {"exec", "--process", "/p.json", "x"},
 			{"ps", "--format", "json", "x"}, {"events", "--stats", "x"}, {"wait", "x"}, {"pause", "x"}, {"resume", "x"},
 			{"update", "--resources", "-", "x"}, {"features"},
 		} {
@@ -319,6 +329,10 @@ type runscEnv struct {
 	runsc string
 	args  []string
 	id    string
+	// state is what runsc state prints, and stateArgs what it was run with.
+	state     string
+	stateArgs []string
+	clock     clock
 }
 
 func newRunscEnv(t *testing.T, id, goferTable string) *runscEnv {
@@ -335,7 +349,14 @@ func newRunscEnv(t *testing.T, id, goferTable string) *runscEnv {
 
 func (e *runscEnv) run(t *testing.T) int {
 	g := e.guard(t, runscConfig(fakeRunc(t), e.runsc))
-	g.Runtime, g.Proc, g.Getuid = "runsc", e.proc.dir, os.Getuid
+	g.Runtime, g.Proc, g.Getuid, g.Clock = "runsc", e.proc.dir, os.Getuid, e.clock
+	g.Output = func(path string, args []string) ([]byte, error) {
+		e.stateArgs = append([]string{path}, args...)
+		if e.state == "" {
+			return nil, errors.New("exit status 1")
+		}
+		return []byte(e.state), nil
+	}
 	return g.Main(e.args)
 }
 
@@ -357,13 +378,13 @@ func TestRunscGuardCreate(t *testing.T) {
 
 	// The recorded swap: refused, deleted with the same global flags (the
 	// runtime's arguments first), the message in the log.
-	e = newRunscEnv(t, gvSwapID, goferTable(t, "gvisor-gofer-swap.mountinfo"))
+	e = newRunscEnv(t, gv09SwapID, rowsMountinfo(t, "gvisor-09-gofer-swap-final.rows"))
 	logf := filepath.Join(t.TempDir(), "log.json")
 	e.args[4] = logf
 	if code := e.run(t); code != 1 {
 		t.Fatalf("the swap: code %d", code)
 	}
-	wantDelete := []string{e.runsc, "--ignore-cgroups", "--root", gvRoot, "--log", logf, "--log-format", "json", "--systemd-cgroup", "delete", "--force", gvSwapID}
+	wantDelete := []string{e.runsc, "--ignore-cgroups", "--root", gvRoot, "--log", logf, "--log-format", "json", "--systemd-cgroup", "delete", "--force", gv09SwapID}
 	if len(e.ran) != 2 || !reflect.DeepEqual(e.ran[1], wantDelete) {
 		t.Errorf("the swap: ran %v", e.ran)
 	}
@@ -396,8 +417,8 @@ func TestRunscGuardCreate(t *testing.T) {
 
 	// And beside the real gofer, a look-alike with another table is not
 	// chosen in its place.
-	e = newRunscEnv(t, gvSwapID, goferTable(t, "gvisor-gofer-swap.mountinfo"))
-	e.proc.add(20000, reaper, os.Getuid(), fakeRunc(t), goferArgv(gvSwapID), goferTable(t, "gvisor-gofer-plain.mountinfo"))
+	e = newRunscEnv(t, gv09SwapID, rowsMountinfo(t, "gvisor-09-gofer-swap-final.rows"))
+	e.proc.add(20000, reaper, os.Getuid(), fakeRunc(t), goferArgv(gv09SwapID), goferTable(t, "gvisor-gofer-plain.mountinfo"))
 	refused("the real gofer beside a look-alike", e, "/var/lib/devkit-docker/run at /s")
 
 	// Look-alikes running the real runsc but under another parent, another

@@ -1,0 +1,45 @@
+# Copied verbatim from spikes/gvisor/results/09-gofer-timing.log, lines 25-66:
+# the sandbox of the plain container 5 ms after create: still a copy of the daemon's table.
+# Each row is "fstype root at mountpoint"; the recorder kept no devices.
+      ext4 / at /
+      devtmpfs / at /dev
+      tmpfs / at /dev/shm
+      devpts / at /dev/pts
+      mqueue / at /dev/mqueue
+      hugetlbfs / at /dev/hugepages
+      proc / at /proc
+      autofs / at /proc/sys/fs/binfmt_misc
+      binfmt_misc / at /proc/sys/fs/binfmt_misc
+      sysfs / at /sys
+      securityfs / at /sys/kernel/security
+      cgroup2 / at /sys/fs/cgroup
+      pstore / at /sys/fs/pstore
+      efivarfs / at /sys/firmware/efi/efivars
+      bpf / at /sys/fs/bpf
+      debugfs / at /sys/kernel/debug
+      tracefs / at /sys/kernel/tracing
+      configfs / at /sys/kernel/config
+      fusectl / at /sys/fs/fuse/connections
+      sysfs / at /sys
+      cgroup2 / at /sys/fs/cgroup
+      tmpfs / at /run
+      tmpfs / at /run/lock
+      tmpfs / at /run/user/501
+      tmpfs / at /run/user/999
+      tmpfs /systemd/inaccessible/dir at /run/credentials
+      tmpfs /systemd/propagate/devkit-dockerd.service at /run/systemd/incoming
+      tmpfs / at /run
+      tmpfs / at /run/.ro2906571113
+      tmpfs / at /run/.ro2906571113/lock
+      tmpfs / at /run/.ro2906571113/user/501
+      tmpfs / at /run/.ro2906571113/user/999
+      nsfs net:[4026532459] at /run/.ro2906571113/user/999/docker/runtime-runc/moby/null-netns
+      tmpfs /systemd/inaccessible/dir at /run/.ro2906571113/credentials
+      tmpfs /systemd/propagate/devkit-dockerd.service at /run/.ro2906571113/systemd/incoming
+      ext4 / at /boot
+      vfat / at /boot/efi
+      iso9660 / at /mnt/lima-cidata
+      ext4 /home/jurajpiar.guest/workspace at /home/jurajpiar.guest/workspace
+      tmpfs / at /etc
+      ext4 /etc at /etc/.ro4270645328
+      overlay / at /var/lib/devkit-docker/.local/share/docker/rootfs/overlayfs/77f0b67aa787936adced40d350391d62f54acee72627a96612d56a4c9f5e3d12

@@ -210,22 +210,80 @@ func Check(host, ctr []MountEntry, p Policy) *MountEntry {
 	return nil
 }
 
+// GoferFinal reports whether a gofer's mount table is in its final form:
+// exactly one mount at "/", and that the container's root overlay, whole.
+// runsc's gofer first builds the container's tree under a tmpfs of its own
+// (its "/" a tmpfs, the overlay at /root and every bind below it) and then
+// moves into it; before that, its table is the daemon's, with the VM's root
+// at "/". Neither is a table to judge, only to wait out: the overlay at
+// /root says nothing about where the binds will appear. Two mounts at "/"
+// are a root being replaced, not a root.
+func GoferFinal(t []MountEntry) bool {
+	n, ok := 0, true
+	for _, m := range t {
+		if m.Point == "/" {
+			n++
+			ok = ok && m.FSType == "overlay" && m.Root == "/"
+		}
+	}
+	return n == 1 && ok
+}
+
+// SandboxFinal reports whether a gVisor sandbox's mount table is in its
+// final form: exactly one mount at "/", and that a new tmpfs (a device the
+// guard's own table does not have), whole. Until the sandbox has moved into
+// it, its table is a copy of the daemon's, with the VM's root at "/".
+func SandboxFinal(host, t []MountEntry) bool {
+	n, ok := 0, true
+	for i := range t {
+		if m := &t[i]; m.Point == "/" {
+			n++
+			ok = ok && m.FSType == "tmpfs" && m.Root == "/" && !hasDev(host, m.Dev)
+		}
+	}
+	return n == 1 && ok
+}
+
+func hasDev(host []MountEntry, dev string) bool {
+	for _, h := range host {
+		if h.Dev == dev {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxProc are the two mounts a sandbox holds besides its root from
+// runsc create until its container starts, at exactly these points: a
+// tmpfs at /proc and a proc at /proc/sandbox-proc, which the sandbox
+// unmounts once running. Each must be a new filesystem: a proc of the
+// guard's own table is the VM's process tree.
+var sandboxProc = map[string]string{"/proc": "tmpfs", "/proc/sandbox-proc": "proc"}
+
 // CheckSandbox returns what is wrong with a gVisor sandbox's mount table,
-// or nil. The sentry runs in a mount namespace whose only mount is a new
-// tmpfs at its root: every host file it reaches comes through the gofer,
-// whose table Check judges. Anything more, or a root that is a filesystem
-// of the VM's, is returned.
+// or nil. The sentry runs in a mount namespace whose root is a new tmpfs:
+// every host file it reaches comes through the gofer, whose table Check
+// judges. The table must start with that root, and may hold besides it
+// only the new tmpfs at /proc and new proc at /proc/sandbox-proc, each at
+// most once. Anything else, a filesystem of the VM's among them, is
+// returned.
 func CheckSandbox(host, sb []MountEntry) *MountEntry {
+	seen := map[string]bool{}
 	for i := range sb {
 		m := &sb[i]
-		if i > 0 || m.FSType != "tmpfs" || m.Point != "/" || m.Root != "/" {
+		if hasDev(host, m.Dev) || m.Root != "/" {
 			return m
 		}
-		for _, h := range host {
-			if h.Dev == m.Dev {
+		if i == 0 {
+			if m.FSType != "tmpfs" || m.Point != "/" {
 				return m
 			}
+			continue
 		}
+		if fs, ok := sandboxProc[m.Point]; !ok || fs != m.FSType || seen[m.Point] {
+			return m
+		}
+		seen[m.Point] = true
 	}
 	return nil
 }

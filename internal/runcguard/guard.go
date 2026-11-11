@@ -13,9 +13,11 @@
 //
 // The same guard stands in front of gVisor's runsc. There the container's
 // bind mounts are made by runsc's gofer, a host process that serves the
-// container's files to the sandbox; "runsc create" returns with the gofer
-// and the sandbox waiting, and the guard checks the gofer's mount table by
-// the same rules, and that the sandbox has no host mount of its own.
+// container's files to the sandbox. "runsc create" returns while the gofer
+// and the sandbox are still building their mount tables, so the guard waits
+// a bounded time for each to reach its final form, then checks the gofer's
+// by the same rules and that the sandbox has no host mount of its own. It
+// checks both again when the shim asks runsc to start the container.
 package runcguard
 
 import (
@@ -116,12 +118,18 @@ type Guard struct {
 	Exec func(path string, argv, env []string) error
 	// Run runs a command with the guard's stdio and the given extra file
 	// descriptors, and returns its exit code.
-	Run      func(path string, args []string, extra []*os.File) (int, error)
+	Run func(path string, args []string, extra []*os.File) (int, error)
+	// Output runs a command and returns what it wrote to stdout; its
+	// stderr is the guard's.
+	Output   func(path string, args []string) ([]byte, error)
 	ReadFile func(string) ([]byte, error)
 	Stderr   io.Writer
 	// Proc is where the processes are, read for runsc's gofer and sandbox.
 	Proc   string
 	Getuid func() int
+	// Clock is what the guard waits by for runsc's mounts; nil is the real
+	// clock.
+	Clock clock
 }
 
 // New returns the guard as installed in front of runc.
@@ -142,11 +150,28 @@ func NewFor(runtime string) *Guard {
 		},
 		Exec:     syscall.Exec,
 		Run:      run,
+		Output:   output,
 		ReadFile: os.ReadFile,
 		Stderr:   os.Stderr,
 		Proc:     "/proc",
 		Getuid:   os.Getuid,
+		Clock:    realClock{},
 	}
+}
+
+func output(path string, args []string) ([]byte, error) {
+	cmd := exec.Command(path, args...)
+	cmd.Args[0] = path
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	return cmd.Output()
+}
+
+func (g *Guard) clock() clock {
+	if g.Clock == nil {
+		return realClock{}
+	}
+	return g.Clock
 }
 
 func run(path string, args []string, extra []*os.File) (int, error) {
@@ -219,6 +244,16 @@ func (g *Guard) mainRunsc(cfg *Config, real string, args []string) int {
 		return 1
 	case inv.Sub == "create":
 		return g.create(cfg, real, inv, args, g.checkRunsc)
+	case inv.Sub == "start":
+		// The check at create waited for the tables to be final, and the
+		// gofer is not known to mount anything once its table is. That is
+		// runsc's behaviour as observed, not a promise; so the tables are
+		// judged again, as they are now, before the container's first
+		// process may run.
+		if bad, err := g.checkStart(cfg, real, inv); err != nil || bad != nil {
+			g.refuse(real, inv, bad, err)
+			return 1
+		}
 	case !runscPassThrough[inv.Sub]:
 		g.fail(inv, fmt.Sprintf("devkit: refused: runsc %s is not a subcommand the guard passes", printable(inv.Sub)))
 		return 1
@@ -284,6 +319,13 @@ func (g *Guard) create(cfg *Config, real string, inv *Invocation, args []string,
 	if err == nil && bad == nil {
 		return 0
 	}
+	g.refuse(real, inv, bad, err)
+	return 1
+}
+
+// refuse deletes the container and reports why: a mount, or what kept the
+// guard from checking.
+func (g *Guard) refuse(real string, inv *Invocation, bad *MountEntry, err error) {
 	g.Run(real, append(append([]string{}, inv.Global...), "delete", "--force", inv.ID), nil)
 	msg := "devkit: refused: the runtime guard could not check the container's mounts: "
 	if err != nil {
@@ -292,7 +334,6 @@ func (g *Guard) create(cfg *Config, real string, inv *Invocation, args []string,
 		msg = fmt.Sprintf("devkit: refused: a mount comes from outside the workspace: %s %s at %s", bad.FSType, printable(bad.Root), printable(bad.Point))
 	}
 	g.fail(inv, msg)
-	return 1
 }
 
 // readPid reads the pid the runtime wrote: runc's container process, or
@@ -335,23 +376,67 @@ func (g *Guard) check(cfg *Config, _ string, inv *Invocation) (*MountEntry, erro
 
 // checkRunsc checks what runsc create left: the sandbox, whose pid runsc
 // writes to the pid file, and its gofer, which holds the container's bind
-// mounts. Both are held open while they are read, so that neither can be
-// swapped for another process under the same pid in between.
+// mounts. create returns while both are still setting up, so each table is
+// waited for, up to SetupBound, until it is in its final form.
 func (g *Guard) checkRunsc(cfg *Config, real string, inv *Invocation) (*MountEntry, error) {
+	pid, err := g.readPid(inv)
+	if err != nil {
+		return nil, err
+	}
+	return g.inspectRunsc(cfg, real, inv.ID, inv.Bundle, pid, SetupBound)
+}
+
+// runscState is what the guard reads of "runsc state": the OCI state of
+// the container.
+type runscState struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Pid    int    `json:"pid"`
+	Bundle string `json:"bundle"`
+}
+
+// checkStart checks a container again as runsc start is asked to run it:
+// its tables as they are now, with no wait, since they were final at
+// create. start names only the container, so its sandbox and bundle are
+// read from "runsc state", run with the shim's own global flags. That is
+// runsc's record under --root, written by runsc as the Docker account at
+// create, in a directory of that account's: nothing in a container and
+// nothing the workspace's user owns can write it, and whoever can already
+// runs runsc as that account. What it names must still pass everything
+// create checked: the bundle named after the container, a sandbox of the
+// guard's uid, and exactly one gofer that runs the real runsc, as that
+// uid, under the sandbox's parent, with that bundle on its command line.
+func (g *Guard) checkStart(cfg *Config, real string, inv *Invocation) (*MountEntry, error) {
+	out, err := g.Output(real, append(append([]string{}, inv.Global...), "state", inv.ID))
+	if err != nil {
+		return nil, fmt.Errorf("runsc state: %v", err)
+	}
+	var st runscState
+	if err := json.Unmarshal(out, &st); err != nil {
+		return nil, fmt.Errorf("runsc state: %v", err)
+	}
+	if st.ID != inv.ID || st.Status != "created" || st.Pid <= 0 {
+		return nil, fmt.Errorf("runsc state gives container %q, status %q, pid %d", st.ID, st.Status, st.Pid)
+	}
+	return g.inspectRunsc(cfg, real, inv.ID, st.Bundle, st.Pid, 0)
+}
+
+// inspectRunsc checks the sandbox whose pid is pid and its gofer, the
+// container's whose ID and bundle are given. Both are held open while they
+// are read, so that neither can be swapped for another process under the
+// same pid in between. Each table is read until it is in its final form or
+// bound has passed, and judged once it is.
+func (g *Guard) inspectRunsc(cfg *Config, real, id, bundle string, pid int, bound time.Duration) (*MountEntry, error) {
 	// containerd's bundle directory is named after the container, and the
 	// gofer is recognised by its bundle: the two must agree.
-	if !validID(inv.ID) || filepath.Base(inv.Bundle) != inv.ID {
-		return nil, fmt.Errorf("the bundle %q is not the container %q's", inv.Bundle, inv.ID)
+	if !validID(id) || filepath.Base(bundle) != id {
+		return nil, fmt.Errorf("the bundle %q is not the container %q's", bundle, id)
 	}
 	fi, err := os.Stat(real)
 	if err != nil {
 		return nil, err
 	}
 	runsc, err := statID(fi)
-	if err != nil {
-		return nil, err
-	}
-	pid, err := g.readPid(inv)
 	if err != nil {
 		return nil, err
 	}
@@ -372,29 +457,50 @@ func (g *Guard) checkRunsc(cfg *Config, real string, inv *Invocation) (*MountEnt
 	if sbInfo.UID != uid {
 		return nil, fmt.Errorf("the sandbox %d is not the guard's uid's", pid)
 	}
-	sbTable, err := tableOf(sb)
-	if err != nil {
-		return nil, fmt.Errorf("the sandbox: %v", err)
-	}
-	gofer, err := findGofer(g.Proc, pid, sbInfo.PPid, uid, runsc, inv.Bundle)
+	gofer, err := findGofer(g.Proc, pid, sbInfo.PPid, uid, runsc, bundle)
 	if err != nil {
 		return nil, err
 	}
 	defer gofer.Close()
-	goferTable, err := tableOf(gofer)
-	if err != nil {
-		return nil, fmt.Errorf("the gofer: %v", err)
+	notFinal := func(who string) error {
+		if bound == 0 {
+			return fmt.Errorf("the mounts of %s are not in their final form at start", who)
+		}
+		return fmt.Errorf("%s never finished setting up its mounts (waited %v)", who, bound)
 	}
-	// The descriptor keeps the process, but a process can exec: what was
-	// read must still be the gofer's once it has been read.
-	if !isGofer(gofer, sbInfo.PPid, uid, runsc, inv.Bundle) {
-		return nil, errors.New("the gofer changed while its mounts were read")
+	readGofer := func() ([]MountEntry, error) {
+		t, err := tableOf(gofer)
+		if err != nil {
+			return nil, fmt.Errorf("the gofer: %v", err)
+		}
+		// The descriptor keeps the process, but a process can exec: what
+		// was read must still be the gofer's once it has been read.
+		if !isGofer(gofer, sbInfo.PPid, uid, runsc, bundle) {
+			return nil, errors.New("the gofer changed while its mounts were read")
+		}
+		return t, nil
 	}
-	if bad := Check(host, goferTable, Policy{Workspace: cfg.Workspace, DataRoot: cfg.DataRoot, DockerInit: cfg.DockerInit,
-		ContainerID: inv.ID, Gofer: true}); bad != nil {
-		return bad, nil
+	policy := Policy{Workspace: cfg.Workspace, DataRoot: cfg.DataRoot, DockerInit: cfg.DockerInit, ContainerID: id, Gofer: true}
+	bad, err := awaitFinal(readGofer, GoferFinal, func(t []MountEntry) *MountEntry { return Check(host, t, policy) }, g.clock(), bound)
+	if errors.Is(err, errNotFinal) {
+		return nil, notFinal("gVisor's gofer")
 	}
-	return CheckSandbox(host, sbTable), nil
+	if err != nil || bad != nil {
+		return bad, err
+	}
+	readSandbox := func() ([]MountEntry, error) {
+		t, err := tableOf(sb)
+		if err != nil {
+			return nil, fmt.Errorf("the sandbox: %v", err)
+		}
+		return t, nil
+	}
+	bad, err = awaitFinal(readSandbox, func(t []MountEntry) bool { return SandboxFinal(host, t) },
+		func(t []MountEntry) *MountEntry { return CheckSandbox(host, t) }, g.clock(), bound)
+	if errors.Is(err, errNotFinal) {
+		return nil, notFinal("gVisor's sandbox")
+	}
+	return bad, err
 }
 
 func tableOf(e procEntry) ([]MountEntry, error) {

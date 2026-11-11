@@ -1,0 +1,7 @@
+# Copied verbatim from spikes/gvisor/results/09-gofer-timing.log, lines 20-23:
+# the gofer of a plain container (77f0b67a...), 3 ms after runsc create returned: already final.
+# Each row is "fstype root at mountpoint"; the recorder kept no devices.
+      overlay / at /
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/77f0b67aa787936adced40d350391d62f54acee72627a96612d56a4c9f5e3d12/resolv.conf at /etc/resolv.conf
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/77f0b67aa787936adced40d350391d62f54acee72627a96612d56a4c9f5e3d12/hostname at /etc/hostname
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/77f0b67aa787936adced40d350391d62f54acee72627a96612d56a4c9f5e3d12/hosts at /etc/hosts

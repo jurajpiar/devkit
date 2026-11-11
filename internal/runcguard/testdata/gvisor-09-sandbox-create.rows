@@ -1,0 +1,6 @@
+# Copied verbatim from spikes/gvisor/results/09-gofer-timing.log, lines 68-70:
+# the sandbox of the plain container 9 ms after create; the same three rows for all three containers (lines 81-83, 94-96).
+# Each row is "fstype root at mountpoint"; the recorder kept no devices.
+      tmpfs / at /
+      tmpfs / at /proc
+      proc / at /proc/sandbox-proc
