@@ -223,22 +223,23 @@ func TestRootHostsCoverEveryProvisioningDownload(t *testing.T) {
 // the fail-closed provisioning change it was rebased onto, where the rendered
 // guest-mode scripts were compared byte for byte across the two branches. A deliberate policy change for
 // guest mode updates them, knowing it makes existing VMs stale. The last such
-// change added the steps that undo tools.containers: docker, which every
-// configuration carries for a VM that had it.
+// change added the removal of Docker's API filter (its units, socket, links,
+// settings and ACL) to the steps that undo tools.containers: docker, which
+// every configuration carries for a VM that had it.
 func TestGuestModeScriptIsUnchangedByHostEnforcement(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":         "5244a65f63bbc8b7",
-		"allowlist-nix":          "5d16a4df49e0c4dc",
-		"allowlist-none":         "49b8b2e73111fd39",
-		"enforce-guest-explicit": "5244a65f63bbc8b7",
-		"loosened":               "3ecde882683cbe6f",
-		"no-security-updates":    "fab81cd030948035",
-		"none-mise":              "a6da6ecbaec64a97",
-		"none-nix":               "3b19e9cf3268c9f9",
-		"none-none":              "656173186e227ab7",
-		"open-mise":              "f212167c70354120",
-		"open-nix":               "b64024d66ecf8789",
-		"open-none":              "2c1aaa32de4559ec",
+		"allowlist-mise":         "f34cb4dd06e1fd24",
+		"allowlist-nix":          "827c6546e99322fa",
+		"allowlist-none":         "a27408fad15a2ae8",
+		"enforce-guest-explicit": "f34cb4dd06e1fd24",
+		"loosened":               "9164014d61094e50",
+		"no-security-updates":    "9c4eb523d58f92b9",
+		"none-mise":              "2271d425bd94a910",
+		"none-nix":               "62a460f904cab30f",
+		"none-none":              "fb271ea29812da46",
+		"open-mise":              "affe06950cec6663",
+		"open-nix":               "82aeb092574ad8e6",
+		"open-none":              "eec635c96e40e780",
 	}
 	var got []string
 	for name, p := range guestVariants() {

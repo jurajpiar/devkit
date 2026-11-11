@@ -123,6 +123,14 @@ func render(src string, p Params) (string, error) {
 		DockerConfigScript: dockerConfigScript(p.Config),
 		ContainerPreload:   containerPreload,
 		DockerDaemonJSON:   dockerDaemonJSON(p.Config),
+		FilterAccount:      FilterAccount,
+		FilterSocket:       FilterSocket,
+		FilterUnit:         FilterUnit,
+		FilterBinary:       FilterBinary,
+		GuardBinary:        GuardBinary,
+		FilterConfig:       FilterConfig,
+		GuardConfig:        GuardConfig,
+		FilterRuntimes:     filterRuntimes(p.Config),
 
 		GvisorRelease:     GvisorRelease,
 		GvisorArm64SHA512: GvisorArm64SHA512,
@@ -684,11 +692,11 @@ else
   sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^\(HTTP_PROXY\|HTTPS_PROXY\|http_proxy\|https_proxy\|NO_PROXY\|no_proxy\)=/d}' /etc/environment
 fi
 # tools.containers: docker. Every kind of session, login shell or not, finds
-# the daemon's socket, by the same two routes as the proxy settings.
+# the API filter's socket, by the same two routes as the proxy settings.
 sed -i '/^#LIMA-START/,/^#LIMA-END/!{/^DOCKER_HOST=/d}' /etc/environment
 {{- if .Config.Tools.Containers.Docker}}
-echo "export DOCKER_HOST=unix://{{.DockerSocket}}" > /etc/profile.d/devkit-docker.sh
-echo "DOCKER_HOST=unix://{{.DockerSocket}}" >> /etc/environment
+echo "export DOCKER_HOST=unix://{{.FilterSocket}}" > /etc/profile.d/devkit-docker.sh
+echo "DOCKER_HOST=unix://{{.FilterSocket}}" >> /etc/environment
 {{- else}}
 rm -f /etc/profile.d/devkit-docker.sh
 {{- end}}
@@ -734,22 +742,34 @@ done
 systemctl mask docker.service docker.socket containerd.service >/dev/null
 DOCKER_GID="$(id -g "$DOCKER_ACCOUNT")"
 SANDBOX_GID="$(id -g "$DEVKIT_USER")"
-# The account's home is traversable, so the sandbox user reaches the socket
-# in run/; the image store under .local stays the account's alone.
+# The API filter runs as an account of its own, never root, in the Docker
+# account's group so that it can pass through the daemon's directory. It is
+# the only way to the daemon: anyone who can use the daemon's socket can ask
+# for anything the account may do.
+FILTER_ACCOUNT={{.FilterAccount}}
+id "$FILTER_ACCOUNT" >/dev/null 2>&1 || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$FILTER_ACCOUNT"
+usermod -a -G "$DOCKER_ACCOUNT" "$FILTER_ACCOUNT"
+# The account's home is traversable, so the filter reaches the socket in
+# run/; the image store under .local stays the account's alone.
 install -d -o "$DOCKER_ACCOUNT" -g "$DOCKER_ACCOUNT" -m 0711 "$DOCKER_HOME"
 install -d -o "$DOCKER_ACCOUNT" -g "$DOCKER_ACCOUNT" -m 0700 "$DOCKER_HOME/.local" "$DOCKER_HOME/.local/share"
 install -d -o "$DOCKER_ACCOUNT" -g "$DOCKER_ACCOUNT" -m 0750 "$DOCKER_HOME/run"
 chmod 0711 "$DOCKER_HOME"
 chmod 0750 "$DOCKER_HOME/run"
 # The socket is outside the account's runtime directory, which logind remakes
-# 0700 at each boot. The default ACL gives the sandbox user read and write on
-# the socket the daemon creates there. Anyone who can use the socket can ask
-# the daemon for anything the account may do; the API is not filtered yet.
-setfacl -m "u:$DEVKIT_USER:rx" -m "d:u:$DEVKIT_USER:rw" "$DOCKER_HOME/run"
-# Traversal only, so the daemon can reach the workspace's path. Nothing in the
+# 0700 at each boot. The default ACL gives the filter's account read and
+# write on the socket the daemon creates there, whatever group the daemon
+# gives it. The sandbox user's entries, which an earlier devkit set, go.
+run_acl="$(getfacl -cp "$DOCKER_HOME/run")"
+if grep -q "^user:$DEVKIT_USER:" <<< "$run_acl"; then setfacl -x "u:$DEVKIT_USER" "$DOCKER_HOME/run"; fi
+if grep -q "^default:user:$DEVKIT_USER:" <<< "$run_acl"; then setfacl -x "d:u:$DEVKIT_USER" "$DOCKER_HOME/run"; fi
+setfacl -m "u:$FILTER_ACCOUNT:rx" -m "d:u:$FILTER_ACCOUNT:rw" "$DOCKER_HOME/run"
+# Traversal only, so the daemon can reach the workspace's path and the
+# filter can resolve the symlinks of a bind source in it. Nothing in the
 # home is readable this way, and the workspace itself carries no ACL: it is
 # shared by the ID-mapped mount in the daemon's own namespace (see below).
 setfacl -m "u:$DOCKER_ACCOUNT:x" "$DEVKIT_HOME"
+setfacl -m "u:$FILTER_ACCOUNT:x" "$DEVKIT_HOME"
 # Its user manager and D-Bus session, which the systemd cgroup driver needs.
 # Its slice is held above, so nothing it starts has network yet.
 loginctl enable-linger "$DOCKER_ACCOUNT"
@@ -895,6 +915,11 @@ WS="$DEVKIT_HOME/{{.WorkspaceDir}}"
 if [ ! -e "$WS" ] && [ ! -L "$WS" ]; then
   install -d -o "$DEVKIT_USER" -g "$SANDBOX_GID" -m 0755 "$WS"
 fi
+# The workspace by its real path, which the mount, the API filter and the
+# runtime guard all use. Only the home is resolved: the workspace itself is
+# the sandbox user's, and a symlink there would let it choose what Docker
+# may mount, so the daemon refuses to start on one.
+WS_REAL="$(readlink -f "$DEVKIT_HOME")/{{.WorkspaceDir}}"
 DOCKER_RUN="/run/user/$DOCKER_UID"
 cat > /usr/local/sbin/devkit-dockerd <<EOF
 #!/bin/sh
@@ -903,8 +928,8 @@ cat > /usr/local/sbin/devkit-dockerd <<EOF
 # the workspace over itself ID-mapped, then becomes $DOCKER_ACCOUNT and starts
 # rootless Docker.
 set -eu
-W="\$(readlink -f '$WS')"
-if [ ! -d "\$W" ] || [ "\$(stat -c %u "\$W")" != "$SANDBOX_UID" ]; then
+W='$WS_REAL'
+if [ -L "\$W" ] || [ ! -d "\$W" ] || [ "\$(stat -c %u "\$W")" != "$SANDBOX_UID" ]; then
   echo "devkit-dockerd: the workspace \$W is not a directory of the sandbox user's" >&2
   exit 1
 fi
@@ -935,7 +960,108 @@ Delegate=yes
 Restart=on-failure
 RestartSec=2
 EOF
+
+# ---- Docker's API filter and runtime guard ----
+# Both are devkit's guest binary under other names, installed by root once
+# its hash is the one this script expects (see the egress proxy below). On a
+# first boot it arrives after this script, and devkit up waits for the
+# filter then. Their settings are root's, like the daemon's.
+RUNC_REAL=""
+if [ -f /etc/apparmor.d/runc ]; then
+  RUNC_REAL="$(awk '$1 == "profile" && $4 == "flags=(unconfined)" {print $3; exit}' /etc/apparmor.d/runc)"
+fi
+if [ -z "$RUNC_REAL" ]; then RUNC_REAL="$(command -v runc || true)"; fi
+if [ -z "$RUNC_REAL" ] || [ ! -x "$RUNC_REAL" ]; then
+  warn "runc was not found; Docker's runtime guard needs it"
+  exit 1
+fi
+RUNC_REAL="$(readlink -f "$RUNC_REAL")"
+DOCKER_INIT="$(readlink -f "$(PATH=/usr/bin:/usr/sbin:/bin:/sbin command -v docker-init || echo /usr/bin/docker-init)")"
+DATA_ROOT="$(readlink -f "$DOCKER_HOME")/.local/share/docker"
+for v in "$WS_REAL" "$RUNC_REAL" "$DOCKER_INIT" "$DATA_ROOT"; do
+  case "$v" in
+    ""|[!/]*|*[\"\\]*|*[[:cntrl:]]*) warn "cannot write the path '$v' into Docker's guard settings"; exit 1 ;;
+  esac
+done
+cat > {{.FilterConfig}} <<EOF
+{
+  "daemon_socket": "{{.DockerSocket}}",
+  "workspace": "$WS_REAL",
+  "runtimes": {{.FilterRuntimes}},
+  "capabilities": ["IPC_LOCK", "NET_BIND_SERVICE"]
+}
+EOF
+cat > {{.GuardConfig}} <<EOF
+{
+  "runc": "$RUNC_REAL",
+  "workspace": "$WS_REAL",
+  "data_root": "$DATA_ROOT",
+  "docker_init": "$DOCKER_INIT"
+}
+EOF
+chmod 644 {{.FilterConfig}} {{.GuardConfig}}
+ln -sfn {{.EgressBinary}} {{.FilterBinary}}
+ln -sfn {{.EgressBinary}} {{.GuardBinary}}
+# Socket activation: systemd holds the socket, root's and the sandbox
+# user's group's only, in a directory only root may change, and starts the
+# filter on the first connection. A daemon that is not up yet is answered
+# with a refusal of the filter's own.
+SANDBOX_GROUP="$(id -gn "$DEVKIT_USER")"
+cat > /etc/systemd/system/{{.FilterUnit}}.socket <<EOF
+[Unit]
+Description=devkit: the Docker API filter's socket
+
+[Socket]
+ListenStream={{.FilterSocket}}
+SocketUser=root
+SocketGroup=$SANDBOX_GROUP
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
+EOF
+# ProtectHome is read-only, not off: the filter resolves symlinks in the
+# workspace, through the traversal ACL on the home.
+cat > /etc/systemd/system/{{.FilterUnit}}.service <<'EOF'
+[Unit]
+Description=devkit: Docker API filter
+Requires={{.FilterUnit}}.socket
+After={{.FilterUnit}}.socket
+
+[Service]
+ExecStart={{.FilterBinary}} -config {{.FilterConfig}}
+User={{.FilterAccount}}
+Group={{.FilterAccount}}
+SupplementaryGroups={{.DockerAccount}}
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+IPAddressDeny=any
+EOF
 systemctl daemon-reload
+systemctl enable {{.FilterUnit}}.socket >/dev/null 2>&1
+if systemctl is-active --quiet {{.FilterUnit}}.service; then systemctl stop {{.FilterUnit}}.service; fi
+systemctl restart {{.FilterUnit}}.socket
 
 # The client's proxy settings, which Docker hands to containers and builds.
 # Run by the sandbox user, from the user provisioning and again by devkit up
@@ -956,6 +1082,13 @@ if [ -f /etc/systemd/system/devkit-dockerd.service ]; then
   rm -f /etc/systemd/system/devkit-dockerd.service /usr/local/sbin/devkit-dockerd
   systemctl daemon-reload
 fi
+if [ -f /etc/systemd/system/{{.FilterUnit}}.socket ]; then
+  systemctl stop {{.FilterUnit}}.socket {{.FilterUnit}}.service
+  systemctl disable {{.FilterUnit}}.socket >/dev/null 2>&1
+  rm -f /etc/systemd/system/{{.FilterUnit}}.socket /etc/systemd/system/{{.FilterUnit}}.service
+  systemctl daemon-reload
+fi
+rm -f {{.FilterSocket}} {{.FilterBinary}} {{.GuardBinary}} {{.FilterConfig}} {{.GuardConfig}}
 if [ -f /etc/devkit/docker-statoverrides ]; then
   while read -r path owner group mode; do
     [ -n "$path" ] || continue
@@ -976,6 +1109,10 @@ if id {{.DockerAccount}} >/dev/null 2>&1; then
   loginctl disable-linger {{.DockerAccount}}
   home_acl="$(getfacl -cp "$DEVKIT_HOME" 2>/dev/null)" || home_acl=""
   if grep -q '^user:{{.DockerAccount}}:' <<< "$home_acl"; then setfacl -x "u:{{.DockerAccount}}" "$DEVKIT_HOME"; fi
+fi
+if id {{.FilterAccount}} >/dev/null 2>&1; then
+  home_acl="$(getfacl -cp "$DEVKIT_HOME" 2>/dev/null)" || home_acl=""
+  if grep -q '^user:{{.FilterAccount}}:' <<< "$home_acl"; then setfacl -x "u:{{.FilterAccount}}" "$DEVKIT_HOME"; fi
 fi
 rm -f {{.DockerConfigHelper}}
 {{- end}}
@@ -1180,7 +1317,15 @@ want="$(cat /etc/devkit/egress.sha256)"
 got="$(sha256sum "$tmp" | awk '{print $1}')"
 if [ -n "$want" ] && [ "$got" = "$want" ]; then
   install -m 755 -o root -g root "$tmp" {{.EgressBinary}}
+{{- if or (ne .Config.Network.Mode "none") (not .Config.Tools.Containers.Docker)}}
   systemctl restart {{.EgressService}} || true
+{{- end}}
+{{- if .Config.Tools.Containers.Docker}}
+  # The binary is Docker's API filter too, started afresh on its next
+  # connection; the runtime guard runs it anew for each container.
+  systemctl stop {{.FilterUnit}}.service || true
+  systemctl restart {{.FilterUnit}}.socket || true
+{{- end}}
   echo "devkit: installed egress proxy $got"
 else
   echo "devkit: refused egress proxy with hash $got (expected $want)" >&2
@@ -1259,6 +1404,23 @@ if [ "$docker_up" != 1 ]; then
   warn "Docker did not answer on its socket: $(journalctl -u devkit-dockerd.service -n 5 --no-pager -o cat 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
   exit 1
 fi
+# Then through the API filter, as the sandbox user reaches it, so that a
+# broken filter fails provisioning. On a first boot the guest binary that
+# carries the filter is not installed yet: devkit up installs it and waits
+# for the filter then.
+if [ "$(sha256sum {{.EgressBinary}} 2>/dev/null | awk '{print $1}')" = "$(cat /etc/devkit/egress.sha256)" ]; then
+  filter_up=0
+  for _ in $(seq 1 30); do
+    if timeout 10 setpriv --reuid="$SANDBOX_UID" --regid="$SANDBOX_GID" --init-groups curl -q -fsS -o /dev/null --unix-socket {{.FilterSocket}} http://docker/info; then filter_up=1; break; fi
+    sleep 1
+  done
+  if [ "$filter_up" != 1 ]; then
+    warn "Docker's API filter did not answer: $(journalctl -u {{.FilterUnit}}.service -n 5 --no-pager -o cat 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+    exit 1
+  fi
+else
+  note "Docker's API filter starts once devkit up has installed devkit's guest binary"
+fi
 {{- end}}
 {{- if .Config.VM.LockModulesOn}}
 
@@ -1330,6 +1492,8 @@ type templateData struct {
 	DockerAccount, DockerHome, DockerSocket, DockerConfigHelper                string
 	DockerProxy, DockerConfigScript, ContainerPreload                          string
 	DockerDaemonJSON                                                           string
+	FilterAccount, FilterSocket, FilterUnit, FilterBinary, GuardBinary         string
+	FilterConfig, GuardConfig, FilterRuntimes                                  string
 	GvisorRelease, GvisorArm64SHA512, GvisorAmd64SHA512                        string
 }
 

@@ -19,32 +19,34 @@ import (
 	"github.com/jurajpiar/devkit/internal/project"
 )
 
-// tools.container_runtime: runc, the default, must leave the Docker script
-// exactly as it was before gVisor existed, so that no Docker VM is reported
-// stale by the upgrade. These hashes were taken from branch docker's render.
-func TestDockerRuncScriptIsUnchangedByGvisor(t *testing.T) {
+// tools.container_runtime: runc, the default, renders the Docker script
+// pinned here. gVisor left it as it was before gVisor existed; the API
+// filter and the runtime guard changed it (daemon.json registers the guard
+// as the default runtime), so these are the filter branch's render, and
+// Docker VMs provisioned before it are reported stale once.
+func TestDockerRuncScriptIsPinned(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":      "04002569e4b94d84",
-		"allowlist-mise-host": "fbf7e9cdcd3bcd61",
-		"allowlist-nix":       "1dfd4d0c3087ab13",
-		"allowlist-nix-host":  "19e7472e3c06fab0",
-		"allowlist-none":      "b3c2fe06884efe12",
-		"allowlist-none-host": "60850b166bcd112b",
-		"none-mise":           "bc4a44a1cf71ef3b",
-		"none-nix":            "160243a4270f42c7",
-		"none-none":           "b748764fe7518710",
-		"open-mise":           "85b70c300aa30f3c",
-		"open-mise-host":      "f94e5f4ba79ec0cf",
-		"open-nix":            "017762965c61a37c",
-		"open-nix-host":       "cb1f9c618b12095f",
-		"open-none":           "03f364ca502c2193",
-		"open-none-host":      "9c37fb557e1328f1",
+		"allowlist-mise":      "aa94ef7e539c1b93",
+		"allowlist-mise-host": "e15c335d9b978647",
+		"allowlist-nix":       "0060ef11597fa950",
+		"allowlist-nix-host":  "67f3b1ef8d89626e",
+		"allowlist-none":      "e121ca218cedf002",
+		"allowlist-none-host": "798e226c1925e5e7",
+		"none-mise":           "dab91333ed8ab533",
+		"none-nix":            "273426011895180f",
+		"none-none":           "cf819b9a263ac4bc",
+		"open-mise":           "8c90dd291d226c64",
+		"open-mise-host":      "b4e497d0249cb514",
+		"open-nix":            "19f42045ec5e1c20",
+		"open-nix-host":       "a96e0e8bad8d90d2",
+		"open-none":           "48e0488fde5e5da3",
+		"open-none-host":      "affbe336b22647fa",
 	}
 	var got []string
 	dockerVariants(t, func(t *testing.T, p Params, s string) {
 		sum := sha256.Sum256([]byte(s))
 		h := hex.EncodeToString(sum[:])[:16]
-		name := strings.TrimPrefix(t.Name(), "TestDockerRuncScriptIsUnchangedByGvisor/")
+		name := strings.TrimPrefix(t.Name(), "TestDockerRuncScriptIsPinned/")
 		got = append(got, fmt.Sprintf("%q: %q,", name, h))
 		if w := want[name]; w != h {
 			t.Errorf("docker script with runc changed (hash %s, want %s)", h, w)
@@ -232,7 +234,10 @@ func TestGvisorChecksumLine(t *testing.T) {
 // daemon.json keeps devkit's two defaults in every mode; gVisor modes
 // register both gVisor runtimes and make the configured one the default.
 func TestGvisorDaemonJSON(t *testing.T) {
-	base := map[string]any{"no-new-privileges": true, "ip": "127.0.0.1"}
+	// With runc the runtime guard is the default, under its own name.
+	base := map[string]any{"no-new-privileges": true, "ip": "127.0.0.1",
+		"runtimes":        map[string]any{"devkit-runc": map[string]any{"path": "/usr/local/bin/devkit-runc-guard"}},
+		"default-runtime": "devkit-runc"}
 	if got := daemonJSON(t, mustSystem(t, dockerParams(nil))); !reflect.DeepEqual(got, base) {
 		t.Errorf("runc: %v", got)
 	}

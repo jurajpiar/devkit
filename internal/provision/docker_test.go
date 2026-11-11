@@ -84,7 +84,7 @@ const (
 // carries the steps that undo it instead, for a VM that had it.
 func TestDockerStepsOnlyInDockerMode(t *testing.T) {
 	steps := []string{dockerHold, dockerStart, dockerLinger, dockerMask, dockerUnit, dockerLauncher,
-		"dpkg-statoverride --force-all --update --add root", "apparmor_parser -R", `echo "DOCKER_HOST=unix://` + DockerSocket + `" >> /etc/environment`,
+		"dpkg-statoverride --force-all --update --add root", "apparmor_parser -R", `echo "DOCKER_HOST=unix://` + FilterSocket + `" >> /etc/environment`,
 		"cat > " + DockerConfigHelper + " <<'DKEOF'\n", "docker.io docker-compose-v2"}
 	for _, v := range []project.Containers{project.ContainersOff, project.ContainersContainerd} {
 		s, err := System(params(func(c *project.Config) { c.Tools.Containers = v }))
@@ -156,10 +156,11 @@ func TestDockerOrdering(t *testing.T) {
 		lift, dRevert := index(t, s, dockerLift), index(t, s, dockerRevert)
 		start := index(t, s, dockerStart)
 		wait := index(t, s, `timeout 10 docker --host "unix://`+DockerSocket+`" info`)
+		filterWait := index(t, s, filterWait)
 		lock := strings.Index(s, moduleLock)
 		stamp := index(t, s, "> /etc/devkit/provision.id")
-		if !(fw < revert && revert < restart && restart < lift && lift < dRevert && dRevert < start && start < wait && wait < lock && lock < stamp) {
-			t.Errorf("order: firewall=%d revert=%d resolved=%d lift=%d drevert=%d start=%d wait=%d lock=%d stamp=%d", fw, revert, restart, lift, dRevert, start, wait, lock, stamp)
+		if !(fw < revert && revert < restart && restart < lift && lift < dRevert && dRevert < start && start < wait && wait < filterWait && filterWait < lock && lock < stamp) {
+			t.Errorf("order: firewall=%d revert=%d resolved=%d lift=%d drevert=%d start=%d wait=%d filter=%d lock=%d stamp=%d", fw, revert, restart, lift, dRevert, start, wait, filterWait, lock, stamp)
 		}
 		// The unit exists before it starts, and a workspace before the
 		// daemon's mount of it.
@@ -181,7 +182,12 @@ func TestDockerOrdering(t *testing.T) {
 		}
 		// The hold is on the two slices and resolved, by runtime property;
 		// the daemon's own unit never runs before the lift, so it needs none.
-		if n := strings.Count(s, "IPAddressDeny=any"); n != 3 {
+		// The filter's unit denies IP outright: it speaks Unix sockets only.
+		filterUnit, err := heredocBody(s, filterServiceUnit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(s, "IPAddressDeny=any") - strings.Count(filterUnit, "IPAddressDeny=any\n"); n != 3 {
 			t.Errorf("IPAddressDeny=any should be set on the two slices and resolved only, found %d", n)
 		}
 		// Nothing but this script starts the daemon.
@@ -238,21 +244,27 @@ func TestDockerLauncher(t *testing.T) {
 				t.Errorf("the launcher should contain %q:\n%s", want, l)
 			}
 		}
-		if !strings.Contains(s, `cat > /etc/devkit/docker/daemon.json <<'EOF'`+"\n"+`{"no-new-privileges": true, "ip": "127.0.0.1"}`+"\nEOF\n") {
-			t.Error("daemon.json should hold devkit's defaults")
+		if d := daemonJSON(t, s); d["no-new-privileges"] != true || d["ip"] != "127.0.0.1" {
+			t.Errorf("daemon.json should hold devkit's defaults: %v", d)
 		}
-		// Socket access for the sandbox user, and traversal of its home for
-		// the account; no ACL on the workspace itself.
+		// Socket access for the filter's account only, and traversal of the
+		// home for it and the Docker account; no ACL on the workspace itself.
 		for _, want := range []string{
-			`setfacl -m "u:$DEVKIT_USER:rx" -m "d:u:$DEVKIT_USER:rw" "$DOCKER_HOME/run"`,
+			`setfacl -m "u:$FILTER_ACCOUNT:rx" -m "d:u:$FILTER_ACCOUNT:rw" "$DOCKER_HOME/run"`,
 			`setfacl -m "u:$DOCKER_ACCOUNT:x" "$DEVKIT_HOME"`,
+			`setfacl -m "u:$FILTER_ACCOUNT:x" "$DEVKIT_HOME"`,
 		} {
 			if !strings.Contains(s, want) {
 				t.Errorf("missing %q", want)
 			}
 		}
-		if strings.Count(s, "setfacl -m") != 2 || strings.Contains(s, "setfacl -R") {
-			t.Error("the workspace must carry no ACL")
+		if strings.Count(s, "setfacl -m") != 3 || strings.Contains(s, "setfacl -R") || strings.Contains(s, `setfacl -m "u:$DEVKIT_USER`) {
+			t.Error("the workspace must carry no ACL, and the sandbox user none on the daemon's directory")
+		}
+		// The launcher mounts the workspace by its real path and refuses a
+		// symlink in its place.
+		if !strings.Contains(l, `W='$WS_REAL'`) || !strings.Contains(l, `if [ -L "\$W" ] || [ ! -d "\$W" ]`) {
+			t.Errorf("the launcher should use the workspace's real path and refuse a symlink:\n%s", l)
 		}
 	})
 }
@@ -287,7 +299,7 @@ func TestDockerScriptsParse(t *testing.T) {
 		}
 		// The launcher as root's shell will see it once the heredoc expands.
 		expanded := strings.NewReplacer(`\$`, "$", `\\`, `\`, "$DOCKER_UID", "999", "$DOCKER_GID", "999", "$DOCKER_HOME", DockerHome,
-			"$DOCKER_RUN", "/run/user/999", "$SANDBOX_UID", "501", "$IDMAP", "u:501:999:1", "$WS", "/home/alice/workspace", "$DOCKER_ACCOUNT", DockerAccount).Replace(l)
+			"$DOCKER_RUN", "/run/user/999", "$SANDBOX_UID", "501", "$IDMAP", "u:501:999:1", "$WS_REAL", "/home/alice/workspace", "$WS", "/home/alice/workspace", "$DOCKER_ACCOUNT", DockerAccount).Replace(l)
 		lp := filepath.Join(dir, name+"-launcher.sh")
 		os.WriteFile(lp, []byte(expanded), 0o644)
 		if out, err := exec.Command("sh", "-n", lp).CombinedOutput(); err != nil {
