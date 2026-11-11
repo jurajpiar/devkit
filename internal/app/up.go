@@ -190,6 +190,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// The user provisioning wrote the Docker client's proxy settings before
+	// this sync could bring the project's Compose files; written again now,
+	// so their service names are exempt from the proxy.
+	if cfg.Tools.Containers.Docker() {
+		if out, err := lima.Exec(ctx, name, provision.DockerConfigHelper); err != nil {
+			fmt.Printf("Warning: could not update the Docker client's proxy settings: %v %s\n", err, printable(out))
+		}
+	}
 
 	noInstall, _ := cmd.Flags().GetBool("no-install")
 	if cfg.Network.Mode != project.NetworkNone {
@@ -293,7 +301,10 @@ func syncSource(ctx context.Context, cfg *project.Config, cwd string) error {
 			return nil
 		}
 		fmt.Printf("Cloning %s (%s) inside the VM\n", cfg.Repo, cfg.Branch)
-		return lima.ExecStream(ctx, name, fmt.Sprintf("rm -rf %s && git clone --branch %q %q %s", ws, cfg.Branch, cfg.Repo, ws))
+		// Emptied, not removed: with tools.containers: docker the daemon's
+		// ID-mapped mount holds this directory, and would keep pointing at a
+		// removed one until the VM restarts.
+		return lima.ExecStream(ctx, name, fmt.Sprintf("mkdir -p %s && find %s -mindepth 1 -maxdepth 1 -exec rm -rf {} + && git clone --branch %q %q %s", ws, ws, cfg.Branch, cfg.Repo, ws))
 	case project.SourceMount:
 		fmt.Println("Host directory is mounted at ~/workspace")
 		return nil
