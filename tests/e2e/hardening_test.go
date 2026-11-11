@@ -197,6 +197,70 @@ sleep 3; python3 ~/sweep.py "$resolver"; wait`)
 			t.Log(list)
 		}
 	})
+
+	t.Run("Ubuntu services the sandbox does not need are off", func(t *testing.T) {
+		// The image ships snapd and pollinate. With no snaps installed,
+		// snapd.seeded still holds every first boot for 40 seconds before
+		// provisioning can start, and pollinate holds SSH for 10 more; both
+		// also call out as root, on a schedule in snapd's case. devkit
+		// masks them from the first moments of every boot.
+		out, _ := s.shell("for u in snapd.service snapd.socket snapd.seeded.service pollinate.service; do echo \"$u=$(systemctl is-enabled $u 2>&1 | head -n 1)\"; done")
+		for _, u := range []string{"snapd.service", "snapd.socket", "snapd.seeded.service", "pollinate.service"} {
+			if !strings.Contains(out, u+"=masked") {
+				t.Errorf("%s should be masked: %s", u, out)
+			}
+		}
+		// Every unit snapd ships, not only the ones that delay boot: its
+		// repair timer fetches from the snap store on its own.
+		out, _ = s.shell("systemctl list-unit-files 'snapd.*' --no-legend 2>/dev/null | awk '$2 != \"masked\" {print \"NOT-MASKED \" $1 \" \" $2}'; echo checked=$(systemctl list-unit-files 'snapd.*' --no-legend 2>/dev/null | wc -l)")
+		if strings.Contains(out, "NOT-MASKED") || strings.Contains(out, "checked=0") {
+			t.Errorf("snapd units left unmasked (or none found, so the check proves nothing): %s", out)
+		}
+		if out, _ := s.shell("pgrep -a snapd; systemctl is-active snapd.service snapd.socket snapd.snap-repair.timer 2>&1"); strings.Contains(out, "/snapd") || lineIs(out, "active") {
+			t.Errorf("snapd is running or one of its units is active: %s", out)
+		}
+		// What the masks buy: the boot no longer waits on snapd. Logged
+		// with a generous bound; the wait it guards against is 40 seconds
+		// on its own.
+		out, _ = s.shell("systemd-analyze 2>&1 | tail -n 1")
+		t.Logf("boot: %s", strings.TrimSpace(out))
+		// By now the VM has been restarted by earlier subtests, so this is
+		// the check for a boot after the first. TestSandboxGuarantees makes
+		// the same check straight after the first boot.
+		neverStartedThisBoot(t, s, "a restart")
+		// The firewall and the rest of provisioning do not depend on
+		// either: the checks above this one ran on a VM booted this way.
+		if out, _ := s.shell("systemctl --failed --no-legend | wc -l"); strings.TrimSpace(out) != "0" {
+			failed, _ := s.shell("systemctl --failed --no-legend")
+			t.Errorf("failed units after boot: %s", failed)
+		}
+	})
+}
+
+// neverStartedThisBoot fails unless the units that used to delay boot were
+// never started in the VM's current boot. Being inactive now is not enough:
+// a unit that ran, held the boot and was stopped afterwards is inactive
+// too. systemd records when a unit last left the inactive state, as a
+// monotonic time that is zero if it never did since boot; any user may read
+// it. (On a VM without the masks the three values are a few seconds.)
+func neverStartedThisBoot(t *testing.T, s *sandbox, when string) {
+	t.Helper()
+	out, _ := s.shell(`for u in snapd.seeded.service snapd.service pollinate.service; do echo "$u=$(systemctl show $u -p InactiveExitTimestampMonotonic --value)"; done`)
+	for _, u := range []string{"snapd.seeded.service", "snapd.service", "pollinate.service"} {
+		if !lineIs(out, u+"=0") {
+			t.Errorf("after %s, %s was started during this boot (want InactiveExitTimestampMonotonic=0): %s", when, u, out)
+		}
+	}
+}
+
+// lineIs reports whether one whole line of out, trimmed, is want.
+func lineIs(out, want string) bool {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.TrimSpace(l) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // dnsSweep binds a UDP socket to each ephemeral port in turn, sends one DNS

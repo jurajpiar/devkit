@@ -480,6 +480,10 @@ Hardhat and Foundry verify; install Foundry with `install:` and pin its version.
   applies the firewall and starts the egress proxy. Code in the VM cannot change
   the policy because it has no root. Config values are validated against a
   strict grammar before they reach the script.
+- snapd and pollinate are masked early in every boot, so a first boot no longer
+  waits on them: in one measurement, provisioning started 10 s into the first
+  boot instead of 54 s. `snap install` does not work in the VM; see
+  [SECURITY.md](SECURITY.md#ubuntu-services-switched-off).
 - Toolchain managers are installed by root from release archives pinned by
   SHA-256 in `internal/provision/provision.go`. The toolchains themselves are
   installed by the sandbox user, through the proxy, so they show in the log.
