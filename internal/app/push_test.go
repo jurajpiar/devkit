@@ -173,3 +173,15 @@ func TestLeaseRefusedWhenTheRemoteTipIsNotLocal(t *testing.T) {
 		t.Error("the remote changed")
 	}
 }
+
+// In a project made by devkit clone the directory is not a git repository,
+// so the hint has to name the bare copy or the command it prints fails.
+func TestInspectCommandNamesTheBareCopy(t *testing.T) {
+	const ref = "refs/devkit/p/fix"
+	if got, want := inspectCommand(false, ref), "git log -p "+ref; got != want {
+		t.Errorf("copied project: got %q, want %q", got, want)
+	}
+	if got, want := inspectCommand(true, ref), "git --git-dir .devkit/repo.git log -p "+ref; got != want {
+		t.Errorf("cloned project: got %q, want %q", got, want)
+	}
+}
