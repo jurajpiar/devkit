@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,25 +78,46 @@ func TestSyncKeepsVMEditsAndRefusesConflicts(t *testing.T) {
 	}
 }
 
-// The private repository lives in .devkit, which must not show in the
-// project's own git status, and nothing of devkit's reaches the VM.
+// The snapshots are kept with the VM's state on the Mac, not in the
+// project, which gains nothing; devkit rm removes them with the VM.
 func TestSyncStateStaysOutOfTheProject(t *testing.T) {
 	_, dir, guest := copyProject(t)
-	gitIn(t, dir, "init", "-q")
+	before := listDir(t, dir)
 	if out, err := syncOut(t); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if !isDir(filepath.Join(dir, ".devkit", "sync.git")) {
-		t.Fatal("the snapshots should be kept in .devkit/sync.git")
+	if after := listDir(t, dir); after != before {
+		t.Errorf("the project directory changed:\n before %s\n after  %s", before, after)
 	}
-	if st := gitIn(t, dir, "status", "--porcelain", "--untracked-files=all"); strings.Contains(st, ".devkit") {
-		t.Errorf("git status lists .devkit:\n%s", st)
+	repo := filepath.Join(vmStateDir(demoVM), "sync.git")
+	if !isDir(repo) {
+		t.Fatalf("the snapshots should be kept in %s", repo)
 	}
 	for _, p := range []string{".devkit", "devkit.yaml"} {
 		if _, err := os.Lstat(filepath.Join(guest, "workspace", p)); err == nil {
 			t.Errorf("%s reached the VM", p)
 		}
 	}
+	if out, err := runDevkit(t, "", "rm", "--force"); err != nil {
+		t.Fatalf("rm: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(repo); err == nil {
+		t.Error("devkit rm should remove the snapshots with the VM")
+	}
+}
+
+// listDir lists every path under dir with its size.
+func listDir(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	must(t, filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s %d\n", strings.TrimPrefix(p, dir), info.Size())
+		return nil
+	}))
+	return b.String()
 }
 
 func TestSyncReportsWhatItCannotCopy(t *testing.T) {

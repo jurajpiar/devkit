@@ -99,8 +99,14 @@ type copyFixture struct {
 
 func newCopyFixture(t *testing.T) *copyFixture {
 	t.Helper()
-	mac := t.TempDir()
-	repo, err := OpenCopyRepo(context.Background(), filepath.Join(mac, project.LockDir))
+	return newCopyFixtureAt(t, t.TempDir())
+}
+
+// newCopyFixtureAt is a fixture for the project mac, with the private
+// repository outside it, as devkit keeps it.
+func newCopyFixtureAt(t *testing.T, mac string) *copyFixture {
+	t.Helper()
+	repo, err := OpenCopyRepo(context.Background(), filepath.Join(t.TempDir(), "state", CopySyncRepoDir))
 	if err != nil {
 		t.Fatal(err)
 	}

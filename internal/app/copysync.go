@@ -48,7 +48,9 @@ func (e *notSyncedError) Error() string {
 // nothing applied, unless overwrite takes this Mac's version of it.
 func syncCopy(ctx context.Context, cfg *project.Config, cwd, ws string, overwrite bool) error {
 	name := cfg.VMName()
-	repo, err := gitx.OpenCopyRepo(ctx, filepath.Join(cwd, project.LockDir))
+	// Beside the VM's other host-side state, where a project cannot plant
+	// anything, and gone with the VM on devkit rm.
+	repo, err := gitx.OpenCopyRepo(ctx, copyRepoDir(cfg))
 	if err != nil {
 		return err
 	}
@@ -84,6 +86,11 @@ func syncCopy(ctx context.Context, cfg *project.Config, cwd, ws string, overwrit
 		fmt.Printf("Kept the VM's own changes, which now differ from this Mac: %s\n", listPaths(res.Kept, 5, "", ", "))
 	}
 	return syncGit(ctx, name, cwd, ws, false, cfg.Exclude)
+}
+
+// copyRepoDir is the Mac's private repository of a copied project.
+func copyRepoDir(cfg *project.Config) string {
+	return filepath.Join(vmStateDir(cfg.VMName()), gitx.CopySyncRepoDir)
 }
 
 // listPaths shows at most max paths from the VM, sanitised, each with

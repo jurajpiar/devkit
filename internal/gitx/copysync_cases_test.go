@@ -622,23 +622,54 @@ func TestCopySyncIgnoresATimestampAlone(t *testing.T) {
 	}
 }
 
-// A project could carry a .devkit/sync.git of its own making: devkit uses
-// its own config there, and no objects from anywhere else.
-func TestCopyRepoTrustsNothingItFinds(t *testing.T) {
+// listTree records every entry under dir, with its mode, size and, for a
+// symlink, its target, to tell whether anything there changed.
+func listTree(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	must(t, filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		target, _ := os.Readlink(p)
+		fmt.Fprintf(&b, "%s %v %d %s\n", strings.TrimPrefix(p, dir), info.Mode(), info.Size(), target)
+		return nil
+	}))
+	return b.String()
+}
+
+// A project can ship a .devkit/sync.git of its own, with objects that are
+// another repository's. Syncing it must neither use nor touch it: pruning
+// "unreachable" objects there would delete the other repository's history.
+func TestCopySyncIgnoresARepositoryInTheProject(t *testing.T) {
+	victim := t.TempDir()
+	gitT(t, victim, "init", "-q", "-b", "main")
+	put(t, filepath.Join(victim, "precious.txt"), "precious\n")
+	gitT(t, victim, "add", ".")
+	gitT(t, victim, "-c", "user.name=v", "-c", "user.email=v@v", "-c", "commit.gpgsign=false", "commit", "-qm", "precious")
+	head := gitT(t, victim, "rev-parse", "HEAD")
+
 	mac := t.TempDir()
-	dir := filepath.Join(mac, ".devkit", "sync.git")
-	gitT(t, mac, "init", "-q", "--bare", dir)
-	elsewhere := t.TempDir()
-	gitT(t, elsewhere, "init", "-q", "--bare")
-	must(t, os.WriteFile(filepath.Join(dir, "config"), []byte("[core]\n\tbare = true\n\tsharedRepository = 0666\n[include]\n\tpath = /nonexistent\n"), 0o644))
-	must(t, os.WriteFile(filepath.Join(dir, "objects", "info", "alternates"), []byte(filepath.Join(elsewhere, "objects")+"\n"), 0o644))
-	r, err := OpenCopyRepo(context.Background(), filepath.Join(mac, ".devkit"))
-	must(t, err)
-	if got := read(t, filepath.Join(r.Dir, "config")); got != copyRepoConfig {
-		t.Errorf("config left as found:\n%s", got)
+	planted := filepath.Join(mac, ".devkit", "sync.git")
+	must(t, os.MkdirAll(filepath.Join(planted, "refs", "heads"), 0o755))
+	put(t, filepath.Join(planted, "HEAD"), "ref: refs/heads/main\n")
+	must(t, os.Symlink(filepath.Join(victim, ".git", "objects"), filepath.Join(planted, "objects")))
+	before := listTree(t, filepath.Join(mac, ".devkit"))
+
+	f := newCopyFixtureAt(t, mac)
+	put(t, filepath.Join(mac, "a.txt"), "a\n")
+	f.mustSync()
+	put(t, filepath.Join(mac, "a.txt"), "a, changed\n")
+	f.mustSync()
+
+	if out, err := exec.Command("git", "-C", victim, "fsck", "--no-progress").CombinedOutput(); err != nil {
+		t.Errorf("the other repository is damaged: %v\n%s", err, out)
 	}
-	if exists(filepath.Join(dir, "objects", "info", "alternates")) {
-		t.Error("alternates left in place")
+	if got := gitT(t, victim, "cat-file", "-t", head); got != "commit" {
+		t.Errorf("the other repository's commit is gone: %s", got)
+	}
+	if after := listTree(t, filepath.Join(mac, ".devkit")); after != before {
+		t.Errorf("the planted directory changed:\n before %s\n after  %s", before, after)
 	}
 }
 
@@ -658,4 +689,23 @@ func TestCopySyncRecoversFromAStaleLock(t *testing.T) {
 	must(t, os.Chtimes(lock, old, old))
 	f.mustSync()
 	f.wantVM("a.txt", "a, changed\n")
+}
+
+func TestCopyRepoRefusesASymlink(t *testing.T) {
+	real := t.TempDir()
+	for _, link := range []string{"state", filepath.Join("ok", "sync.git")} {
+		base := t.TempDir()
+		must(t, os.MkdirAll(filepath.Dir(filepath.Join(base, link)), 0o755))
+		must(t, os.Symlink(real, filepath.Join(base, link)))
+		dir := filepath.Join(base, "state", "sync.git")
+		if link != "state" {
+			dir = filepath.Join(base, "ok", "sync.git")
+		}
+		if _, err := OpenCopyRepo(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Errorf("%s as a symlink: got %v", link, err)
+		}
+	}
+	if entries, _ := os.ReadDir(real); len(entries) != 0 {
+		t.Errorf("something was written through the symlink: %v", entries)
+	}
 }

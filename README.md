@@ -260,8 +260,9 @@ syncs preserve the VM's repository because it may contain new commits. Files in
 the copied commit are included even if `exclude` names them.
 
 Each sync records the directory, exactly as `tar` with your `exclude` list
-sends it, as a snapshot in a private repository in `.devkit/sync.git` (never
-your own repository, and `.devkit` ignores itself). The VM merges the change
+sends it, as a snapshot in a private repository in `~/.devkit/<vm>/sync.git`,
+never your own repository and never in the project directory, which gains
+nothing; `devkit rm` deletes it with the VM. The VM merges the change
 from the last snapshot it took, the way `git checkout` carries local edits
 across a branch switch:
 

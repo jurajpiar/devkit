@@ -445,8 +445,10 @@ boundary: the VM can write malicious code and forge commit authors.
   with your own git config and credentials, as when you run git there
   yourself, but with hooks disabled.
 - **A copied project's sync keeps snapshots on the Mac,** in
-  `.devkit/sync.git`, a private repository that is never the project's own.
-  git there runs with none of your config or the project's, no hooks, and
+  `~/.devkit/<vm>/sync.git`, a private repository that is never the
+  project's own and is outside the project directory, so a project cannot
+  supply or influence it (devkit refuses that directory, or the one above
+  it, if it is a symlink). git there runs with none of your config or the project's, no hooks, and
   only plumbing (`fast-import` fed from `tar`), so the project's files are
   data: no attributes, filters or conversions apply. The VM's answer to which
   snapshot it has is accepted only as a commit id this Mac holds, and the

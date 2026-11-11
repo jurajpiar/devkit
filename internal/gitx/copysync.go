@@ -34,8 +34,8 @@ import (
 // last applied.
 const CopySyncedRef = "refs/devkit/synced"
 
-// CopySyncRepoDir is the Mac's private repository, inside the directory
-// devkit reserves beside devkit.yaml.
+// CopySyncRepoDir is the name of the Mac's private repository, in
+// devkit's state directory for the VM (never in the project).
 const CopySyncRepoDir = "sync.git"
 
 // copyPending is where a snapshot waits until the VM has applied it.
@@ -81,28 +81,22 @@ type CopyRepo struct {
 	Dir string
 }
 
-// OpenCopyRepo opens, creating if needed, the private repository in lockDir
-// (the project's .devkit). It also gives lockDir a .gitignore that ignores
-// everything, so the repository never shows in the project's git status.
-func OpenCopyRepo(ctx context.Context, lockDir string) (*CopyRepo, error) {
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		return nil, err
-	}
-	ign, err := os.OpenFile(filepath.Join(lockDir, ".gitignore"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	switch {
-	case err == nil:
-		_, err = ign.WriteString("# devkit's own state; never part of the project.\n*\n")
-		if cerr := ign.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return nil, err
-		}
-	case !errors.Is(err, os.ErrExist):
-		return nil, err
-	}
-	dir, err := filepath.Abs(filepath.Join(lockDir, CopySyncRepoDir))
+// OpenCopyRepo opens, creating if needed, the private repository at dir.
+// dir must be outside the project, in devkit's own state for the VM:
+// pruning there deletes objects, so a project must not be able to supply
+// the repository or anything in it. dir and its parent may not be
+// symlinks.
+func OpenCopyRepo(ctx context.Context, dir string) (*CopyRepo, error) {
+	dir, err := filepath.Abs(dir)
 	if err != nil {
+		return nil, err
+	}
+	for _, p := range []string{filepath.Dir(dir), dir} {
+		if st, err := os.Lstat(p); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("refusing %s for devkit's sync snapshots: it is a symlink", p)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return nil, err
 	}
 	r := &CopyRepo{Dir: dir}
@@ -114,14 +108,8 @@ func OpenCopyRepo(ctx context.Context, lockDir string) (*CopyRepo, error) {
 			return nil, fmt.Errorf("create %s: %w: %s", dir, err, strings.TrimSpace(string(out)))
 		}
 	}
-	// The repository sits in the project directory, so a project could
-	// ship one: whatever is there, git reads only devkit's own config, and
-	// no objects or config from elsewhere.
-	for _, p := range []string{"commondir", filepath.Join("objects", "info", "alternates"), filepath.Join("objects", "info", "http-alternates")} {
-		if err := os.Remove(filepath.Join(dir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-	}
+	// The config is devkit's alone, whatever an older devkit or a user
+	// left there.
 	if err := writeFileAtomic(filepath.Join(dir, "config"), []byte(copyRepoConfig)); err != nil {
 		return nil, err
 	}
