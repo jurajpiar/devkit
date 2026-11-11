@@ -268,8 +268,9 @@ your Mac pushes with your normal credentials. No git hooks run on the Mac.
 Then open the pull request as usual, from the branch on the remote.
 
 In A, your checkout on the Mac does not have those commits on a branch.
-`git pull` or `git fetch` brings them from the remote like anyone else's; see
-the third habit below before you run anything there.
+`git fetch` brings them from the remote like anyone else's. Before you
+`git pull` them into the checkout, see the third habit below: a pull can run
+code.
 
 To push to your fork rather than the upstream, add the remote on the Mac
 (in B: `git --git-dir .devkit/repo.git remote add fork <url>`) and use
@@ -278,7 +279,8 @@ To push to your fork rather than the upstream, add the remote on the Mac
 ## 7. Keep up with upstream
 
 **A:** pull on your Mac, then copy the result in: `git pull && devkit sync`.
-Mind the rule from step 4 if you edit in the VM.
+Mind the rule from step 4 if you edit in the VM, and the third habit below
+if the commits you are pulling came from the VM.
 
 **B:**
 
@@ -330,9 +332,16 @@ across yourself.
    your editor, your git hooks and `direnv` would run for you.
 2. **Treat `devkit push` as code review.** Push to a feature branch and merge
    through a pull request. Do not expose CI secrets to branches from the VM.
-3. **Code written in the VM is untrusted on your Mac too.** Pulling it into a
-   checkout there is safe; running that checkout's tooling afterwards is not,
-   unless you have read what changed.
+3. **Read commits from the VM before they reach a checkout on your Mac.** A
+   `git pull` can run code by itself. Git runs the project's hooks when a
+   pull finishes, and in many projects (any that use husky, for one) those
+   hooks are ordinary files in the repository, so a commit can change them.
+   What to do:
+   - Look at what `devkit push` flagged. Hook files are on that list.
+   - If you have not read the commits, pull with hooks off:
+     `git -c core.hooksPath=/dev/null pull`.
+   - Either way, do not run the project's tooling in that checkout
+     afterwards (habit 1).
 4. **Keep `sudo: false`,** and leave `allow_host` off unless the project
    needs a service on your Mac.
 5. **Add hosts one at a time,** and only ones you would trust with the
