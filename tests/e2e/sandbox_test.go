@@ -133,6 +133,9 @@ func TestSandboxGuarantees(t *testing.T) {
 	start := time.Now()
 	upOut := s.mustRun("up")
 	t.Logf("devkit up took %s", time.Since(start).Round(time.Second))
+	// Before anything restarts the VM: on the first boot, the one snapd
+	// used to hold for 40 seconds, it must not have run at all.
+	neverStartedThisBoot(t, s, "the first boot")
 	// Steps that fail soft say so on stderr; none may, or a green run proves
 	// less than it claims (a DNS stub switched off too early once hid a
 	// failed ca-certificates refresh this way).
