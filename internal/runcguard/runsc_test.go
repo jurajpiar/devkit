@@ -491,3 +491,36 @@ func TestGoferFor(t *testing.T) {
 		}
 	}
 }
+
+// A /proc file over the bound is an error, not a prefix to check; one of
+// exactly the bound is read whole. openProc is the platform's own: the
+// held descriptor on Linux, the path elsewhere.
+func TestProcReadFileBound(t *testing.T) {
+	for _, tc := range []struct {
+		size int
+		ok   bool
+	}{
+		{0, true},
+		{maxProcFile, true},
+		{maxProcFile + 1, false},
+		{2 * maxProcFile, false},
+	} {
+		p := newFakeProc(t)
+		d := filepath.Join(p.dir, "7")
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "mountinfo"), bytes.Repeat([]byte("x"), tc.size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e, err := openProc(p.dir, 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := e.ReadFile("mountinfo")
+		e.Close()
+		if tc.ok != (err == nil) || (err == nil && len(data) != tc.size) {
+			t.Errorf("size %d: read %d bytes, err %v", tc.size, len(data), err)
+		}
+	}
+}

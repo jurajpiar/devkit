@@ -1,15 +1,11 @@
 package runcguard
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"syscall"
 )
-
-// maxProcFile bounds a read from /proc: a mount table is far smaller.
-const maxProcFile = 4 << 20
 
 // dirEntry is a /proc/<pid> directory held by a file descriptor. The
 // descriptor stays bound to the process it was opened for: once that
@@ -31,7 +27,7 @@ func (d *dirEntry) ReadFile(name string) ([]byte, error) {
 	}
 	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, maxProcFile))
+	return readBounded(f, name)
 }
 
 // ExeID opens the exe link, which the kernel resolves to the file the

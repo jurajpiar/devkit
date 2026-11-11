@@ -22,7 +22,12 @@ func openProc(proc string, pid int) (procEntry, error) {
 }
 
 func (p *pathEntry) ReadFile(name string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(p.dir, name))
+	f, err := os.Open(filepath.Join(p.dir, name))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readBounded(f, name)
 }
 
 func (p *pathEntry) ExeID() (fileID, error) {

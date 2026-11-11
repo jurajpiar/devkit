@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +20,23 @@ func statID(fi os.FileInfo) (fileID, error) {
 		return fileID{}, errors.New("no device and inode")
 	}
 	return fileID{uint64(st.Dev), st.Ino}, nil
+}
+
+// maxProcFile bounds a read from /proc: a mount table is far smaller.
+const maxProcFile = 4 << 20
+
+// readBounded reads a /proc file whole, or fails: a table cut short at
+// the bound would be checked as a prefix, its last line possibly cut into
+// a different path.
+func readBounded(r io.Reader, name string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxProcFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxProcFile {
+		return nil, fmt.Errorf("%s is larger than %d bytes", name, maxProcFile)
+	}
+	return data, nil
 }
 
 // procEntry is one process's directory under /proc, held open: every read
