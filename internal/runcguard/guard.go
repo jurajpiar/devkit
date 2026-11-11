@@ -206,7 +206,26 @@ func (g *Guard) check(cfg *Config, inv *Invocation) (*MountEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Check(host, ctr, Policy{Workspace: cfg.Workspace, DataRoot: cfg.DataRoot, DockerInit: cfg.DockerInit}), nil
+	// The container's cgroup as the guard sees it, which is how the
+	// guard's mount table writes the root of a cgroup2 mount. Without it,
+	// no cgroup2 mount passes.
+	cg, err := g.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return nil, err
+	}
+	return Check(host, ctr, Policy{Workspace: cfg.Workspace, DataRoot: cfg.DataRoot, DockerInit: cfg.DockerInit,
+		ContainerID: inv.ID, Cgroup: unifiedCgroup(cg)}), nil
+}
+
+// unifiedCgroup is the cgroup2 path of a /proc/<pid>/cgroup table (its
+// "0::" line), or "" if it has none.
+func unifiedCgroup(data []byte) string {
+	for _, l := range strings.Split(string(data), "\n") {
+		if p, ok := strings.CutPrefix(l, "0::"); ok && strings.HasPrefix(p, "/") {
+			return p
+		}
+	}
+	return ""
 }
 
 func (g *Guard) mountinfo(p string) ([]MountEntry, error) {

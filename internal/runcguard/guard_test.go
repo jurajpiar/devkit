@@ -118,10 +118,18 @@ func line(t *testing.T, s string) MountEntry {
 	return m[0]
 }
 
+// spikeID is the recorded container's ID: the name of its directory under
+// the data root and of its cgroup scope.
+const spikeID = "9f9ae6ce1b9dc301dbdc1f53cb39f0dcd300990f18864d27521a99bdf36bbb1f"
+
+const spikeCgroup = "/user.slice/user-999.slice/user@999.service/user.slice/docker-" + spikeID + ".scope"
+
 var spikePolicy = Policy{
-	Workspace:  "/home/jurajpiar.guest/workspace",
-	DataRoot:   "/var/lib/devkit-docker/.local/share/docker",
-	DockerInit: "/usr/bin/docker-init",
+	Workspace:   "/home/jurajpiar.guest/workspace",
+	DataRoot:    "/var/lib/devkit-docker/.local/share/docker",
+	DockerInit:  "/usr/bin/docker-init",
+	ContainerID: spikeID,
+	Cgroup:      spikeCgroup,
 }
 
 // The container table is the one the shell prototype read on a real VM, for
@@ -176,8 +184,26 @@ func TestCheckRefusesHostileMounts(t *testing.T) {
 		"/usr/bin":                                 "500 426 253:1 /usr/bin /i ro - ext4 /dev/root rw",
 		"another filesystem of the VM":             "500 426 254:16 / /b rw - ext4 /dev/vda16 rw",
 		"the VM's /dev/shm":                        "500 426 0:25 / /dev/shm rw - tmpfs tmpfs rw",
+		"the VM's devpts at /dev/pts":              "500 426 0:24 / /dev/pts rw - devpts devpts rw",
+		"the VM's cgroup tree":                     "500 426 0:30 / /sys/fs/cgroup ro - cgroup2 cgroup2 rw",
+		"the Docker account's cgroup":              "500 426 0:30 /user.slice/user-999.slice/user@999.service /c rw - cgroup2 cgroup2 rw",
+		"a cgroup named like its own":              "500 426 0:30 " + spikeCgroup + "-x /c rw - cgroup2 cgroup2 rw",
+		"a namespace file":                         "500 426 0:4 net:[4026531840] /n rw - nsfs nsfs rw",
+		"its own hostconfig.json":                  "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "/hostconfig.json /h rw - ext4 /dev/root rw",
+		"its own config.v2.json":                   "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "/config.v2.json /h rw - ext4 /dev/root rw",
+		"its own log":                              "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "/" + spikeID + "-json.log /h rw - ext4 /dev/root rw",
+		"its own directory":                        "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + " /h rw - ext4 /dev/root rw",
+		"its own checkpoints":                      "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "/checkpoints /h rw - ext4 /dev/root rw",
+		"below its own hosts":                      "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "/hosts/x /h rw - ext4 /dev/root rw",
+		"another container's hosts":                "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/abc/hosts /etc/hosts rw - ext4 /dev/root rw",
+		"another container's hostconfig.json":      "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/abc/hostconfig.json /h rw - ext4 /dev/root rw",
+		"an ID with its own as prefix":             "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "0/hosts /etc/hosts rw - ext4 /dev/root rw",
+		"its own ID as a prefix of the file":       "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "-hosts /etc/hosts rw - ext4 /dev/root rw",
+		"another container's shm":                  "500 426 0:71 / /dev/shm rw - tmpfs shm rw",
+		"part of its own shm":                      "500 426 0:70 /x /dev/shm rw - tmpfs shm rw",
+		"its own shm directory on the root fs":     "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "/mounts/shm /dev/shm rw - ext4 /dev/root rw",
 	} {
-		bad := Check(host, append(append([]MountEntry{}, ctr...), line(t, l)), spikePolicy)
+		bad := Check(shmHost(t, host), append(append([]MountEntry{}, ctr...), line(t, l)), spikePolicy)
 		if bad == nil || bad.Point != line(t, l).Point || bad.Root != line(t, l).Root {
 			t.Errorf("%s: should be refused at %q, got %+v", what, l, bad)
 		}
@@ -189,10 +215,52 @@ func TestCheckRefusesHostileMounts(t *testing.T) {
 		"the VM's sysfs where it belongs":  "500 426 0:21 / /sys ro - sysfs sysfs ro",
 		"the VM's mqueue where it belongs": "500 426 0:57 / /dev/mqueue rw - mqueue mqueue rw",
 		"a tmpfs of its own":               "500 426 0:99 / /t rw - tmpfs tmpfs rw",
-		"a cgroup2 of the VM":              "500 426 0:30 / /sys/fs/cgroup ro - cgroup2 cgroup2 rw",
+		"its own cgroup again":             "500 426 0:30 " + spikeCgroup + " /c ro - cgroup2 cgroup2 rw",
+		"a cgroup below its own":           "500 426 0:30 " + spikeCgroup + "/sub /c ro - cgroup2 cgroup2 rw",
+		"its own hosts elsewhere":          "500 426 253:1 /var/lib/devkit-docker/.local/share/docker/containers/" + spikeID + "/hosts /h ro - ext4 /dev/root rw",
+		"its own shm (--ipc shareable)":    "500 426 0:70 / /dev/shm rw - tmpfs shm rw",
 	} {
-		if bad := Check(host, append(append([]MountEntry{}, ctr...), line(t, l)), spikePolicy); bad != nil {
+		if bad := Check(shmHost(t, host), append(append([]MountEntry{}, ctr...), line(t, l)), spikePolicy); bad != nil {
 			t.Errorf("%s should pass, refused at %+v", what, *bad)
+		}
+	}
+}
+
+// shmHost is host with the shared-memory tmpfs Docker mounts for --ipc
+// shareable, for the recorded container (0:70) and for another (0:71).
+func shmHost(t *testing.T, host []MountEntry) []MountEntry {
+	d := spikePolicy.DataRoot + "/containers/"
+	return append(append([]MountEntry{}, host...),
+		line(t, "600 300 0:70 / "+d+spikeID+"/mounts/shm rw - tmpfs shm rw"),
+		line(t, "601 300 0:71 / "+d+"abc/mounts/shm rw - tmpfs shm rw"))
+}
+
+// Without the container's ID or cgroup, nothing of the data root's
+// containers or of cgroup2 passes.
+func TestCheckWithoutIDOrCgroup(t *testing.T) {
+	host, ctr := readTable(t, "guard-host.mountinfo"), readTable(t, "spike-container.mountinfo")
+	for name, p := range map[string]Policy{
+		"no ID":       {Workspace: spikePolicy.Workspace, DataRoot: spikePolicy.DataRoot, DockerInit: spikePolicy.DockerInit, Cgroup: spikeCgroup},
+		"another ID":  {Workspace: spikePolicy.Workspace, DataRoot: spikePolicy.DataRoot, DockerInit: spikePolicy.DockerInit, Cgroup: spikeCgroup, ContainerID: "abc"},
+		"an ID of ..": {Workspace: spikePolicy.Workspace, DataRoot: spikePolicy.DataRoot, DockerInit: spikePolicy.DockerInit, Cgroup: spikeCgroup, ContainerID: ".."},
+		"no cgroup":   {Workspace: spikePolicy.Workspace, DataRoot: spikePolicy.DataRoot, DockerInit: spikePolicy.DockerInit, ContainerID: spikeID},
+	} {
+		if bad := Check(host, ctr, p); bad == nil {
+			t.Errorf("%s: the recorded container passed", name)
+		}
+	}
+}
+
+func TestUnifiedCgroup(t *testing.T) {
+	for in, want := range map[string]string{
+		"0::" + spikeCgroup + "\n":                 spikeCgroup,
+		"12:memory:/x\n1:name=systemd:/y\n0::/z\n": "/z",
+		"12:memory:/x\n":                           "",
+		"":                                         "",
+		"0::relative\n":                            "",
+	} {
+		if got := unifiedCgroup([]byte(in)); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
 		}
 	}
 }
@@ -335,7 +403,8 @@ func TestGuardCreate(t *testing.T) {
 	runc := fakeRunc(t)
 	host, _ := os.ReadFile("testdata/guard-host.mountinfo")
 	ctr, _ := os.ReadFile("testdata/spike-container.mountinfo")
-	args := []string{"--root", "/r", "--log", "", "--log-format", "json", "--systemd-cgroup", "create", "--bundle", "/b", "--pid-file", "/b/init.pid", "abc"}
+	args := []string{"--root", "/r", "--log", "", "--log-format", "json", "--systemd-cgroup", "create", "--bundle", "/b", "--pid-file", "/b/init.pid", spikeID}
+	cgroup := "0::" + spikeCgroup + "\n"
 	withLog := func(log string) []string {
 		a := append([]string{}, args...)
 		a[3] = log
@@ -343,7 +412,7 @@ func TestGuardCreate(t *testing.T) {
 	}
 
 	// Passes: runc ran once with the same arguments, nothing deleted.
-	e := &fakeEnv{files: map[string]string{"/b/init.pid": "4242\n", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": string(ctr)}}
+	e := &fakeEnv{files: map[string]string{"/b/init.pid": "4242\n", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": string(ctr), "/proc/4242/cgroup": cgroup}}
 	logf := filepath.Join(t.TempDir(), "log.json")
 	if code := e.guard(t, guardConfig(runc)).Main(withLog(logf)); code != 0 {
 		t.Fatalf("code %d: %s", code, e.stderr.String())
@@ -355,11 +424,11 @@ func TestGuardCreate(t *testing.T) {
 	// Refused: deleted with the same global flags, the error in the log
 	// as containerd reads it, and on stderr.
 	bad := string(ctr) + "500 426 253:1 /var/lib/devkit-docker/run /s rw - ext4 /dev/root rw\n"
-	e = &fakeEnv{files: map[string]string{"/b/init.pid": "4242", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": bad}}
+	e = &fakeEnv{files: map[string]string{"/b/init.pid": "4242", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": bad, "/proc/4242/cgroup": cgroup}}
 	if code := e.guard(t, guardConfig(runc)).Main(withLog(logf)); code != 1 {
 		t.Fatalf("code %d", code)
 	}
-	wantDelete := []string{runc, "--root", "/r", "--log", logf, "--log-format", "json", "--systemd-cgroup", "delete", "--force", "abc"}
+	wantDelete := []string{runc, "--root", "/r", "--log", logf, "--log-format", "json", "--systemd-cgroup", "delete", "--force", spikeID}
 	if len(e.ran) != 2 || !reflect.DeepEqual(e.ran[1], wantDelete) {
 		t.Errorf("ran %v", e.ran)
 	}
@@ -375,7 +444,7 @@ func TestGuardCreate(t *testing.T) {
 
 	// A text log gets a logrus-style line.
 	textLog := filepath.Join(t.TempDir(), "log")
-	e = &fakeEnv{files: map[string]string{"/b/init.pid": "4242", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": bad}}
+	e = &fakeEnv{files: map[string]string{"/b/init.pid": "4242", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": bad, "/proc/4242/cgroup": cgroup}}
 	a := withLog(textLog)
 	a[5] = "text"
 	e.guard(t, guardConfig(runc)).Main(a)
@@ -387,6 +456,21 @@ func TestGuardCreate(t *testing.T) {
 	e = &fakeEnv{runCode: 3}
 	if code := e.guard(t, guardConfig(runc)).Main(withLog(logf)); code != 3 || len(e.ran) != 1 {
 		t.Errorf("code %d ran %v", code, e.ran)
+	}
+
+	// The container's own files pass under its own ID only: the same
+	// table for a container of another ID is refused at its files.
+	other := withLog(logf)
+	other[len(other)-1] = "abc"
+	e = &fakeEnv{files: map[string]string{"/b/init.pid": "4242", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": string(ctr), "/proc/4242/cgroup": cgroup}}
+	if code := e.guard(t, guardConfig(runc)).Main(other); code != 1 || !strings.Contains(e.stderr.String(), "/containers/"+spikeID+"/") {
+		t.Errorf("another ID: code %d: %s", code, e.stderr.String())
+	}
+
+	// A cgroup table it cannot read refuses.
+	e = &fakeEnv{files: map[string]string{"/b/init.pid": "4242", "/proc/self/mountinfo": string(host), "/proc/4242/mountinfo": string(ctr)}}
+	if code := e.guard(t, guardConfig(runc)).Main(withLog(logf)); code != 1 || len(e.ran) != 2 {
+		t.Errorf("no cgroup table: code %d ran %v", code, e.ran)
 	}
 
 	// A mount table it cannot read refuses too.

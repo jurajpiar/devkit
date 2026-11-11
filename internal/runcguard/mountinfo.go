@@ -103,14 +103,30 @@ type Policy struct {
 	Workspace  string
 	DataRoot   string
 	DockerInit string
+	// ContainerID is the container being created: runc's container ID,
+	// which is Docker's, and the name of its directory under the data
+	// root. Only that directory's files may be mounted into it.
+	ContainerID string
+	// Cgroup is the container's own cgroup, as /proc/<pid>/cgroup gives it
+	// to the guard. A cgroup2 mount passes only at or below it.
+	Cgroup string
 }
+
+// containerFiles are the files Docker mounts into a container from the
+// container's own directory under the data root. The directory also holds
+// what Docker reads the container's settings and privileges from
+// (config.v2.json, hostconfig.json), its log and its checkpoints, none of
+// which a container is given.
+var containerFiles = map[string]bool{"hosts": true, "hostname": true, "resolv.conf": true}
 
 // devNodes are the device nodes runc binds into every rootless container.
 var devNodes = map[string]bool{"/null": true, "/zero": true, "/full": true, "/tty": true, "/random": true, "/urandom": true}
 
-// canonicalPoint is where each kernel filesystem of a container's own
-// belongs.
-var canonicalPoint = map[string]string{"sysfs": "/sys", "mqueue": "/dev/mqueue", "devpts": "/dev/pts"}
+// canonicalPoint is where the VM's own instance of a kernel filesystem may
+// appear in a container: runc binds the VM's sysfs and mqueue in their
+// place when a rootless container may not mount new ones. A container's
+// devpts is always a new instance.
+var canonicalPoint = map[string]string{"sysfs": "/sys", "mqueue": "/dev/mqueue"}
 
 func under(p, dir string) bool {
 	return p == dir || strings.HasPrefix(p, dir+"/")
@@ -120,12 +136,15 @@ func under(p, dir string) bool {
 // outside where mounts may come from, or nil. host is the guard's own
 // mount table, which is the daemon's: a device that does not appear in it
 // is a filesystem made for the container (its proc, its tmpfs, its devpts)
-// and passes. Of the filesystems that exist outside the container, only
-// these pass: the overlay at its root; cgroup2; sysfs, mqueue and devpts
-// whole and where they belong; the device nodes rootless containers bind;
-// and from the VM's root filesystem, the workspace, a volume's data, a
-// container's own files under the data root, and docker-init. The VM's
-// /proc never passes: a container's own proc is always a new filesystem.
+// and passes, except a namespace file, whose filesystem never appears
+// there. Of the filesystems that exist outside the container, only these
+// pass: the overlay at its root; cgroup2 at or below the container's own
+// cgroup; sysfs and mqueue whole and where they belong; the device nodes
+// rootless containers bind; the container's own shared-memory tmpfs; and
+// from the VM's root filesystem, the workspace, a volume's data, the
+// container's own hosts, hostname and resolv.conf, and docker-init. The
+// VM's /proc never passes: a container's own proc is always a new
+// filesystem.
 func Check(host, ctr []MountEntry, p Policy) *MountEntry {
 	devs := map[string]bool{}
 	var rootMount *MountEntry
@@ -145,13 +164,18 @@ func Check(host, ctr []MountEntry, p Policy) *MountEntry {
 	}
 	for i := range ctr {
 		m := &ctr[i]
+		if m.FSType == "nsfs" {
+			return m // a handle on another namespace: Docker never mounts one
+		}
 		if !devs[m.Dev] {
 			continue
 		}
 		switch {
 		case m.FSType == "overlay" && m.Point == "/":
 			continue
-		case m.FSType == "cgroup2":
+		case m.FSType == "cgroup2" && p.Cgroup != "" && under(m.Root, p.Cgroup):
+			continue
+		case m.FSType == "tmpfs" && m.Root == "/" && ownShm(host, m.Dev, p):
 			continue
 		case m.FSType == "proc":
 			return m
@@ -168,10 +192,33 @@ func Check(host, ctr []MountEntry, p Policy) *MountEntry {
 	return nil
 }
 
+// validID is a container ID the guard can match to a directory: one path
+// component.
+func validID(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.Contains(id, "/")
+}
+
+// ownShm reports whether dev is the tmpfs Docker mounts at the container's
+// own shm directory, which it does for --ipc shareable.
+func ownShm(host []MountEntry, dev string, p Policy) bool {
+	if !validID(p.ContainerID) {
+		return false
+	}
+	want := path.Join(p.DataRoot, "containers", p.ContainerID, "mounts", "shm")
+	for _, h := range host {
+		if h.Dev == dev && h.FSType == "tmpfs" && h.Root == "/" && h.Point == want {
+			return true
+		}
+	}
+	return false
+}
+
 // allowedOnRoot is the rule for mounts of the VM's root filesystem.
 // Volumes and container files are matched to Docker's own layout:
-// <data>/volumes/<name>/_data and below, <data>/containers/<id>/<file>
-// and below, never the directories that hold every volume or container.
+// <data>/volumes/<name>/_data and below, and of <data>/containers/, only
+// the three files Docker gives a container from its own directory.
+// mountinfo gives the path a mount was made from with its symlinks
+// resolved, so a link elsewhere named like one of these does not pass.
 func allowedOnRoot(root string, p Policy, fsPath func(string) string) bool {
 	if under(root, fsPath(p.Workspace)) || root == fsPath(p.DockerInit) {
 		return true
@@ -181,8 +228,8 @@ func allowedOnRoot(root string, p Policy, fsPath func(string) string) bool {
 		return len(parts) >= 2 && parts[0] != "" && parts[1] == "_data"
 	}
 	if rel, ok := strings.CutPrefix(root, fsPath(p.DataRoot)+"/containers/"); ok {
-		parts := strings.Split(rel, "/")
-		return len(parts) >= 2 && parts[0] != "" && parts[1] != ""
+		id, file, _ := strings.Cut(rel, "/")
+		return validID(p.ContainerID) && id == p.ContainerID && containerFiles[file]
 	}
 	return false
 }
