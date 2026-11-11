@@ -48,6 +48,7 @@ func upProject(t *testing.T, status string) *fakelima.Fake {
 	// waits for its service; without a build there is none and this answer
 	// goes unused. The tests must pass either way.
 	f.OnShell("systemctl is-active", "active\n", 0)
+	f.AcceptCopySync()
 	return f
 }
 
@@ -292,16 +293,12 @@ func TestUpWithAStampProceeds(t *testing.T) {
 	if !strings.Contains(out, "Ready") {
 		t.Errorf("up should finish with Ready:\n%s", out)
 	}
-	calls, inputs := afterStart(t, f)
+	calls, _ := afterStart(t, f)
 	if hasCall(calls, "stop", demoVM) {
 		t.Errorf("a provisioned VM must not be stopped: %q", calls)
 	}
-	sent := false
-	for _, in := range inputs {
-		sent = sent || in != nil
-	}
-	if !sent {
-		t.Error("the source should be copied in")
+	if !hasVerb(calls, "copy") || !mentions(calls, "devkit-sync ") {
+		t.Error("the source should be synced in")
 	}
 }
 
@@ -352,7 +349,7 @@ func TestShellAndSyncWorkWithAStaleStamp(t *testing.T) {
 			ran := false
 			for i, c := range f.Calls() {
 				last := c[len(c)-1]
-				ran = ran || (c[0] == "shell" && strings.HasSuffix(last, "; true")) || f.Inputs()[i] != nil
+				ran = ran || (c[0] == "shell" && strings.HasSuffix(last, "; true")) || f.Inputs()[i] != nil || c[0] == "copy"
 			}
 			if !ran {
 				t.Errorf("%s should have reached the VM: %q", args[0], f.Calls())
