@@ -113,10 +113,13 @@ func TestDockerGvisor(t *testing.T) {
 			t.Errorf("the sandbox user can write gVisor's files or the daemon's settings: %s", out)
 		}
 		underGvisor(t, "runsc")
-		// runc stays registered: choosing it is the user's to do until the
-		// API is filtered. The check is that it is not what runs by default.
-		if out := sh("docker run --rm --runtime=runc busybox:1.36 uname -r"); !hasLine(out, guestKernel) {
-			t.Errorf("--runtime=runc should still run on the VM's kernel: %s", out)
+		// With the API filtered the runtime is a control, not a default:
+		// asking for runc by name is refused by devkit.
+		if out := sh("docker run --rm --runtime=runc busybox:1.36 uname -r"); ok(out) || !strings.Contains(out, "devkit") {
+			t.Errorf("--runtime=runc should be refused by the filter under gvisor: %s", out)
+		}
+		if out := sh("docker run --rm --runtime=runsc-hostnet busybox:1.36 true"); ok(out) || !strings.Contains(out, "devkit") {
+			t.Errorf("the other gVisor runtime should be refused too; only the configured one runs: %s", out)
 		}
 	})
 
