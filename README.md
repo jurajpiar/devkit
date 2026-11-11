@@ -156,7 +156,7 @@ allowed host the attacker already controls, or a hypervisor escape.
 | Get code onto your remote, and from there into CI or your checkout | `devkit push` only: the VM holds no credentials; you review the commits, the changed files that run outside the VM are flagged, and nothing is pushed until you say yes | You approve it; the review is the gate, see "What git in the VM changes" below | `TestPushReviewsThenPushesWithHostCredentialsAndNoHooks`, `TestReviewShowsEveryCommitWhateverItsText`, `TestReviewShowsWhatAForcedPushRemoves` |
 | Exploit git on your Mac with a crafted bundle | devkit parses the header itself; `git index-pack --strict` checks every object; size capped at 512 MiB; no hooks run | A bug in git's own pack parsing, the code every `git fetch` from an untrusted remote runs | `TestImportRejectsAMaliciousTree`, `TestImportChecksObjectsEvenWhenTheRepoDisablesFsck` |
 | Rewrite the policy or swap the proxy | Root-only policy files; proxy installed only if its SHA-256 matches | Root in the guest; or the devkit binary or devkit.yaml on your Mac is tampered with, which is outside the sandbox entirely | `policy files are root-only` |
-| Become root | No sudo; io_uring, unprivileged BPF and `AF_ALG` off; unprivileged user namespaces refused (unless `containers: true`); module loading locked after provisioning; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied`, `TestKernelLockdown` |
+| Become root | No sudo; io_uring, unprivileged BPF and `AF_ALG` off; unprivileged user namespaces refused (unless `containers: true`; with `containers: docker`, open to Docker's own account only); module loading locked after provisioning; security pocket at boot | A kernel bug in a subsystem still reachable and not yet in the security pocket, or `sudo: true` | `unprivileged kernel attack surface is reduced`, `security updates are applied`, `TestKernelLockdown` |
 | Root reaches your Mac's loopback services | Nothing inside the guest | The row above; your files still need a hypervisor escape on top | `TestRootInGuestReachesHost`, kept red on purpose |
 
 ### Enforcement on the Mac: `network.enforce: host`
@@ -307,7 +307,7 @@ tools:
   versions:             # mise tool: version, seeded by devkit init
     node: "22"
     go: "1.27"
-  containers: false     # rootless containerd + nerdctl inside the VM
+  containers: false     # true: rootless containerd + nerdctl; docker: rootless Docker
   packages: [pkg-config]  # extra apt packages
 
 # install: make deps    # replaces the lockfile-based install devkit picks
@@ -419,6 +419,8 @@ Two more kernel controls. Unprivileged user namespaces are refused outright
 AppArmor profiles exempt, such as `rootlesskit` or `podman` installed from
 `tools.packages`; root is unaffected. `containers: true` leaves them open,
 under AppArmor's restriction alone, because rootless containerd needs them.
+`containers: docker` leaves them on in the kernel but closes them, through
+AppArmor, to every account except Docker's own (see Docker, below).
 Kernel module loading is locked, for root too, as the last step of
 provisioning, after the firewall is up and what the configuration needs is
 loaded; every boot locks it again. A tool that needs a module nothing loaded
@@ -484,7 +486,71 @@ thing that can reach the port is the sandbox itself. Remove the service from
 containerd and `nerdctl` for databases and services. It also leaves
 unprivileged user namespaces open, which rootless containerd needs, and loads
 the bridge, overlay and netfilter modules containers use before module
-loading is locked.
+loading is locked. `containers: docker` gives Docker instead, described next.
+
+**Docker.** With `containers: docker` the VM gets Docker, Compose and buildx,
+run rootless under an account of its own, `devkit-docker`, never as root and
+never as the sandbox user. The reason is user namespaces: rootless Docker
+needs them with capabilities inside, and only that account gets them. Ubuntu's
+AppArmor profiles exempt `rootlesskit`, `runc` and `slirp4netns` by path; devkit
+makes those three executable by the account only, and disables every other
+stock profile that exempts a program, so for the sandbox user user namespaces
+stay as closed as without containers. The sandbox user reaches the daemon with
+no setup: `DOCKER_HOST` points every session at its socket. The rootful
+`docker.service` is masked and never runs.
+
+Containers have the network the rest of the VM has. Their traffic leaves
+through `slirp4netns`, under the account's UID, which the firewall rejects
+everywhere except the VM's loopback (and what `allow_host` or `dns: resolvers`
+open to the whole VM), so the only way out is the egress proxy,
+with its allowlist and its log. The daemon reaches the proxy at 10.0.2.2,
+which is the VM's loopback as seen from a container; that also means a
+container can reach anything else listening on the VM's 127.0.0.1, such as
+`services: [postgres]`. On every boot the account is held off the network
+like the sandbox user, and the daemon starts only after the firewall, so a
+container with `--restart always` gets nothing before it.
+
+The workspace is shared with the daemon, and nothing else is. The daemon mounts
+`~/workspace` over itself with your IDs mapped to the account's, in its own
+mount namespace, so container root is you on disk: what a container writes in
+a bind mount of the workspace belongs to you, and what you or `devkit sync`
+write is writable from the container. A bind mount of anything else in your
+home, such as `~/.ssh`, fails: the account may only pass through your home
+directory, not read it. `source: mount` cannot be combined with
+`containers: docker`: virtiofs, which carries the mount, does not support
+ID-mapped mounts on the VM's kernel. Use `source: copy` or `git`.
+
+devkit writes the proxy into the Docker client's `~/.docker/config.json`, and
+Docker passes it to every container and build as `http_proxy` and the like.
+`no_proxy` names `localhost`, the loopback addresses, and the services and
+`container_name`s of the Compose files at the workspace root and one directory
+below, so one service reaches another by name. A name that is not a plain
+name is left out. Run `devkit up` again after adding a Compose service. Some
+clients ignore `no_proxy`, busybox `wget` among them; tell those to skip the
+proxy for service names (`wget -Y off`).
+
+Docker Hub is not allowed by default: allowing a registry is your decision. A
+pull from it needs these hosts in `network.allow`:
+
+```yaml
+    - registry-1.docker.io
+    - auth.docker.io
+    - production.cloudflare.docker.com
+    - production.cloudfront.docker.com
+    - "**.r2.cloudflarestorage.com"
+```
+
+Two defaults are set in the daemon's root-owned configuration:
+`no-new-privileges`, so setuid programs in a container gain nothing, and
+published ports bind to the VM's 127.0.0.1. A `docker run` can override
+either today. The
+Docker API itself is not filtered yet: anyone who can reach the socket, which
+is the sandbox user and whatever it runs, can ask the daemon for privileged
+containers, host bind mounts of what the account may read and the rest. All
+of that stays inside the account's user namespace and behind the firewall,
+but it is more than the sandbox user can do on its own. Turning
+`containers: docker` off stops the daemon and puts back what devkit changed
+in AppArmor and file modes; the account and its images are kept.
 
 ## Toolchains
 

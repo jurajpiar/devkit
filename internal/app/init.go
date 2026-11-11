@@ -148,7 +148,7 @@ func renderConfig(c *project.Config) string {
 	} else if c.Tools.Manager == project.ManagerMise {
 		fmt.Fprintf(&b, "  # versions: { node: \"22\", go: \"1.27\" }\n")
 	}
-	fmt.Fprintf(&b, "  containers: false     # rootless containerd + nerdctl inside the VM\n")
+	fmt.Fprintf(&b, "  containers: false     # true: rootless containerd + nerdctl; docker: rootless Docker under its own account\n")
 	if len(c.Tools.Packages) > 0 {
 		fmt.Fprintf(&b, "  packages: [%s]\n", strings.Join(c.Tools.Packages, ", "))
 	} else {
@@ -163,6 +163,9 @@ func renderConfig(c *project.Config) string {
 	for _, h := range c.Network.Allow {
 		fmt.Fprintf(&b, "    - %q\n", h)
 	}
+	fmt.Fprintf(&b, "  # Docker Hub, for containers: docker (not allowed unless listed):\n")
+	fmt.Fprintf(&b, "  #   - registry-1.docker.io\n  #   - auth.docker.io\n  #   - production.cloudflare.docker.com\n")
+	fmt.Fprintf(&b, "  #   - production.cloudfront.docker.com\n  #   - \"**.r2.cloudflarestorage.com\"\n")
 	fmt.Fprintf(&b, "  allow_host: false     # let the VM reach services on your Mac\n")
 	fmt.Fprintf(&b, "  # dns: proxy          # only the proxy resolves names; resolvers opens DNS to the VM\n")
 	fmt.Fprintf(&b, "  # forward: [3000]     # guest ports exposed on 127.0.0.1; none otherwise\n")
