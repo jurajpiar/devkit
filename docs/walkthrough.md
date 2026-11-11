@@ -32,9 +32,17 @@ but the clone is bare: the directory holds `devkit.yaml` and `.devkit/` and
 none of the project's files. Nothing in the repository can run on your Mac
 through a checkout, a hook or an editor opening the folder.
 
-Already have a checkout you trust enough to keep on disk? Run `devkit init`
-inside it instead. The directory is then copied into the VM, and the rest of
-this walkthrough is the same.
+This walkthrough is for a project made by `devkit clone`. A directory you
+already have on your Mac works too (`devkit init` inside it), but it flows
+the other way and some steps differ:
+
+- The directory is copied into the VM on every `devkit up` and `devkit
+  sync`, over the files already there. A file you edited in the VM is
+  replaced by the Mac's copy, so either edit on the Mac and sync, or work in
+  the VM and use `devkit up --no-sync` when you change `devkit.yaml`.
+- `devkit sync` copies your directory again; it does not fetch upstream.
+- There is no `.devkit/repo.git`: the commits `devkit push` brings out are
+  stored in your own checkout, and plain `git` commands see them.
 
 ## 2. Read the one file that decides everything
 
@@ -99,8 +107,14 @@ Or connect your editor: VS Code, Cursor and Zed open `ssh devkit-devkit`
 with Remote-SSH, folder `~/workspace`; `devkit connect` prints the steps. The
 editor's terminal, language server and extensions then run in the VM too.
 
-A web app the project serves is not reachable from your Mac until you list
-its port: add `forward: [3000]` under `network` and run `devkit up` again.
+A web app the project serves is not forwarded to your Mac by devkit until you
+list its port: add `forward: [3000]` under `network` and run `devkit up`
+again. An editor connected over SSH is a second way in that devkit does not
+control: VS Code and Cursor forward ports through their own SSH tunnel,
+often automatically when something starts listening. Turn automatic port
+forwarding off in the editor (in VS Code, `remote.autoForwardPorts`), and
+forward only what you mean to open. A page served by untrusted code and
+opened in your browser runs with your browser's network, not the VM's.
 
 A coding agent belongs in here as well: install and run it inside the VM, and
 add the host its API uses to `network.allow`. Whatever key you give it is
@@ -161,6 +175,8 @@ Commits from the VM for origin fix-typo (stored at refs/devkit/devkit/fix-typo):
 CONTRIBUTING.md | 2 ++
  1 file changed, 2 insertions(+)
 
+Inspect in full with: git --git-dir .devkit/repo.git log -p refs/devkit/devkit/fix-typo
+
 Push 1 commit(s) to origin fix-typo? [y/N]
 ```
 
@@ -171,9 +187,9 @@ This review is the gate, and the only one. Read it:
 - **Flagged files.** Changed files that run outside the VM (CI workflows,
   git and editor hooks, `.envrc`, `package.json` scripts) are listed
   separately. Those are how code from the VM would run somewhere else.
-- **The full diff**, when in doubt. In a cloned project the commits sit in
-  the bare repository:
-  `git --git-dir .devkit/repo.git log -p refs/devkit/devkit/fix-typo`.
+- **The full diff**, when in doubt, with the command the review prints. The
+  commits are already on your Mac, in the bare repository, outside any
+  branch; reading them runs nothing.
 
 Say no and nothing is pushed; the commits stay where they are. Say yes and
 your Mac pushes with your normal credentials. No git hooks run on the Mac.
