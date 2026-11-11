@@ -255,23 +255,29 @@ call then goes to the full ID it was given, so a rename cannot swap the
 container in between.
 
 The daemon resolves bind paths after that check, and the workspace is the
-sandbox user's to rearrange in between. So a runtime guard in front of `runc`
-reads the mounts each container actually got, before its process starts, and
-deletes the container unless they come from the workspace, Docker's volumes,
-the container's own `hosts`, `hostname` and `resolv.conf`, or its own cgroup.
+sandbox user's to rearrange in between. So a runtime guard in front of `runc`,
+and under gVisor in front of `runsc`, reads the mounts each container actually
+got, before its process starts, and deletes the container unless they come
+from the workspace, Docker's volumes, the container's own `hosts`, `hostname`
+and `resolv.conf`, or (with `runc`) its own cgroup. Under gVisor the mounts
+are those of the container's gofer, the host process that opens its files for
+gVisor's sandbox; the guard recognises it by what a container cannot forge
+(the real `runsc` by device and inode, the guard's own uid, the sandbox's
+parent, the container's bundle), refuses unless exactly one process is all
+of these, and requires the sandbox's own mount table to be a single new
+tmpfs.
 `docker cp` is refused for a container with a bind mount: to copy, the daemon
 makes the container's mounts itself, outside the runtime and so outside the
 guard, and followed a bind source swapped for a symlink after the check.
 
-Limits: under gVisor the guard is not used and the filter's check of bind paths
-stands alone. The filter refuses there a bind source it cannot follow to its
-end, and checks bind sources again at each start, but a source swapped for a
-symlink while the container starts is followed: a container that wins that race
-reaches what the Docker account may read and write, Docker's stored container
-settings included, which the daemon acts on when it next starts a container
-itself (a restart policy, at boot). A container made before the filter is
-started through it only if its runtime, privileges, ports and (under gVisor)
-bind sources pass, not the rest of what the filter refuses at creation; one the
+Limits: under gVisor the guard checks what `runsc create` leaves behind, so it
+relies on gVisor making a container's bind mounts, in the gofer, before
+`create` returns. The pinned release does (recorded on a real VM, and checked
+by the end-to-end tests); a release that made them later would not be
+checked, so a gVisor upgrade must pass those tests first. A container made
+before the filter is
+started through it only if its runtime, privileges and ports pass, not the
+rest of what the filter refuses at creation; one the
 daemon restarts on its own is not seen by the filter at all. BuildKit's session stream is not parsed, and its build
 steps run under its own `runc`, outside the guard and outside gVisor. The
 Docker account is the boundary for containers: container root is that account.

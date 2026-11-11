@@ -513,10 +513,13 @@ copied to and from as usual.
 The filter checks the request, but the daemon resolves a bind's path later,
 when the container starts, and the workspace is yours to rearrange in
 between: a directory that passed can be a symlink to the daemon's sockets
-by then. So with `runc`, every container runs through a second check,
-`devkit-runc-guard`, registered as Docker's default runtime: it lets `runc`
-set the container up, reads the mounts actually made before the container's
-first process starts, and deletes the container unless each one comes from
+by then. So every container runs through a second check, devkit's runtime
+guard, which Docker runs in place of the runtime: `devkit-runc-guard` as the
+default runtime with `runc`, and under gVisor as `runsc` itself (see
+gVisor). It lets the real runtime set the container up, reads the mounts
+actually made before the container's first process starts (under gVisor,
+those of gVisor's gofer, the process that opens a container's files for
+it), and deletes the container unless each one comes from
 the workspace, a Docker volume, or the three files Docker gives each
 container from its own directory (`hosts`, `hostname`, `resolv.conf`, never
 those of another container, nor the settings Docker keeps beside them). The
@@ -525,22 +528,14 @@ workspace`.
 
 What this does not cover. BuildKit's own stream (`docker build` with
 buildx, and Compose builds) is passed through unparsed; BuildKit runs build
-steps with its own `runc`, not through the guard, and takes no host paths,
-and the daemon refuses the `security.insecure` entitlement. Under gVisor
-the mount check is the filter's alone: the guard is not in front of
-`runsc` (which does not pass the VM's Unix sockets into a container). So
-under gVisor the filter refuses a bind source it cannot follow to its end,
-such as one inside a directory only you may enter (`chmod 700`): make the
-directories on the way readable by others, or mount another path. It also
-checks a container's bind sources again each time it starts, but a source
-replaced with a symlink while the container is starting is followed, to
-anything the Docker account may read or write, Docker's stored container
-settings included. The
+steps with its own `runc`, not through the guard and not under gVisor, and
+takes no host paths, and the daemon refuses the `security.insecure`
+entitlement. The
 Docker account is the trust boundary for containers: container root is that
 account, so what the account may read or write, a container may too, inside
 the workspace and outside it. A container made before the filter existed is
 started through it only if its runtime, privileges and published ports
-(and under gVisor its bind sources) are ones it would allow today; the rest
+are ones it would allow today; the rest
 of its settings are not checked again. One with a restart policy is restarted by the daemon itself at
 boot, unchecked, so remove containers made by an earlier devkit (`docker
 rm -f`) after upgrading. Turning `containers: docker` off stops the daemon and the
@@ -580,9 +575,13 @@ steps with BuildKit, which has its own `runc` worker.
 
 The runtime is a control, not a default: the API filter allows only the
 configured gVisor runtime by name, so `docker run --runtime=runc` (or the
-other gVisor mode) is refused. The mount check under gVisor is the filter's
-alone, and a bind source swapped while a container starts is not caught
-(see above). Switching back to `runc` takes gVisor out of the daemon's
+other gVisor mode) is refused. The runtime guard stands in front of `runsc`
+as it does in front of `runc` (see above): the daemon's `runsc` and
+`runsc-hostnet` are the guard, which runs the real `runsc`, then checks the
+mounts of the container's gofer, and that gVisor's sandbox holds none of the
+VM's own, before the container's first process starts. A bind source
+swapped for a symlink while a container starts is refused as it is under
+`runc`. Switching back to `runc` takes gVisor out of the daemon's
 configuration and leaves its files installed.
 
 Root installs gVisor at boot from Google's release bucket,

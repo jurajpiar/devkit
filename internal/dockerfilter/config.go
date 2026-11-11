@@ -24,10 +24,10 @@ type Config struct {
 	// empty Runtime, the daemon's default, is always allowed.
 	Runtimes []string `json:"runtimes"`
 	// RuntimeGuard says the runtime guard stands in front of the runtime
-	// and checks every container's mounts as made: true with runc, false
-	// under gVisor. Without it the filter's own check of a bind source is
-	// the only one, so a source it cannot see through is refused. Absent
-	// means false, the stricter reading.
+	// and checks every container's mounts as made; provisioning writes
+	// true for runc and gVisor alike. Without it the filter's own check of
+	// a bind source is the only one, so a source it cannot see through is
+	// refused. Absent means false, the stricter reading.
 	RuntimeGuard bool `json:"runtime_guard"`
 	// Capabilities are allowed in CapAdd on top of Docker's default set
 	// (less NET_RAW).
