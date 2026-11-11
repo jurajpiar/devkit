@@ -59,7 +59,10 @@ func TestDockerGvisor(t *testing.T) {
 	if out := sh("docker pull -q busybox:1.36"); !ok(out) {
 		t.Fatalf("pull through the proxy: %s", out)
 	}
-	guestKernel := strings.TrimSpace(strings.Split(sh("uname -r"), "\n")[0])
+	// Read again after each restart: a restart may boot a kernel that a
+	// security update installed.
+	vmKernel := func() string { return strings.TrimSpace(strings.Split(sh("uname -r"), "\n")[0]) }
+	guestKernel := vmKernel()
 
 	// underGvisor: a container started with no flags sees gVisor's kernel,
 	// not the VM's.
@@ -138,12 +141,14 @@ func TestDockerGvisor(t *testing.T) {
 	t.Run("a restart keeps gvisor the default", func(t *testing.T) {
 		s.mustRun("down")
 		s.mustRun("up", "--no-sync", "--no-install")
+		guestKernel = vmKernel()
 		underGvisor(t, "runsc")
 	})
 
 	t.Run("gvisor-hostnet: service names work and egress still holds", func(t *testing.T) {
 		setYAML(t, cfg, "container_runtime: gvisor", "container_runtime: gvisor-hostnet")
 		s.mustRun("up", "--no-sync", "--no-install")
+		guestKernel = vmKernel()
 		underGvisor(t, "runsc-hostnet")
 		out := sh("cd ~/workspace && docker compose up -d web && sleep 2 && docker compose run --rm client; rc=$?; docker compose down >/dev/null 2>&1; (exit $rc)")
 		if !hasLine(out, "from-web") {
@@ -155,6 +160,7 @@ func TestDockerGvisor(t *testing.T) {
 	t.Run("back to runc", func(t *testing.T) {
 		setYAML(t, cfg, "container_runtime: gvisor-hostnet", "container_runtime: runc")
 		s.mustRun("up", "--no-sync", "--no-install")
+		guestKernel = vmKernel()
 		if out := sh("docker info --format '{{.DefaultRuntime}}'"); !hasLine(out, "runc") {
 			t.Errorf("default runtime should be runc again: %s", out)
 		}
