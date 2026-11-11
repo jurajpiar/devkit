@@ -54,6 +54,11 @@ func TestDockerFilterSettings(t *testing.T) {
 		if p.Config.Tools.ContainerRuntime.Gvisor() {
 			want = []string{p.Config.Tools.ContainerRuntime.DockerName()}
 		}
+		// The filter is stricter about bind sources where nothing checks
+		// the mounts as made: under gVisor.
+		if fc.RuntimeGuard == p.Config.Tools.ContainerRuntime.Gvisor() {
+			t.Errorf("filter.json runtime_guard is %v under %s", fc.RuntimeGuard, p.Config.Tools.ContainerRuntime)
+		}
 		if fc.DaemonSocket != DockerSocket || fc.Workspace != "/home/alice/workspace" || !reflect.DeepEqual(fc.Runtimes, want) ||
 			!reflect.DeepEqual(fc.Capabilities, []string{"IPC_LOCK", "NET_BIND_SERVICE"}) {
 			t.Errorf("filter.json: %+v", fc)

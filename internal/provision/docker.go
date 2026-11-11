@@ -46,6 +46,16 @@ func filterRuntimes(c *project.Config) string {
 	return string(b)
 }
 
+// filterRuntimeGuard says, as JSON, whether the runtime guard is in front
+// of the runtime: with runc it is, under gVisor nothing checks the mounts
+// as made, and the filter is stricter about bind sources.
+func filterRuntimeGuard(c *project.Config) string {
+	if c != nil && c.Tools.ContainerRuntime.Gvisor() {
+		return "false"
+	}
+	return "true"
+}
+
 // dockerProxy is the in-guest egress proxy as containers reach it: rootless
 // Docker's slirp4netns maps the VM's loopback to 10.0.2.2.
 func dockerProxy() string {

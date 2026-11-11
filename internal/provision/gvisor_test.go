@@ -26,21 +26,21 @@ import (
 // Docker VMs provisioned before it are reported stale once.
 func TestDockerRuncScriptIsPinned(t *testing.T) {
 	want := map[string]string{
-		"allowlist-mise":      "aa94ef7e539c1b93",
-		"allowlist-mise-host": "e15c335d9b978647",
-		"allowlist-nix":       "0060ef11597fa950",
-		"allowlist-nix-host":  "67f3b1ef8d89626e",
-		"allowlist-none":      "e121ca218cedf002",
-		"allowlist-none-host": "798e226c1925e5e7",
-		"none-mise":           "dab91333ed8ab533",
-		"none-nix":            "273426011895180f",
-		"none-none":           "cf819b9a263ac4bc",
-		"open-mise":           "8c90dd291d226c64",
-		"open-mise-host":      "b4e497d0249cb514",
-		"open-nix":            "19f42045ec5e1c20",
-		"open-nix-host":       "a96e0e8bad8d90d2",
-		"open-none":           "48e0488fde5e5da3",
-		"open-none-host":      "affbe336b22647fa",
+		"allowlist-mise":      "222bf1d97d01ff8f",
+		"allowlist-mise-host": "b9192ef2ee6bd8db",
+		"allowlist-nix":       "065a22b6c5d914cc",
+		"allowlist-nix-host":  "5f73f91e5991002f",
+		"allowlist-none":      "36667c68c1de014f",
+		"allowlist-none-host": "60bff9cf89d155b4",
+		"none-mise":           "bce0b80f7b0d7e4e",
+		"none-nix":            "b66d4551f5c28d14",
+		"none-none":           "0911c5d428558aba",
+		"open-mise":           "eb719b16f0b70a19",
+		"open-mise-host":      "7549baecc325a43e",
+		"open-nix":            "b920f261659b7740",
+		"open-nix-host":       "8e30d81c22ba0b7c",
+		"open-none":           "215e075ed9d594b5",
+		"open-none-host":      "a947c4b2735a0586",
 	}
 	var got []string
 	dockerVariants(t, func(t *testing.T, p Params, s string) {

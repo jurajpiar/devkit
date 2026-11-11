@@ -131,6 +131,7 @@ func render(src string, p Params) (string, error) {
 		FilterConfig:       FilterConfig,
 		GuardConfig:        GuardConfig,
 		FilterRuntimes:     filterRuntimes(p.Config),
+		FilterRuntimeGuard: filterRuntimeGuard(p.Config),
 
 		GvisorRelease:     GvisorRelease,
 		GvisorArm64SHA512: GvisorArm64SHA512,
@@ -988,6 +989,7 @@ cat > {{.FilterConfig}} <<EOF
   "daemon_socket": "{{.DockerSocket}}",
   "workspace": "$WS_REAL",
   "runtimes": {{.FilterRuntimes}},
+  "runtime_guard": {{.FilterRuntimeGuard}},
   "capabilities": ["IPC_LOCK", "NET_BIND_SERVICE"]
 }
 EOF
@@ -1493,7 +1495,7 @@ type templateData struct {
 	DockerProxy, DockerConfigScript, ContainerPreload                          string
 	DockerDaemonJSON                                                           string
 	FilterAccount, FilterSocket, FilterUnit, FilterBinary, GuardBinary         string
-	FilterConfig, GuardConfig, FilterRuntimes                                  string
+	FilterConfig, GuardConfig, FilterRuntimes, FilterRuntimeGuard              string
 	GvisorRelease, GvisorArm64SHA512, GvisorAmd64SHA512                        string
 }
 
