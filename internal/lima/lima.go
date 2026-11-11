@@ -252,16 +252,26 @@ func ReadGuestFile(ctx context.Context, name, guestPath string, w io.Writer, max
 	return nil
 }
 
-// PipeTar streams a tar archive from the host into a directory in the VM.
-// The archive is produced by `tar -C srcDir -cf - .` with the given excludes.
-func PipeTar(ctx context.Context, name, srcDir, guestDir string, excludes []string) error {
+// TarCommand is `tar -C srcDir -cf - .` with the given excludes, writing the
+// archive to its standard output. Every copy of a directory into the VM
+// starts from it, so that which files go in is decided by tar's own pattern
+// matching in one place.
+func TarCommand(ctx context.Context, srcDir string, excludes []string) *exec.Cmd {
 	tarArgs := []string{"-C", srcDir, "-cf", "-"}
 	for _, e := range excludes {
 		tarArgs = append(tarArgs, "--exclude="+e)
 	}
 	tarArgs = append(tarArgs, ".")
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	// No AppleDouble ._ entries for extended attributes.
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
+	return tarCmd
+}
+
+// PipeTar streams a tar archive from the host into a directory in the VM.
+// The archive is TarCommand's.
+func PipeTar(ctx context.Context, name, srcDir, guestDir string, excludes []string) error {
+	tarCmd := TarCommand(ctx, srcDir, excludes)
 
 	guestCmd := fmt.Sprintf("mkdir -p %q && tar -C %q -xf -", guestDir, guestDir)
 	limaCmd := exec.CommandContext(ctx, "limactl", "shell", name, "--", "bash", "-lc", guestCmd)
