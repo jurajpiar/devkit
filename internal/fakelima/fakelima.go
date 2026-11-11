@@ -1,5 +1,5 @@
 // Package fakelima puts a stand-in limactl on PATH for tests. It records
-// every invocation, serves a canned instance list for "list --format json",
+// every invocation, serves a canned instance list for "list" (whatever its --format),
 // answers "shell" commands from patterns the test sets, and succeeds at
 // everything else (create, start, stop, delete, validate, copy) unless a test
 // makes a verb fail. It lets the code that drives Lima be tested without a VM.
@@ -98,7 +98,8 @@ func Install(t *testing.T) *Fake {
 	return &Fake{t: t, dir: dir}
 }
 
-// SetInstances replaces what "limactl list --format json" prints.
+// SetInstances replaces what "limactl list" prints: one JSON object per line,
+// whatever --format asked for.
 func (f *Fake) SetInstances(insts ...Instance) {
 	f.t.Helper()
 	var b strings.Builder

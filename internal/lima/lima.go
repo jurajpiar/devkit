@@ -16,7 +16,8 @@ import (
 	"time"
 )
 
-// Instance is the subset of `limactl list --format json` devkit needs.
+// Instance is one row of List: the fields of a Lima instance devkit needs,
+// as listFormat asks limactl to print them.
 type Instance struct {
 	Name         string `json:"name"`
 	Status       string `json:"status"`
@@ -48,9 +49,18 @@ func Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+// listFormat makes `limactl list` print one small JSON object per instance
+// with only the fields Instance holds. The plain "json" format prints each
+// instance's whole config, provisioning scripts included, on one line, and
+// limactl (2.3.0) dies with "bufio.Scanner: token too long" once a line passes
+// 64 KiB, failing the listing for every instance.
+const listFormat = `{"name":{{json .Name}},"status":{{json .Status}},"dir":{{json .Dir}},` +
+	`"sshLocalPort":{{json .SSHLocalPort}},"cpus":{{json .CPUs}},"memory":{{json .Memory}},` +
+	`"disk":{{json .Disk}},"vmType":{{json .VMType}}}`
+
 // List returns all Lima instances.
 func List(ctx context.Context) ([]Instance, error) {
-	out, err := run(ctx, "list", "--format", "json")
+	out, err := run(ctx, "list", "--format", listFormat)
 	if err != nil {
 		return nil, err
 	}
