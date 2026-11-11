@@ -13,9 +13,15 @@ internet. macOS on Apple silicon, built on [Lima](https://lima-vm.io/).
 
 **Your Mac is out of reach.** A pull request's `npm install`, a Cargo build
 script or an agent with shell access runs in its own Ubuntu VM with no shared
-folders, no route to your Mac and no sudo. Files go in, never out: devkit has
-no code path that copies anything from the VM to your Mac. The worst case is
-a trashed VM, which `devkit rm` deletes.
+folders, no route to your Mac and no sudo. Files go in; the one thing that
+comes out is git commits, through `devkit push`, which checks them and shows
+them to you before anything is pushed. The worst case is a trashed VM, which
+`devkit rm` deletes.
+
+**You can still contribute.** `devkit clone` fetches a repository without
+checking it out on your Mac, you commit inside the VM, and `devkit push`
+pushes from your Mac with your own credentials after you review the commits.
+The VM never holds a token.
 
 **The internet is allowlisted and logged.** Only the hosts you name are
 reachable. Every connection leaves through one proxy, which writes the host
@@ -65,6 +71,18 @@ Shell completion comes from `devkit completion`:
 ```bash
 devkit completion fish > ~/.config/fish/completions/devkit.fish
 devkit completion zsh > "${fpath[1]}/_devkit"        # or: eval "$(devkit completion zsh)"
+```
+
+New to devkit? [docs/walkthrough.md](docs/walkthrough.md) goes from a
+repository URL to a reviewed push in ten minutes, with what each step
+protects you from.
+
+To start from a repository rather than a directory on your Mac:
+
+```bash
+devkit clone github.com/org/repo   # bare clone on the Mac: no project file is written out
+cd repo && devkit up               # the VM checks the files out
+devkit push                        # later: review the VM's commits, then push them from the Mac
 ```
 
 To work from an IDE, connect with Remote-SSH to the host `devkit-<name>`.
@@ -138,8 +156,8 @@ Each stop is asserted by a test, most of them written red first: the escape
 succeeded, then the design changed until it failed. The end-to-end suite
 checks them on a real VM; the firewall rows are also checked in about a second
 by `TestNetnsFirewall`, which loads the real rules into Linux network
-namespaces, and the proxy rows by the proxy's unit tests. The third column is the part that matters when you read this as an
-attacker: what it would still take to get through. Almost every answer is one
+namespaces, and the proxy rows by the proxy's unit tests. The third column is
+the part that matters when you read this as an attacker: what it would still take to get through. Almost every answer is one
 of four things, root in the guest, a loosening you chose in `devkit.yaml`, an
 allowed host the attacker already controls, or a hypervisor escape.
 
@@ -317,6 +335,7 @@ vm:
   cpus: 4
   memory_gb: 8
   disk_gb: 50
+  # security_updates: true   # apply Ubuntu's security pocket at every boot
   # lock_modules: true   # no kernel module loads after provisioning, root included, until restart
 
 ssh_port: 2222
@@ -515,7 +534,7 @@ sandbox user then installs `tools.versions` through the audited proxy. The
 first `devkit up` records every download's URL and checksum in the VM's
 `mise.lock`; every later `up` installs with `--locked` and refuses anything
 else. Change a version and run `devkit up --relock`. The lock lives and dies
-with the VM, because devkit never copies anything from the VM to your Mac. A
+with the VM, because devkit copies no files from the VM to your Mac. A
 `mise.toml` or `.nvmrc` in the repository layers on top, as mise normally
 does.
 
@@ -546,7 +565,7 @@ for solc, which both Hardhat and Foundry verify; install Foundry with
 |---|---|
 | `devkit clone <url> [dir]`, `devkit <url>` | New project from a repository, without checking it out on the Mac. `git://` becomes `https://`. Flags: `--branch`, `--name`, `--toolchain`, `--node`, `--network` |
 | `devkit init [repo-url]` | Write `devkit.yaml`. Flags: `--name`, `--toolchain`, `--node`, `--network`, `--force` |
-| `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock` |
+| `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock`, `--no-security-updates` |
 | `devkit shell [cmd]` | Shell in the VM, or run a command |
 | `devkit sync` | Copy the directory again; for a cloned project, fetch upstream on the Mac and fast-forward the VM |
 | `devkit push [branch]` | Review commits made in the VM and push them from your Mac with your own credentials. Flags: `--remote`, `--to`, `--yes`, `--force-with-lease` |
@@ -609,20 +628,25 @@ cmd/egressproxy       the proxy that runs inside the VM
 internal/app          commands
 internal/project      devkit.yaml schema and validation
 internal/detect       language detection for devkit init
+internal/gitx         git on the Mac: bare clones, bundles from the VM, the push review
 internal/lima         limactl wrapper and instance config rendering
 internal/provision    scripts that run inside the VM (the security policy)
 internal/egressproxy  proxy implementation
 internal/hostenforce  the macOS sandbox profile for network.enforce: host
 internal/embedded     embedded proxy binary
+internal/fakelima     a stand-in limactl for unit tests
 tests/e2e             creates a real VM and checks the guarantees
+examples/hostile-project   a project that tries to break out and reports each attempt
+docs/walkthrough.md   from a repository URL to a reviewed push
 ```
 
 ## Roadmap
 
 - `devkit cp vm:path dest`: an explicit, user-initiated way to pull a file
-  out of the VM, such as a build artefact or a test report. devkit itself will
-  still never write to the host on its own; whatever comes out is treated as
-  untrusted data, and you name both paths.
+  out of the VM, such as a build artefact or a test report. Today the only
+  thing that leaves is git commits through `devkit push`; this would add
+  files, still only when you ask, treated as untrusted data, with both paths
+  named by you.
 - Escape tests for `source: mount`, including a read-only mount refusing
   writes, in a VM of their own.
 - `nix develop` for IDE terminals over SSH, probably through direnv.

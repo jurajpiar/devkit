@@ -1,6 +1,6 @@
 // Package e2e creates a real sandbox VM and checks devkit's guarantees.
 //
-// Run with: DEVKIT_E2E=1 go test ./tests/e2e/ -v -timeout 30m
+// Run with: DEVKIT_E2E=1 go test ./tests/e2e/ -v -timeout 90m
 // The first run downloads an Ubuntu image and takes several minutes.
 package e2e
 
