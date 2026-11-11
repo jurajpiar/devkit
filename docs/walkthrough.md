@@ -24,6 +24,11 @@ after your project (`devkit-example-repo` here), and so are the refs `devkit pus
 stores. The output is adapted from real runs on another Go project:
 shortened, and with names and paths changed to this one's.
 
+**Where each command runs.** A line starting with `$` is typed on your Mac,
+in the project directory: the one that holds `devkit.yaml`. Every `devkit`
+command is run there. A line starting with `~/workspace$` is typed inside the
+VM, in the shell `devkit shell` gives you.
+
 Before you start: `brew install lima`, build devkit (`make install`), and run
 `devkit doctor`. See the [README](../README.md#quick-start).
 
@@ -176,7 +181,7 @@ the VM. So choose a side and stay on it:
   exists on your Mac with the Mac's copy. An uncommitted edit in the VM is
   gone; a committed one is still in the VM's git (`git checkout -- <file>`
   brings it back). Use `devkit up --no-sync` when you change `devkit.yaml`,
-  and get your work out with `devkit push` (step 6).
+  and get your work out with `devkit push` (step 5).
 
 **Ports.** A web app the project serves is not forwarded to your Mac by
 devkit until you list its port: add `forward: [3000]` under `network` and run
@@ -193,22 +198,7 @@ there, and add the host its API uses to `network.allow`. Whatever key you
 give it is readable by everything else that runs in the VM, so use one you
 can revoke.
 
-## 5. See what the sandbox does when code misbehaves
-
-Try, from the shell in the VM, what a malicious dependency would:
-
-```console
-~/workspace$ curl -m 8 https://example.org/            # a host not on the list
-curl: (56) CONNECT tunnel failed, response 403
-~/workspace$ curl -m 5 --noproxy '*' https://example.org/   # around the proxy
-curl: (6) Could not resolve host: example.org
-~/workspace$ sudo -n true                              # become root
-sudo: a password is required
-~/workspace$ ls /Users                                 # your files
-ls: cannot access '/Users': No such file or directory
-```
-
-And from your Mac, what the proxy saw:
+**What it reached.** Everything the VM tried to reach is logged on your Mac:
 
 ```console
 $ devkit logs -n 3
@@ -217,16 +207,14 @@ $ devkit logs -n 3
 ... [EGRESS] BLOCKED CONNECT example.org:443
 ```
 
-Read this log after an install. A dependency that reaches for a host you did
-not expect is the thing to notice, whether it was allowed or blocked. When a
+Read it after an install. A dependency that reaches for a host you did not
+expect is the thing to notice, whether it was allowed or blocked. When a
 build genuinely needs another host, add it to `network.allow` and run
 `devkit up` (in A, `devkit up --no-sync` if you edit in the VM); the change
-is one line you can see in a diff.
+is one line you can see in a diff. To watch the sandbox refuse a fuller set
+of escape attempts, run `examples/hostile-project`.
 
-`examples/hostile-project` runs a fuller set of these attempts and reports
-each as held or leaked.
-
-## 6. Get your commits to a pull request
+## 5. Get your commits to a pull request
 
 **If you edit on your Mac (A):** nothing changes. Commit and push from your
 Mac with git, as before. The VM was only where the code ran.
@@ -235,10 +223,18 @@ Mac with git, as before. The VM was only where the code ran.
 a token in there would be usable by every dependency. Your Mac pushes
 instead, after showing you what it is about to push.
 
+Commit in the VM:
+
 ```console
 ~/workspace$ git checkout -b fix-typo
 ~/workspace$ git commit -am "Docs: fix a typo"
 ```
+
+Then, on your Mac, in the project directory, run `devkit push`. In A that
+directory is your checkout. In B it is the directory `devkit clone` made: it
+has no project files, but it does hold a repository, the bare clone in
+`.devkit/repo.git`, and that is where the VM's commits are brought to and
+pushed from.
 
 ```console
 $ devkit push
@@ -280,7 +276,7 @@ To push to your fork rather than the upstream, add the remote on the Mac
 (in B: `git --git-dir .devkit/repo.git remote add fork <url>`) and use
 `devkit push --remote fork`.
 
-## 7. Keep up with upstream
+## 6. Keep up with upstream
 
 **A:** pull on your Mac, then copy the result in: `git pull && devkit sync`.
 Mind the rule from step 4 if you edit in the VM, and the third habit below
@@ -298,14 +294,14 @@ Up to date with origin/main
 
 When there are new commits, `sync` updates `origin/main` in the VM and
 fast-forwards `main`. It does not touch the branch you are working on: after
-step 6 you are on `fix-typo`, and `sync` says so (`you are on fix-typo, which
+step 5 you are on `fix-typo`, and `sync` says so (`you are on fix-typo, which
 is unchanged`). Bring the new commits into your branch yourself, in the VM:
 
 ```console
 ~/workspace$ git rebase origin/main      # or: git merge origin/main
 ```
 
-## 8. Tighten it when you can
+## 7. Tighten it when you can
 
 - **Air-gap once dependencies are in.** `devkit up --network none` leaves the
   VM with no network at all, DNS included. Most builds and tests do not need
@@ -319,7 +315,7 @@ is unchanged`). Bring the new commits into your branch yourself, in the VM:
 - **Move from A to B.** Once a project matters, clone it again with `devkit
   clone` and delete the checkout: then none of its files are on your Mac.
 
-## 9. Throw it away
+## 8. Throw it away
 
 ```console
 $ devkit rm
