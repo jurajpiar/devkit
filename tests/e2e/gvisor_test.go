@@ -165,6 +165,48 @@ func TestDockerGvisor(t *testing.T) {
 		}
 	})
 
+	// A container with --restart always is started again by the daemon
+	// itself when the daemon starts, with no call through the filter and so
+	// no checkStart. Only the runtime guard in front of runsc sees that
+	// start: a bind source swapped for a symlink out of the workspace while
+	// the daemon was down must not come up mounted.
+	t.Run("a restart-policy start after a daemon restart is checked by the guard", func(t *testing.T) {
+		defer sh(`systemctl is-active --quiet devkit-dockerd.service || sudo systemctl start devkit-dockerd.service; cd ~/workspace && docker rm -f gv-restart >/dev/null 2>&1; rm -rf gvr`)
+		out := sh(`cd ~/workspace && docker rm -f gv-restart >/dev/null 2>&1; rm -rf gvr && mkdir gvr && echo inside-marker > gvr/m && docker run -d --name gv-restart --restart always -v "$PWD/gvr:/s" busybox:1.36 sleep 2147483647 >/dev/null && sleep 2 && docker exec gv-restart cat /s/m && docker inspect -f 'started={{.State.StartedAt}}' gv-restart`)
+		if !ok(out) || !hasLine(out, "inside-marker") {
+			t.Fatalf("a container with a workspace bind and --restart always should run and see the bind under gVisor: %s", out)
+		}
+		before := ""
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(l), "started=") {
+				before = strings.TrimSpace(l)
+			}
+		}
+		// The swap, as root, while the daemon is down: the same outside
+		// target as the swap above, which the Docker account can read.
+		out = sh(`sudo systemctl stop devkit-dockerd.service && cd ~/workspace && rm -rf gvr && ln -s /var/lib/devkit-docker/run gvr && sudo systemctl start devkit-dockerd.service`)
+		if !ok(out) {
+			t.Fatalf("stopping the daemon, swapping the bind source and starting it again: %s", out)
+		}
+		// The daemon starts restart-policy containers before it answers; the
+		// extra wait leaves room for one that is slower.
+		out = sh(`for i in $(seq 1 30); do docker ps >/dev/null 2>&1 && break; sleep 2; done; sleep 10; docker ps --format '{{.Names}}' >/dev/null && echo DAEMON-UP`)
+		if !hasLine(out, "DAEMON-UP") {
+			t.Fatalf("the daemon should answer again after its restart, or this proves nothing: %s", out)
+		}
+		state := sh(`docker inspect -f 'running={{.State.Running}} restarting={{.State.Restarting}} restarts={{.RestartCount}} started={{.State.StartedAt}} error={{.State.Error}}' gv-restart`)
+		t.Logf("the container after the daemon's restart: %s", state)
+		t.Logf("the daemon's log of the refusal: %s", sh(`sudo journalctl -u devkit-dockerd.service --since '-5min' --no-pager -o cat | grep -iE 'refused|outside the workspace' | tail -n 5`))
+		if out := sh(`docker exec gv-restart ls /s`); ok(out) && strings.Contains(out, "docker.sock") {
+			t.Errorf("after a daemon restart, a container started by its restart policy has the swapped bind's outside target mounted: %s", out)
+		}
+		// Not started again at all would leave the old mount, and the claim
+		// untested: the daemon must have tried the start the guard judges.
+		if strings.Contains(state, "running=true") && before != "" && strings.Contains(state, before+" ") {
+			t.Errorf("the container kept its old start (%s), so the daemon's own start was never tried: %s", before, state)
+		}
+	})
+
 	t.Run("a restart keeps gvisor the default", func(t *testing.T) {
 		s.mustRun("down")
 		s.mustRun("up", "--no-sync", "--no-install")
