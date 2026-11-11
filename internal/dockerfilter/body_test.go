@@ -293,9 +293,16 @@ func TestCreateRefusals(t *testing.T) {
 }
 
 // A bind source whose symlinks lead outside the workspace is refused; one
-// that stays inside passes.
+// that stays inside passes. A source the filter cannot follow to its end
+// passes only with the runtime guard behind the filter.
 func TestBindSymlinks(t *testing.T) {
+	t.Run("guarded", func(t *testing.T) { testBindSymlinks(t, true) })
+	t.Run("unguarded", func(t *testing.T) { testBindSymlinks(t, false) })
+}
+
+func testBindSymlinks(t *testing.T, guarded bool) {
 	f := testFilter(t)
+	f.cfg.RuntimeGuard = guarded
 	ws := f.cfg.Workspace
 	outside := filepath.Dir(ws)
 	os.Symlink("/etc", filepath.Join(ws, "etc"))
@@ -309,25 +316,33 @@ func TestBindSymlinks(t *testing.T) {
 	os.Symlink("loop1", filepath.Join(ws, "loop2"))
 	// A directory the filter may not read, outside the workspace and in it:
 	// a walk that has left the workspace is refused even when it cannot go
-	// on; one stopped inside it falls back to the path as written.
+	// on; one stopped inside it falls back to the path as written when the
+	// guard checks the mount, and is refused when nothing does (gVisor).
 	locked := filepath.Join(outside, "locked")
 	os.MkdirAll(filepath.Join(locked, "x"), 0o755)
 	os.Chmod(locked, 0o000)
 	t.Cleanup(func() { os.Chmod(locked, 0o755) })
 	os.Symlink(filepath.Join(locked, "x"), filepath.Join(ws, "tolocked"))
+	// The kernel follows inetc before its "..": to /etc's parent, /.
+	os.Symlink("/etc/ssl", filepath.Join(ws, "inetc"))
 	os.MkdirAll(filepath.Join(ws, "private", "y"), 0o755)
+	os.Symlink("/etc", filepath.Join(ws, "private", "l"))
 	os.Chmod(filepath.Join(ws, "private"), 0o000)
 	t.Cleanup(func() { os.Chmod(filepath.Join(ws, "private"), 0o755) })
 	for src, ok := range map[string]bool{
 		ws + "/etc": false, ws + "/etc/x/y": false, ws + "/up": false, ws + "/up/ws/sub": true, ws + "/up/other": false, ws + "/dangling": false,
 		ws + "/in": true, ws + "/in/new/dir": true, ws + "/rel": true, ws + "/sub": true, ws + "/missing/a": true, ws: true,
-		ws + "/sub/back": true, ws + "/loop1": false, ws + "/tolocked": false, ws + "/tolocked/z": false, ws + "/private/y": true,
+		ws + "/sub/back": true, ws + "/loop1": false, ws + "/tolocked": false, ws + "/tolocked/z": false, ws + "/private/y": guarded,
+		ws + "/private/l": guarded, ws + "/sub/../in": true, ws + "/inetc/..": false, ws + "/inetc/../sub": false,
 	} {
 		r := cliCreate()
 		r.HostConfig.Binds = []string{src + ":/x"}
 		_, err := decodeCreate(f, []byte(mustJSON(t, r)))
 		if (err == nil) != ok {
 			t.Errorf("bind %s: err=%v, want ok=%v", src, err, ok)
+		}
+		if err != nil && strings.HasSuffix(src, "/private/l") && !strings.Contains(err.Error(), "may not look inside") {
+			t.Errorf("the refusal should say why: %v", err)
 		}
 		r = cliCreate()
 		r.HostConfig.Mounts = []Mount{{Type: "bind", Source: src, Target: "/x"}}

@@ -105,20 +105,27 @@ var idRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // ServeHTTP checks one call and forwards it or refuses it.
 func (f *Filter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rawPath, rawQuery, _ := strings.Cut(r.RequestURI, "?")
-	out, e, err := f.check(r, rawPath, rawQuery)
+	out, e, body, err := f.check(r, rawPath, rawQuery)
 	if err != nil {
 		f.refuse(w, r, rawPath, err)
 		return
 	}
-	if e.startCheck {
-		if err := f.checkStart(r.Context(), out); err != nil {
-			var rf *refusal
-			if errors.As(err, &rf) {
-				f.refuse(w, r, rawPath, err)
-			} else {
-				f.daemonDown(w, r, err)
-			}
+	if e.precheck != nil {
+		nb, err := e.precheck(f, r.Context(), out, body)
+		var rf *refusal
+		var a *answer
+		switch {
+		case errors.As(err, &a):
+			a.write(w)
 			return
+		case errors.As(err, &rf):
+			f.refuse(w, r, rawPath, err)
+			return
+		case err != nil:
+			f.daemonDown(w, r, err)
+			return
+		case nb != nil:
+			out.Body, out.ContentLength = io.NopCloser(bytes.NewReader(nb)), int64(len(nb))
 		}
 	}
 	if e.upgrade && isUpgrade(r.Header) {
@@ -147,29 +154,29 @@ func isUpgrade(h http.Header) bool {
 // request to forward: the path as received, the query re-encoded from the
 // parameters checked, and for a JSON call the body re-encoded from the
 // structure checked, never the client's bytes.
-func (f *Filter) check(r *http.Request, rawPath, rawQuery string) (*http.Request, *endpoint, error) {
+func (f *Filter) check(r *http.Request, rawPath, rawQuery string) (*http.Request, *endpoint, []byte, error) {
 	if r.ProtoMajor != 1 || r.ProtoMinor != 1 {
-		return nil, nil, refuse("only HTTP/1.1 is accepted")
+		return nil, nil, nil, refuse("only HTTP/1.1 is accepted")
 	}
 	switch r.Method {
 	case "GET", "HEAD", "POST", "PUT", "DELETE":
 	default:
-		return nil, nil, refuse("the method %s is not allowed", r.Method)
+		return nil, nil, nil, refuse("the method %s is not allowed", r.Method)
 	}
 	_, p, err := canonical(rawPath)
 	if err != nil {
-		return nil, nil, refuse("%v", err)
+		return nil, nil, nil, refuse("%v", err)
 	}
 	e := match(r.Method, p)
 	if e == nil {
-		return nil, nil, refuse("%s %s is not an allowed call", r.Method, p)
+		return nil, nil, nil, refuse("%s %s is not an allowed call", r.Method, p)
 	}
 	vals, err := e.checkQueryString(rawQuery)
 	if err != nil {
-		return nil, nil, refuse("%s %s: %v", r.Method, p, err)
+		return nil, nil, nil, refuse("%s %s: %v", r.Method, p, err)
 	}
 	if isUpgrade(r.Header) && !e.upgrade {
-		return nil, nil, refuse("%s %s cannot switch protocols", r.Method, p)
+		return nil, nil, nil, refuse("%s %s cannot switch protocols", r.Method, p)
 	}
 
 	out := r.Clone(r.Context())
@@ -178,22 +185,23 @@ func (f *Filter) check(r *http.Request, rawPath, rawQuery string) (*http.Request
 	decoded, _ := url.PathUnescape(rawPath)
 	out.URL = &url.URL{Scheme: "http", Host: "docker", Path: decoded, RawPath: rawPath, RawQuery: vals.Encode()}
 	out.Header.Del("Content-Length")
+	var validated []byte
 	switch e.body {
 	case bodyNone:
 		if r.ContentLength != 0 {
-			return nil, nil, refuse("%s %s takes no body", r.Method, p)
+			return nil, nil, nil, refuse("%s %s takes no body", r.Method, p)
 		}
 		out.Body, out.ContentLength, out.TransferEncoding = http.NoBody, 0, nil
 	case bodyJSON:
 		if r.ContentLength > MaxBody {
-			return nil, nil, refuse("%s %s: the body is larger than %d bytes", r.Method, p, MaxBody)
+			return nil, nil, nil, refuse("%s %s: the body is larger than %d bytes", r.Method, p, MaxBody)
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, MaxBody+1))
 		if err != nil {
-			return nil, nil, refuse("%s %s: the body could not be read: %v", r.Method, p, err)
+			return nil, nil, nil, refuse("%s %s: the body could not be read: %v", r.Method, p, err)
 		}
 		if len(body) > MaxBody {
-			return nil, nil, refuse("%s %s: the body is larger than %d bytes", r.Method, p, MaxBody)
+			return nil, nil, nil, refuse("%s %s: the body is larger than %d bytes", r.Method, p, MaxBody)
 		}
 		if e.optional && len(bytes.TrimSpace(body)) == 0 {
 			out.Body, out.ContentLength, out.TransferEncoding = http.NoBody, 0, nil
@@ -201,68 +209,17 @@ func (f *Filter) check(r *http.Request, rawPath, rawQuery string) (*http.Request
 		}
 		nb, err := e.validate(f, body)
 		if err != nil {
-			return nil, nil, refuse("%s %s: %v", r.Method, p, err)
+			return nil, nil, nil, refuse("%s %s: %v", r.Method, p, err)
 		}
 		out.Body, out.ContentLength, out.TransferEncoding = io.NopCloser(bytes.NewReader(nb)), int64(len(nb)), nil
 		out.GetBody = nil
 		out.Header.Set("Content-Type", "application/json")
+		validated = nb
 	case bodyStream:
 		// Passed through unread: build contexts, image archives, files
 		// for docker cp, credentials for /auth.
 	}
-	return out, e, nil
-}
-
-// checkStart looks at the stored container before a start: a container
-// made before the filter existed, or under another runtime setting, may
-// carry what the filter would refuse today. The call is then forwarded for
-// the full ID read, so that a rename between the look and the start
-// cannot swap the container.
-func (f *Filter) checkStart(ctx context.Context, out *http.Request) error {
-	segs := strings.Split(out.URL.Path, "/")
-	// [..., "containers", "{id}", "start"]
-	i := len(segs) - 2
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://docker/containers/"+url.PathEscape(segs[i])+"/json", nil)
-	if err != nil {
-		return err
-	}
-	resp, err := f.transport.RoundTrip(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil // the daemon answers the start itself: no such container
-	}
-	var c struct {
-		ID         string `json:"Id"`
-		HostConfig struct {
-			Runtime    string
-			Privileged bool
-		}
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&c); err != nil {
-		return fmt.Errorf("reading the container: %v", err)
-	}
-	if !idRe.MatchString(c.ID) {
-		return refuse("the container's ID %q is not one the filter recognises", c.ID)
-	}
-	if c.HostConfig.Privileged {
-		return refuse("the container is privileged")
-	}
-	if rt := c.HostConfig.Runtime; rt != "" {
-		ok := false
-		for _, a := range f.cfg.Runtimes {
-			ok = ok || rt == a
-		}
-		if !ok {
-			return refuse("the container runs under the runtime %q, which is not allowed", rt)
-		}
-	}
-	segs[i] = c.ID
-	out.URL.Path = strings.Join(segs, "/")
-	out.URL.RawPath = ""
-	return nil
+	return out, e, validated, nil
 }
 
 func closeWrite(c net.Conn) {

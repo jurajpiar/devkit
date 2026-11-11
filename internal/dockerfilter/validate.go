@@ -145,22 +145,23 @@ func (f *Filter) validateCreate(r *CreateRequest) error {
 	if !dropped {
 		h.CapDrop = append(h.CapDrop, "NET_RAW")
 	}
-	if h.Runtime != "" {
-		ok := false
-		for _, r := range f.cfg.Runtimes {
-			ok = ok || h.Runtime == r
-		}
-		if !ok {
-			return fmt.Errorf("HostConfig.Runtime %q is not allowed", h.Runtime)
-		}
+	if h.Runtime != "" && !f.cfg.allowedRuntime(h.Runtime) {
+		return fmt.Errorf("HostConfig.Runtime %q is not allowed", h.Runtime)
 	}
 	if err := checkNetworkMode(h.NetworkMode); err != nil {
 		return err
 	}
+	// A binding with no address takes the network's default, which is
+	// loopback for the default bridge and for networks made through the
+	// filter, but not for one made before it. Naming loopback here makes
+	// the binding the same on every network.
 	for port, bindings := range h.PortBindings {
-		for _, b := range bindings {
+		for i, b := range bindings {
 			if err := oneOf("HostConfig.PortBindings["+port+"].HostIp", b.HostIP, "", "127.0.0.1", "::1"); err != nil {
 				return err
+			}
+			if b.HostIP == "" {
+				bindings[i].HostIP = "127.0.0.1"
 			}
 		}
 	}
@@ -239,11 +240,11 @@ func daemonMode(s string) bool {
 	return true
 }
 
-// checkBind checks one HostConfig.Binds entry, split the way the daemon's
-// Linux parser splits it.
-func (f *Filter) checkBind(b string) error {
+// splitBind splits one HostConfig.Binds entry the way the daemon's Linux
+// parser splits it, and returns its source ("" for an anonymous volume)
+// and its mode.
+func splitBind(b string) (src, mode string, err error) {
 	arr := strings.SplitN(b, ":", 4)
-	var src, mode string
 	switch len(arr) {
 	case 1:
 	case 2:
@@ -255,10 +256,19 @@ func (f *Filter) checkBind(b string) error {
 	case 3:
 		src, mode = arr[0], arr[2]
 	default:
-		return fmt.Errorf("HostConfig.Binds %q is not a bind the filter can read", b)
+		return "", "", fmt.Errorf("HostConfig.Binds %q is not a bind the filter can read", b)
 	}
 	if arr[0] == "" {
-		return fmt.Errorf("HostConfig.Binds %q is not a bind the filter can read", b)
+		return "", "", fmt.Errorf("HostConfig.Binds %q is not a bind the filter can read", b)
+	}
+	return src, mode, nil
+}
+
+// checkBind checks one HostConfig.Binds entry.
+func (f *Filter) checkBind(b string) error {
+	src, mode, err := splitBind(b)
+	if err != nil {
+		return err
 	}
 	if mode != "" {
 		for _, o := range strings.Split(mode, ",") {
@@ -323,11 +333,13 @@ func (f *Filter) checkMount(m Mount) error {
 
 // checkSource allows a bind source in the workspace: by its path as asked,
 // and by where its symlinks lead now. The second is checked again by the
-// runtime guard on the mount as made, since the workspace is the sandbox
-// user's to rearrange between this check and the mount. Where the filter
-// may not read a directory inside the workspace, the walk stops there and
-// the lexical check stands alone for the rest; a walk that has already left
-// the workspace when it is stopped is refused.
+// runtime guard on the mount as made, when the guard is there, since the
+// workspace is the sandbox user's to rearrange between this check and the
+// mount. A walk that has left the workspace is refused even when it cannot
+// go on. Where the filter may not read a directory inside the workspace,
+// the walk stops there: with the guard behind it, the lexical check stands
+// for the rest; without it, nothing would check the rest, so the source is
+// refused.
 func (f *Filter) checkSource(src string) error {
 	if !path.IsAbs(src) {
 		return fmt.Errorf("source %q is not an absolute path", src)
@@ -336,14 +348,25 @@ func (f *Filter) checkSource(src string) error {
 	if !under(clean, f.cfg.Workspace) {
 		return fmt.Errorf("source %s is outside the workspace", src)
 	}
-	real, err := resolve(clean)
-	switch {
-	case !under(real, f.cfg.Workspace):
-		return fmt.Errorf("source %s leads outside the workspace, to %s", src, real)
-	case errors.Is(err, fs.ErrPermission):
-		return nil
-	case err != nil:
-		return fmt.Errorf("source %s: %v", src, err)
+	walks := []string{clean}
+	if clean != src {
+		// The kernel follows a symlink before it applies a "..", which the
+		// cleaned path has already removed: the path as written is walked
+		// too, in case the daemon passes it on unclean.
+		walks = append(walks, src)
+	}
+	for _, p := range walks {
+		real, err := resolve(p)
+		switch {
+		case !under(real, f.cfg.Workspace):
+			return fmt.Errorf("source %s leads outside the workspace, to %s", src, real)
+		case errors.Is(err, fs.ErrPermission) && f.cfg.RuntimeGuard:
+		case errors.Is(err, fs.ErrPermission):
+			return fmt.Errorf("source %s cannot be checked: the filter may not look inside %s, and under this runtime nothing else checks the mount. "+
+				"Make the directories on the way readable by others (chmod o+rx), or mount a path the filter can read", src, filepath.Dir(real))
+		case err != nil:
+			return fmt.Errorf("source %s: %v", src, err)
+		}
 	}
 	return nil
 }
@@ -429,6 +452,15 @@ func (f *Filter) validateNetworkCreate(n *NetworkCreate) error {
 	if err := mustBeEmpty("ConfigFrom", n.ConfigFrom); err != nil {
 		return err
 	}
+	// A network's ports are published on its own default address, not the
+	// daemon's: the daemon's "ip" setting is the default bridge's only. The
+	// filter sets loopback on every network it lets the user make.
+	if n.Options == nil {
+		n.Options = map[string]string{}
+	}
+	if _, ok := n.Options[loopbackOption]; !ok {
+		n.Options[loopbackOption] = "127.0.0.1"
+	}
 	keys := make([]string, 0, len(n.Options))
 	for k := range n.Options {
 		keys = append(keys, k)
@@ -438,7 +470,7 @@ func (f *Filter) validateNetworkCreate(n *NetworkCreate) error {
 		if !networkOptions[k] {
 			return fmt.Errorf("network option %q is not allowed", k)
 		}
-		if k == "com.docker.network.bridge.host_binding_ipv4" && n.Options[k] != "127.0.0.1" {
+		if k == loopbackOption && n.Options[k] != "127.0.0.1" {
 			return fmt.Errorf("network option %s=%q is not allowed", k, n.Options[k])
 		}
 	}

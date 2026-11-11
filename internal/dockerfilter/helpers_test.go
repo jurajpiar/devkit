@@ -44,6 +44,11 @@ type fakeDaemon struct {
 	got      []received
 	upgraded func(c net.Conn, br *bufio.Reader)
 	inspect  string // body for GET /containers/{id}/json
+	// inspectStatus, when set, is the status that body is sent with.
+	inspectStatus int
+	// networks, when set, answers GET /networks/{name}: the body for each
+	// name, and 404 for any other.
+	networks map[string]string
 }
 
 func newFakeDaemon(t *testing.T, dir string) *fakeDaemon {
@@ -77,15 +82,27 @@ func (d *fakeDaemon) serve(c net.Conn) {
 		body, _ := io.ReadAll(req.Body)
 		d.mu.Lock()
 		d.got = append(d.got, received{req.Method, req.RequestURI, req.Header, body})
-		up, insp := d.upgraded, d.inspect
+		up, insp, st, nets := d.upgraded, d.inspect, d.inspectStatus, d.networks
 		d.mu.Unlock()
+		if st == 0 {
+			st = 200
+		}
 		if req.Header.Get("Upgrade") != "" && up != nil {
 			fmt.Fprintf(c, "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n", req.Header.Get("Upgrade"))
 			up(c, br)
 			return
 		}
 		if req.Method == "GET" && strings.HasSuffix(req.URL.Path, "/json") && strings.Contains(req.URL.Path, "/containers/") && insp != "" {
-			fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(insp), insp)
+			fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", st, http.StatusText(st), len(insp), insp)
+			continue
+		}
+		if segs := strings.Split(req.URL.Path, "/"); req.Method == "GET" && nets != nil && len(segs) == 3 && segs[1] == "networks" {
+			body, ok := nets[segs[2]]
+			code := 200
+			if !ok {
+				code, body = 404, `{"message":"network `+segs[2]+` not found"}`
+			}
+			fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", code, http.StatusText(code), len(body), body)
 			continue
 		}
 		if req.Method == "HEAD" {
@@ -137,6 +154,7 @@ func testConfig(dir string) *Config {
 		DaemonSocket: filepath.Join(dir, "daemon.sock"),
 		Workspace:    filepath.Join(dir, "ws"),
 		Runtimes:     []string{"devkit-runc"},
+		RuntimeGuard: true,
 		Capabilities: []string{"IPC_LOCK", "NET_BIND_SERVICE"},
 	}
 }

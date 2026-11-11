@@ -1,8 +1,10 @@
 package dockerfilter
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -33,9 +35,10 @@ type endpoint struct {
 	upgrade bool
 	// checkQuery refuses parameter values the call must not have.
 	checkQuery func(url.Values) error
-	// startCheck makes the filter look at the stored container before it
-	// lets the call start it.
-	startCheck bool
+	// precheck asks the daemon about what the call acts on before the
+	// call is forwarded (see inspect.go). It gets the validated body and
+	// may return one to forward in its place.
+	precheck func(f *Filter, ctx context.Context, out *http.Request, body []byte) ([]byte, error)
 
 	segs []string
 }
@@ -65,7 +68,7 @@ var endpoints = []*endpoint{
 
 	// Containers.
 	{method: "GET", pattern: "/containers/json", query: q("all", "limit", "size", "filters", "before", "since")},
-	{method: "POST", pattern: "/containers/create", query: q("name", "platform"), body: bodyJSON, validate: decodeCreate},
+	{method: "POST", pattern: "/containers/create", query: q("name", "platform"), body: bodyJSON, validate: decodeCreate, precheck: checkCreatePublish},
 	{method: "POST", pattern: "/containers/prune", query: q("filters")},
 	{method: "GET", pattern: "/containers/{id}/json", query: q("size")},
 	{method: "GET", pattern: "/containers/{id}/top", query: q("ps_args")},
@@ -73,12 +76,12 @@ var endpoints = []*endpoint{
 	{method: "GET", pattern: "/containers/{id}/changes"},
 	{method: "GET", pattern: "/containers/{id}/stats", query: q("stream", "one-shot")},
 	{method: "GET", pattern: "/containers/{id}/export"},
-	{method: "GET", pattern: "/containers/{id}/archive", query: q("path")},
-	{method: "HEAD", pattern: "/containers/{id}/archive", query: q("path")},
-	{method: "PUT", pattern: "/containers/{id}/archive", query: q("path", "noOverwriteDirNonDir", "copyUIDGID"), body: bodyStream},
-	{method: "POST", pattern: "/containers/{id}/start", query: q("detachKeys"), startCheck: true},
+	{method: "GET", pattern: "/containers/{id}/archive", query: q("path"), precheck: checkArchive},
+	{method: "HEAD", pattern: "/containers/{id}/archive", query: q("path"), precheck: checkArchive},
+	{method: "PUT", pattern: "/containers/{id}/archive", query: q("path", "noOverwriteDirNonDir", "copyUIDGID"), body: bodyStream, precheck: checkArchive},
+	{method: "POST", pattern: "/containers/{id}/start", query: q("detachKeys"), precheck: checkStart},
 	{method: "POST", pattern: "/containers/{id}/stop", query: q("t", "signal")},
-	{method: "POST", pattern: "/containers/{id}/restart", query: q("t", "signal"), startCheck: true},
+	{method: "POST", pattern: "/containers/{id}/restart", query: q("t", "signal"), precheck: checkStart},
 	{method: "POST", pattern: "/containers/{id}/kill", query: q("signal")},
 	{method: "POST", pattern: "/containers/{id}/pause"},
 	{method: "POST", pattern: "/containers/{id}/unpause"},
@@ -123,7 +126,7 @@ var endpoints = []*endpoint{
 	{method: "POST", pattern: "/networks/create", body: bodyJSON, validate: decodeNetworkCreate},
 	{method: "POST", pattern: "/networks/prune", query: q("filters")},
 	{method: "GET", pattern: "/networks/{id}", query: q("verbose", "scope")},
-	{method: "POST", pattern: "/networks/{id}/connect", body: bodyJSON, validate: decodeNetworkConnect},
+	{method: "POST", pattern: "/networks/{id}/connect", body: bodyJSON, validate: decodeNetworkConnect, precheck: checkConnect},
 	{method: "POST", pattern: "/networks/{id}/disconnect", body: bodyJSON, validate: decodeNetworkDisconnect},
 	{method: "DELETE", pattern: "/networks/{id}"},
 

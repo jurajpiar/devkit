@@ -23,6 +23,12 @@ type Config struct {
 	// Runtimes are the runtime names a container may ask for by name. An
 	// empty Runtime, the daemon's default, is always allowed.
 	Runtimes []string `json:"runtimes"`
+	// RuntimeGuard says the runtime guard stands in front of the runtime
+	// and checks every container's mounts as made: true with runc, false
+	// under gVisor. Without it the filter's own check of a bind source is
+	// the only one, so a source it cannot see through is refused. Absent
+	// means false, the stricter reading.
+	RuntimeGuard bool `json:"runtime_guard"`
 	// Capabilities are allowed in CapAdd on top of Docker's default set
 	// (less NET_RAW).
 	Capabilities []string `json:"capabilities"`
@@ -81,6 +87,16 @@ func normCap(c string) string {
 		n = "CAP_" + n
 	}
 	return n
+}
+
+// allowedRuntime reports whether a container may name the runtime rt.
+func (c *Config) allowedRuntime(rt string) bool {
+	for _, a := range c.Runtimes {
+		if rt == a {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Config) allowedCaps() map[string]bool {

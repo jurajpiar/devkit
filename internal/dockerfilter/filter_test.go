@@ -50,6 +50,8 @@ func TestCanonicalPaths(t *testing.T) {
 
 func TestEndpointTable(t *testing.T) {
 	h := newHarness(t)
+	// docker cp looks at the container first: one with no bind mount.
+	h.daemon.inspect = `{"Id":"` + strings.Repeat("ab", 32) + `","HostConfig":{},"Mounts":[]}`
 	allowed := []struct{ method, path string }{
 		{"GET", "/_ping"}, {"HEAD", "/_ping"}, {"GET", "/v1.52/version"}, {"GET", "/info"}, {"GET", "/events"},
 		{"GET", "/system/df"}, {"GET", "/containers/json"}, {"GET", "/containers/abc/json"}, {"GET", "/containers/abc/top"},
@@ -72,7 +74,7 @@ func TestEndpointTable(t *testing.T) {
 		before := len(h.daemon.requests())
 		if st, body := h.raw(t, c.method, c.path, ""); st == http.StatusForbidden {
 			t.Errorf("%s %s should be allowed: %d %s", c.method, c.path, st, body)
-		} else if len(h.daemon.requests()) != before+1 {
+		} else if r := h.daemon.requests(); len(r) <= before || r[len(r)-1].Method != c.method {
 			t.Errorf("%s %s did not reach the daemon", c.method, c.path)
 		}
 	}
