@@ -18,9 +18,9 @@ There are two ways in, and they differ in one important respect, so pick one:
 Most people start with A, on a project already on disk. B is the stricter
 one, and the one to use for a repository you have never looked at.
 
-The example is a Go project called `widgets`, at
-`github.com/example-org/widgets`; put your own in its place. Your VM is named
-after your project (`devkit-widgets` here), and so are the refs `devkit push`
+The example is a Go project called `example-repo`, at
+`github.com/example-org/example-repo`; put your own in its place. Your VM is named
+after your project (`devkit-example-repo` here), and so are the refs `devkit push`
 stores. The output is adapted from real runs on another Go project:
 shortened, and with names and paths changed to this one's.
 
@@ -32,11 +32,11 @@ Before you start: `brew install lima`, build devkit (`make install`), and run
 ### A. From a checkout you already have
 
 ```console
-$ cd ~/code/widgets
+$ cd ~/code/example-repo
 $ devkit init
 Wrote devkit.yaml
 
-  name:       widgets
+  name:       example-repo
   source:     copy
   toolchains: mise: go 1.23
   network:    allowlist
@@ -66,17 +66,17 @@ without being asked, and are worth a look in a checkout that predates devkit:
 ### B. From a URL, without checking it out
 
 ```console
-$ devkit clone github.com/example-org/widgets
-Cloning https://github.com/example-org/widgets on your Mac (bare: nothing is checked out here)
-Wrote .../widgets/devkit.yaml
+$ devkit clone github.com/example-org/example-repo
+Cloning https://github.com/example-org/example-repo on your Mac (bare: nothing is checked out here)
+Wrote .../example-repo/devkit.yaml
 
-  name:       widgets
+  name:       example-repo
   source:     git
   toolchains: mise: go 1.23
   network:    allowlist
   ssh port:   2225
 
-Next: cd widgets && devkit up
+Next: cd example-repo && devkit up
 ```
 
 Your Mac clones with your own git credentials, so private repositories work,
@@ -118,7 +118,7 @@ Trust audit
 
 Ready. Network: allowlist (8 hosts), audited
   Shell:   devkit shell
-  IDE:     ssh devkit-widgets   (VS Code / Cursor Remote-SSH, folder ~/workspace)
+  IDE:     ssh devkit-example-repo   (VS Code / Cursor Remote-SSH, folder ~/workspace)
   Audit:   devkit logs
 ```
 
@@ -142,13 +142,13 @@ The first run takes a few minutes; later ones take seconds. What happened:
 ```console
 $ devkit shell
 ~/workspace$ go test ./...
-ok  	github.com/example-org/widgets/internal/config	0.002s
+ok  	github.com/example-org/example-repo/internal/config	0.002s
 ```
 
 `devkit shell <command>` runs one command and returns.
 
 **Where to edit.** In B there is only one place: the VM. Connect your editor
-with Remote-SSH to `ssh devkit-widgets`, folder `~/workspace` (`devkit
+with Remote-SSH to `ssh devkit-example-repo`, folder `~/workspace` (`devkit
 connect` prints the steps); its terminal, language server and extensions then
 run in the VM too.
 
@@ -160,7 +160,7 @@ the VM. So choose a side and stay on it:
 
   ```console
   $ devkit sync
-  Copying /Users/you/code/widgets into the VM
+  Copying /Users/you/code/example-repo into the VM
   Keeping the VM's own git repository
   $ devkit shell go test ./...
   ```
@@ -240,13 +240,13 @@ instead, after showing you what it is about to push.
 $ devkit push
 fix-typo does not exist on origin yet; the push creates it
 
-Commits from the VM for origin fix-typo (stored at refs/devkit/widgets/fix-typo):
+Commits from the VM for origin fix-typo (stored at refs/devkit/example-repo/fix-typo):
   3017c3e83599 Your Name <you@example.com>  Docs: fix a typo
 
 README.md | 2 ++
  1 file changed, 2 insertions(+)
 
-Inspect in full with: git log -p refs/devkit/widgets/fix-typo
+Inspect in full with: git log -p refs/devkit/example-repo/fix-typo
 
 Push 1 commit(s) to origin fix-typo? [y/N]
 ```
@@ -310,7 +310,7 @@ itself.
 
 ```console
 $ devkit rm
-Deleted VM devkit-widgets
+Deleted VM devkit-example-repo
 ```
 
 The VM and everything any dependency did inside it are gone. `devkit up`
