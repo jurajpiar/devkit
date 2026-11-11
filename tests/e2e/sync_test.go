@@ -108,6 +108,10 @@ func TestSyncKeepsVMEdits(t *testing.T) {
 		if out := vm("ls devkit.yaml .devkit 2>&1"); !strings.Contains(out, "No such file") || strings.Contains(out, "sync.git") {
 			t.Errorf("devkit's own files must not be copied into the workspace: %s", out)
 		}
+		// What was sent for the sync is not left lying in the VM.
+		if out, _ := s.shell("ls /tmp/devkit-sync-* 2>&1"); !strings.Contains(out, "No such file") {
+			t.Errorf("the sync left its files in the VM's /tmp: %s", out)
+		}
 	})
 
 	t.Run("edits on one side each are both kept", func(t *testing.T) {
@@ -238,6 +242,32 @@ func TestSyncKeepsVMEdits(t *testing.T) {
 		is(t, "a.txt", "Mac side\n")
 	})
 
+	t.Run("a directory in the VM where the Mac adds a file stops the sync, not devkit up", func(t *testing.T) {
+		vm(`mkdir clash && printf 'vm\n' > clash/inner`)
+		write("clash", "a file on the Mac\n")
+		write("late.txt", "must not arrive while the sync is refused\n")
+		out, ok := sync()
+		if ok || !strings.Contains(out, "clash") {
+			t.Errorf("sync should refuse and name what is in the way (ok=%v):\n%s", ok, out)
+		}
+		is(t, "clash/inner", "vm\n")
+		if got := vm("ls late.txt 2>&1"); !strings.Contains(got, "No such file") {
+			t.Errorf("a refused sync must apply nothing, but late.txt arrived: %s", got)
+		}
+		if out, err := s.run("up", "--no-install"); err != nil || !strings.Contains(out, "clash") {
+			t.Errorf("devkit up should succeed and say the workspace was not synced (err=%v):\n%s", err, out)
+		}
+		is(t, "clash/inner", "vm\n")
+		// Moving it out of the way in the VM lets the sync through.
+		vm("mv clash clash.mine")
+		if out, ok := sync(); !ok {
+			t.Fatalf("sync should succeed once nothing is in the way:\n%s", out)
+		}
+		is(t, "clash", "a file on the Mac\n")
+		is(t, "late.txt", "must not arrive while the sync is refused\n")
+		is(t, "clash.mine/inner", "vm\n")
+	})
+
 	t.Run("a new VM gets everything again", func(t *testing.T) {
 		s.mustRun("rm", "--force")
 		s.mustRun("up", "--no-install")
@@ -250,8 +280,11 @@ func TestSyncKeepsVMEdits(t *testing.T) {
 	})
 
 	t.Run("nothing of this lands in the project on the Mac", func(t *testing.T) {
-		// The Mac keeps its snapshots in .devkit, which must not show up as
-		// a change in the user's own repository.
+		// devkit's snapshots are kept outside the project, where a project
+		// cannot plant anything: the directory holds what the test wrote.
+		if _, err := os.Lstat(mac(".devkit")); err == nil {
+			t.Errorf("devkit sync left a .devkit in the project directory")
+		}
 		if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v: %s", err, out)
 		}
@@ -262,8 +295,8 @@ func TestSyncKeepsVMEdits(t *testing.T) {
 		if err := cmd.Run(); err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(b.String(), ".devkit") {
-			t.Errorf("git status in the project lists devkit's own directory:\n%s", b.String())
+		if strings.Contains(b.String(), "devkit") && !strings.Contains(b.String(), "devkit.yaml") || strings.Contains(b.String(), "sync.git") {
+			t.Errorf("git status in the project lists devkit's own state:\n%s", b.String())
 		}
 	})
 }
