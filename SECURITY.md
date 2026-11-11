@@ -220,6 +220,23 @@ The `AF_ALG` kernel crypto socket family is separately blocked from loading and
 unloaded if present. This removes a source of kernel attack surface; it does not
 protect against bugs in other reachable kernel code.
 
+### Ubuntu services switched off
+
+The Ubuntu image ships snapd and pollinate. Both make outbound requests as
+root: snapd on a schedule, through its repair timer, and pollinate on the first
+boot, to fetch random seed material. Each also delays the first boot. With no
+snaps installed, snapd still held provisioning back by about 40 seconds, and
+pollinate held Lima's first SSH connection back by about 10.
+
+devkit masks every snapd unit and `pollinate.service` from early in every boot,
+before either can start and before provisioning runs. As a result:
+
+- `snap install` does not work in the VM. Use `tools.packages`, mise or Nix
+  instead.
+- The guest's random number generator relies on the kernel's own
+  initialisation, which the image's kernel completes during boot, before
+  pollinate would have run.
+
 ### Further isolation with gVisor
 
 Kernel restrictions cannot rule out every privilege-escalation bug. An

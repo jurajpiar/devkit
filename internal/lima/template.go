@@ -118,6 +118,28 @@ portForwards:
     ignore: true
 
 provision:
+  # Lima runs boot scripts early in every boot, before multi-user.target.
+  # snapd and pollinate are switched off here, before they can start. With no
+  # snaps installed, snapd.seeded still holds multi-user.target, and with it
+  # the provisioning below, for about 40 seconds on a first boot; pollinate
+  # holds the first SSH connection for another 10 fetching seed material,
+  # though the kernel's RNG is initialised before it runs. devkit installs
+  # nothing through snap, and both call out as root, snapd's repair timer on
+  # a schedule. Every snapd unit is masked, not only the slow ones. The
+  # script needs nothing provisioning creates and must never fail the boot:
+  # one call masks them all with a single reload of systemd, and should it
+  # fail, each unit is tried on its own so one bad name cannot spare the
+  # rest. The subshell keeps a failure from reaching anything Lima runs after
+  # it, and stops are queued rather than waited for, so a slow one cannot
+  # hold the boot.
+  - mode: boot
+    script: |
+      #!/bin/sh
+      (
+        units="$(systemctl list-unit-files 'snapd.*' --no-legend | awk '{print $1}') pollinate.service"
+        systemctl mask --now --no-block $units ||
+          for unit in $units; do systemctl mask --now --no-block "$unit"; done
+      ) || true
   - mode: system
     script: |
 {{indent 6 .SystemScript}}
