@@ -198,7 +198,8 @@ there, and add the host its API uses to `network.allow`. Whatever key you
 give it is readable by everything else that runs in the VM, so use one you
 can revoke.
 
-**What it reached.** Everything the VM tried to reach is logged on your Mac:
+**What it reached.** Every request the VM made through the proxy, allowed or
+blocked, is in a log you read from your Mac:
 
 ```console
 $ devkit logs -n 3
@@ -206,6 +207,11 @@ $ devkit logs -n 3
 ... [EGRESS] ALLOWED CONNECT raw.githubusercontent.com:443 (matched: **.githubusercontent.com)
 ... [EGRESS] BLOCKED CONNECT example.org:443
 ```
+
+The log is kept in the VM and goes when the VM does (under
+`network.enforce: host` it is the Mac's own proxy that writes it, on the
+Mac). A connection that tries to go around the proxy is dropped by the
+firewall and is not listed.
 
 Read it after an install. A dependency that reaches for a host you did not
 expect is the thing to notice, whether it was allowed or blocked. When a
