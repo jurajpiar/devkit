@@ -222,11 +222,12 @@ sleep 3; python3 ~/sweep.py "$resolver"; wait`)
 		// What the masks buy: the boot no longer waits on snapd. Logged
 		// with a generous bound; the wait it guards against is 40 seconds
 		// on its own.
-		out, _ = s.shell("systemd-analyze 2>&1 | tail -n 1; systemctl show snapd.seeded.service -p ActiveState --value")
+		out, _ = s.shell("systemd-analyze 2>&1 | tail -n 1")
 		t.Logf("boot: %s", strings.TrimSpace(out))
-		if lineIs(out, "active") {
-			t.Errorf("snapd.seeded ran on this boot: %s", out)
-		}
+		// By now the VM has been restarted by earlier subtests, so this is
+		// the check for a boot after the first. TestSandboxGuarantees makes
+		// the same check straight after the first boot.
+		neverStartedThisBoot(t, s, "a restart")
 		// The firewall and the rest of provisioning do not depend on
 		// either: the checks above this one ran on a VM booted this way.
 		if out, _ := s.shell("systemctl --failed --no-legend | wc -l"); strings.TrimSpace(out) != "0" {
@@ -234,6 +235,22 @@ sleep 3; python3 ~/sweep.py "$resolver"; wait`)
 			t.Errorf("failed units after boot: %s", failed)
 		}
 	})
+}
+
+// neverStartedThisBoot fails unless the units that used to delay boot were
+// never started in the VM's current boot. Being inactive now is not enough:
+// a unit that ran, held the boot and was stopped afterwards is inactive
+// too. systemd records when a unit last left the inactive state, as a
+// monotonic time that is zero if it never did since boot; any user may read
+// it. (On a VM without the masks the three values are a few seconds.)
+func neverStartedThisBoot(t *testing.T, s *sandbox, when string) {
+	t.Helper()
+	out, _ := s.shell(`for u in snapd.seeded.service snapd.service pollinate.service; do echo "$u=$(systemctl show $u -p InactiveExitTimestampMonotonic --value)"; done`)
+	for _, u := range []string{"snapd.seeded.service", "snapd.service", "pollinate.service"} {
+		if !lineIs(out, u+"=0") {
+			t.Errorf("after %s, %s was started during this boot (want InactiveExitTimestampMonotonic=0): %s", when, u, out)
+		}
+	}
 }
 
 // lineIs reports whether one whole line of out, trimmed, is want.
