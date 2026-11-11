@@ -2,6 +2,9 @@
 
 ## Setup
 
+You need Go 1.23 or newer and an Apple silicon Mac. Install Lima, then build
+and test from the repository root:
+
 ```bash
 brew install lima
 make build          # cross-compiles the egress proxy and builds devkit
@@ -11,20 +14,25 @@ make test-e2e       # creates a real VM; several minutes on first run
 
 ## Principles
 
-- One VM per project is the product. Do not add a mode that shares a kernel.
-- The security policy is `internal/provision/provision.go`. Changes there need
-  an end-to-end test in `tests/e2e` that proves the guarantee still holds.
-- Secure by default, convenience by opt-in, and every opt-in says what it costs
-  in the config comment.
-- Keep `devkit.yaml` small. A new key needs a reason a user would understand.
-- No sudo for the sandbox user. If a feature needs root in the VM, it belongs in
-  the provisioning script.
+- Keep one VM per project. Do not add a mode that shares a kernel.
+- Changes to the security policy in `internal/provision/provision.go` need an
+  end-to-end test in `tests/e2e` that checks the affected guarantee.
+- Keep secure defaults. Make convenience options opt-in and explain their
+  security trade-offs in the configuration comments.
+- Keep `devkit.yaml` small. Add a key only when it meets a clear user need.
+- Keep general sudo access disabled by default. Put features that need root
+  inside the VM in the provisioning script.
 
 ## Pull requests
 
-Run `gofmt`, `go vet ./...` and `make test` before opening one. Describe the
-threat model impact of any change to provisioning, the firewall or the proxy.
+Before opening a pull request, format changed Go files with `gofmt`, then run
+`go vet ./...` and `make test`. Run the relevant end-to-end tests for security
+policy changes.
+
+For changes to provisioning, the firewall or the proxy, explain which threats
+the change addresses and whether it changes any security guarantees.
 
 ## Reporting security issues
 
-Privately to the maintainer, not in a public issue.
+Report vulnerabilities privately to the maintainer. See
+[SECURITY.md](SECURITY.md) for the threat model and known limitations.

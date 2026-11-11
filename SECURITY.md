@@ -1,18 +1,30 @@
 # Security model
 
-devkit's adversary is code running inside the sandbox: a malicious dependency,
-a hostile pull request, or a coding agent that goes off-script. The goal is that
-such code cannot read or change anything on your Mac, cannot reach services on
-it, and cannot talk to the internet beyond what you allowed, while you can see
-everything it tried.
+devkit is designed to contain untrusted project code: malicious dependencies,
+hostile pull requests and coding agents that run unsafe commands. Its default
+policy blocks access to your Mac's files and services, and limits outbound
+traffic to allowed hosts. The proxy logs requests made through it.
+
+**Host** means your Mac. **Guest** means the project's Ubuntu VM. The **sandbox
+user** is the account that runs project code inside that VM.
+
+Start with the [summary](#summary) and [accepted risks](#accepted-risks). The
+sections below explain [guest controls](#what-is-enforced-and-how), [host
+enforcement](#enforcement-on-the-mac-networkenforce-host), [Git
+review](#git-review-and-credentials) and [crash
+reports](#kernel-crash-reports-read-on-the-mac).
 
 ## Summary
+
+This table assumes the default guest protections: no host mounts, no general
+sudo access, `allow_host: false` and `dns: proxy`. It describes unprivileged
+project code; guest root can remove the guest controls.
 
 | Risk | `allowlist` (default) | `open` | `none` |
 |---|---|---|---|
 | Read or write host files | Blocked | Blocked | Blocked |
 | Reach services on the host (databases, agents, IDE) | Blocked | Blocked | Blocked |
-| Reach the internet | Allowed hosts only, logged | Anything, logged | Blocked |
+| Reach the internet | Allowed hosts and ports, via the logged proxy | Any host on permitted ports, via the logged proxy | Blocked |
 | Exfiltrate data over DNS (through the resolver) | Blocked (`dns: resolvers` reopens it) | Blocked (same) | Blocked |
 | Tunnel to a non-web port of an allowed host | Blocked unless `host:port` is listed | Blocked unless listed | Blocked |
 | Expose a listener to the Mac | Only ports in `forward` | Only ports in `forward` | Only ports in `forward` |
@@ -22,400 +34,537 @@ everything it tried.
 ## The boundary
 
 Each project runs in its own Lima virtual machine on Apple's
-Virtualization.framework. That is the only security boundary devkit relies on.
-There is no shared kernel between projects or with the host. Containers inside
-the VM are available as a convenience, not as a protection layer.
+Virtualization.framework. The hypervisor separates the guest kernel from your
+Mac; projects do not share a kernel with each other or the host.
+
+Guest network controls depend on the guest kernel remaining trustworthy.
+Optional host enforcement adds a network boundary on the Mac. Containers inside
+the VM provide convenience, not an additional security boundary.
 
 ## What is enforced, and how
 
-**No host filesystem.** The instance config has `mounts: []`. Lima's default
-home-directory mount is never created. `source: mount` is the explicit opt-in,
-read-only unless `mount_writable: true`.
+### Host files
 
-**Nothing comes back on its own.** devkit copies files into the VM (`source:
-copy`, the proxy binary) and never out of it, with one exception you start
-yourself: `devkit push` reads a git bundle of one branch, capped in size, into
-a private temporary file, and git checks every object before storing it under
-`refs/devkit/`, never in your branches or work tree. Nothing is pushed until
-you confirm, and no git hooks run on the Mac. Toolchain lockfiles stay in the
-VM. The end-to-end suite has a hostile
-workspace rewrite every file devkit might be tempted to bring back and checks
-that the project directory on the host is byte-for-byte unchanged.
+The instance config has `mounts: []`. Lima's default home-directory mount is
+never created. `source: mount` is the explicit opt-in, read-only unless
+`mount_writable: true`.
 
-**Guest output on your terminal.** The blocked-host summary that `devkit up`
-prints is built from hostnames the sandbox chose, so it is stripped of
-control characters first. Everything else devkit shows you is streamed raw:
-dependency and toolchain installs, `devkit shell`, `devkit logs`. A hostile
-install script can therefore write terminal control sequences at you, the
-same as any build you run on your Mac. Your terminal emulator is the defence
-there, not devkit.
+### Copying data out of the VM
 
-**No access to the host.** The guest can normally reach the host at
-`host.lima.internal`, which is also its gateway. The firewall rejects all
-traffic to that address except the proxy's DNS to the configured resolvers,
-unless `network.allow_host: true`, in which case the host is reachable
-directly and is listed in `NO_PROXY`, so that traffic is not audited. In
-`none` mode DNS is rejected too, unless `allow_host: true`, which keeps the
-host reachable and, with it, any resolver running there.
+devkit copies project files and the proxy binary into the VM. It does not copy
+changes back into your working tree. Toolchain lockfiles stay in the VM.
 
-**Nothing listens towards the Mac.** Lima would forward every port the guest
-listens on to `127.0.0.1` on the host. devkit tells it to forward only the
-ports in `network.forward`. The reason is not the listener itself but what
-you might do with it: a page served by the sandbox, opened in your browser,
-runs with the browser's network, which the firewall never sees. The same goes
-for an IDE's remote session, whose local client acts on what the extension
-host in the guest asks of it. Treat anything you open from the sandbox as a
-bridge you chose to build.
+The explicit exception is `devkit push`. It reads a size-limited Git bundle into
+a private temporary file on your Mac. Git checks every object before storing the
+branch under `refs/devkit/`, outside your branches and working tree. Pushing
+requires confirmation unless you pass `--yes`; no Git hooks run on the Mac. See
+[Git review and credentials](#git-review-and-credentials).
 
-**No network before the firewall.** The firewall is applied by root
-provisioning, which Lima runs late in boot. Lima's own SSH sessions run as
-the sandbox user well before that, and sshd and bash then read files that user
-can write: `~/.ssh/rc`, `~/.bashrc`, `~/.profile`. Code planted there in one
-session would otherwise get unfiltered network, your Mac included, early in
-every later boot; the end-to-end suite planted exactly that and saw direct
-HTTP 200s from it before the fix. A unit installed on the first boot now runs
-on every later boot before sshd starts and rejects all new outbound traffic
-from the sandbox user until the firewall replaces it, and the firewall itself
-is rebuilt under a DROP policy so the moment between old and new rules is
-closed. The hold decides by account and direction only, so loopback is held
-too (the egress proxy and systemd-resolved listen there and would relay), and
-in DNS=proxy and none modes systemd-resolved itself is held, which closes
-lookups the sandbox asks of it over D-Bus. The first boot needs no hold:
-nothing of the sandbox's exists on a fresh disk.
+The end-to-end suite rewrites workspace files inside the VM and checks that the
+host project directory remains byte-for-byte unchanged.
 
-**A failed provisioning does not leave an open VM.** Provisioning removes its
-stamp (`/etc/devkit/provision.id`) when it starts and writes it back only
-after the firewall is applied. When `devkit up` finds a running VM without
-it, whether or not `limactl start` reported an error, it stops the VM, names
-the step that failed (the script reports it on the serial console) and exits
-non-zero, before anything is copied in or installed. `devkit shell` and
-`devkit sync` refuse such a VM. A VM someone starts by hand is held inside
-the guest instead: before any download, the script sets `IPAddressDeny=any`
-on the sandbox user's slice and on systemd-resolved, which systemd enforces
-per cgroup for every socket, loopback and interface-bound ones included, and
-it lifts that only once the firewall is in place. If provisioning fails, the
-hold stays until the VM shuts down. It starts when the script starts, not at
-boot, so on a VM that has never finished a first provisioning (and so has no
-boot-hold unit yet) Lima's early SSH sessions have the network every first
-boot has. The stamp is read over SSH as the sandbox user, whose shell startup
-files could print a false answer; the in-guest hold does not rely on it.
+### Terminal output
 
-**Connection state is trusted only for root and the proxy.** conntrack keys
-a flow by addresses and ports, not by the account that owns it, and an entry
-outlives its socket. A firewall that accepts "established" traffic before it
-checks the owner lets a sandbox socket bound to a source port the proxy just
-used for a lookup ride that live entry out; a sweep of every ephemeral port
-got 70 DNS queries answered that way before this rule. So "established"
-passes only for root and the proxy, and every other account may send only in
-the reply direction of a connection made to the guest, its SSH sessions and
-forwarded ports, plus what an explicit rule allows. The end-to-end suite
-repeats the sweep while the proxy is resolving names and requires no answer. `devkit up`'s progress display follows the serial console from
-the host for the same reason: polling over SSH would execute those files.
+The blocked-host summary that `devkit up` prints is built from hostnames the
+sandbox chose, so it is stripped of control characters first. Several other streams are shown raw: dependency and toolchain installs, `devkit
+shell`, `devkit logs`. A hostile install script can therefore write terminal
+control sequences at you, the same as any build you run on your Mac. Your
+terminal emulator is the defence there, not devkit.
 
-**Egress allowlist.** In `allowlist` and `open` modes an iptables `OUTPUT`
-chain accepts loopback, established connections, and packets owned by the
-proxy's service account, including that account's DNS to the resolvers in
-`/run/systemd/resolve/resolv.conf`. Everything else is rejected, so port 53
-cannot be used to reach arbitrary endpoints, and by default no other account
-can query a resolver at all: the proxy resolves allowed hosts itself, against
-the upstream resolvers rather than the local stub, so a query name cannot
-carry data out of the sandbox. `network.dns: resolvers` reopens DNS to the
-VM for tools that resolve before they use the proxy. The proxy is an
-HTTP/CONNECT proxy; in `allowlist` mode it enforces `network.allow`, in
-`open` mode it allows every host. An allowed host is reachable on ports 80
-and 443 only, unless the entry names another port, so allowing GitHub is not
-a tunnel to its SSH port or to anything else it listens on. It is the only
-process that can open outbound TCP connections. Tools pick it up from
-`HTTP_PROXY`/`HTTPS_PROXY`, set system-wide, and apt is configured separately.
+### Access to host services
 
-**The guest is patched.** Root applies Ubuntu's security pocket on every
-boot, before the firewall comes up, so the sandbox does not sit at the pinned
-image's patch level while the image ages. That matters more than anything
-else on this page once an attacker is inside: a local privilege escalation
-turns the sandbox user into root, and root can drop the firewall and reach
-your Mac's loopback services through Lima's gateway. A kernel update installed
-this way runs from the next boot; `devkit up` does not reboot a VM whose
-configuration has not changed, so `devkit down && devkit up` is what boots
-into it. `vm.security_updates: false` turns the step off.
+The guest can normally reach the host at `host.lima.internal`, which is also its
+gateway. The firewall rejects all traffic to that address except the proxy's DNS
+to the configured resolvers, unless `network.allow_host: true`, in which case
+the host is reachable directly and is listed in `NO_PROXY`, so that traffic is
+not audited. In `none` mode DNS is rejected too, unless `allow_host: true`,
+which keeps the host reachable and, with it, any resolver running there.
 
-**One less surface for the privilege escalation.** Patching closes known
-holes; it cannot close the one nobody has reported yet. So the guest also
-takes away interfaces unprivileged code rarely needs and kernel exploits
-often ride in on. A sysctl drop-in disables io_uring and restricts BPF, perf,
-userfaultfd and ptrace. Unprivileged user namespaces are refused outright
-with Ubuntu's `kernel.unprivileged_userns_clone = 0`, on top of AppArmor's
-`kernel.apparmor_restrict_unprivileged_userns`. AppArmor alone is not enough:
-it denies capabilities inside a new namespace, but Ubuntu ships profiles
-exempting named programs (`rootlesskit`, `runc`, `slirp4netns`, `podman`,
-`lxc` and others), so installing one through `tools.packages` would give
-unprivileged code a namespace with a working `CAP_NET_ADMIN`; we tested this
-with `rootlesskit`. The kernel switch refuses the namespace itself, exempted
-program or not; root is unaffected. The exception is `tools.containers: true`:
-Lima's rootless containerd needs user namespaces, so that configuration
-leaves the switch open and relies on AppArmor's restriction alone, exemptions
-included. The value follows `devkit.yaml` on every boot, so turning
-containers off closes them again. On a kernel without the switch,
-provisioning carries on with AppArmor's restriction only and says so.
+### Forwarded ports and IDE connections
 
-**Docker's API is filtered.** With `tools.containers: docker` the daemon runs
-rootless under its own account, and its socket is reachable only by
-devkit's API filter, which runs under another account, not root. The
-sandbox user's `DOCKER_HOST` is the filter's socket. The filter forwards a
-call only if it is in its table and its body decodes strictly (exact field
-names, no duplicates, no unknown fields) and validates; it forwards its own
-re-encoding of the body, never the client's bytes, so the daemon reads what
-was checked. It refuses privileged containers, added capabilities beyond
-Docker's defaults and two harmless ones, the VM's namespaces, devices,
-sysctls, security-option changes, runtimes other than the configured one,
-published ports beyond loopback, and bind mounts from outside the
-workspace; it drops `NET_RAW` from every container. Because the daemon
-resolves bind paths after the check, a runtime guard in front of `runc`
-reads the mounts each container actually got before its process starts and
-deletes it unless they come from the workspace, Docker's volumes or its
-per-container files. Under gVisor the guard is not used and the filter's
-check of bind paths stands alone. BuildKit's session stream is not parsed.
-The Docker account is the boundary for containers: container root is that
-account.
+Lima would forward every port the guest listens on to `127.0.0.1` on the host.
+devkit tells it to forward only the ports in `network.forward`. The reason is
+not the listener itself but what you might do with it: a page served by the
+sandbox, opened in your browser, runs with the browser's network, which the
+firewall never sees. The same goes for an IDE's remote session, whose local
+client acts on what the extension host in the guest asks of it. Treat anything
+you open from the sandbox as a bridge you chose to build.
 
-**No kernel modules after provisioning.** Any process can make the kernel
-load a module, for a socket family nobody uses or, from a namespace, a link
-type or a netfilter extension: kernel code that would otherwise never run.
-The last step of provisioning, after the firewall is applied and the
-provisioning hold lifted, sets `kernel.modules_disabled = 1`, which refuses
-every later load, to root as well, until the VM restarts; each boot
-provisions and locks again. With `containers: true`, the modules containers
-use (bridge, veth, overlay, NAT and the netfilter matches) are loaded first.
-The cost is that something which needs a module nothing loaded beforehand
-fails, usually with "operation not supported" or "Operation not permitted"
-(a macvlan network, an iptables match devkit does not use). A restart does
-not help on its own, since every boot locks again; `vm.lock_modules: false`
-and `devkit up`, which restarts the VM, leave loading open, and `devkit up`
-notes it.
+### Network access during boot
 
-Separately, the kernel crypto socket family `AF_ALG` is
-blocked from loading and unloaded if present. That family exposes kernel
-crypto internals to any process and has produced a string of memory-safety
-bugs, Copy-Fail (CVE-2026-31431) the latest; a dev workload does its crypto
-in userspace libraries and never misses it. This does not stop a kernel
-out-of-bounds write in code that is still reachable: nothing short of not
-running that code does, and that is the next point. It removes one whole
-class of reachable bug in advance.
+Root applies the firewall late in boot. Before then, Lima opens SSH sessions as
+the sandbox user. Those sessions read user-writable files such as `~/.ssh/rc`,
+`~/.bashrc` and `~/.profile`. Code planted in those files could otherwise use an
+unrestricted network on the next boot. An end-to-end test demonstrated direct
+HTTP access through this gap before it was fixed.
 
-**What it would take to go further, and why it is not the default.** The
-remaining gap is that any reachable kernel bug, in a subsystem we did not
-foresee, still escalates. Closing it means not trusting the guest kernel at
-all: running the project's processes inside a userspace kernel such as gVisor
-*within* the VM, so an exploit meets gVisor's syscall emulation before it ever
-reaches the real kernel. That is real defence in depth but it is not free,
-a measurable cost on syscall-, file- and network-heavy work, and an IDE's
-remote session would have to run inside that inner sandbox rather than in the
-VM. It is a roadmap item, an opt-in mode, not something to impose on every
-project. The VM boundary already keeps a guest-root attacker off your files;
-this would additionally keep a kernel exploit off the host's loopback.
-Software that ignores proxy settings is simply blocked by the firewall.
+A unit installed during the first boot now runs before sshd on later boots. It
+blocks new outbound traffic from the sandbox user until the firewall is ready.
+The firewall is rebuilt under a DROP policy, so replacing the rules does not
+briefly reopen the network.
 
-**Config values cannot inject into the policy.** `network.allow`, `repo`,
-`branch`, `tools.versions` and `tools.packages` are validated against strict
-grammars, and the policy files are written through quoted heredocs, so a
-hostile `devkit.yaml` cannot run commands as root in the VM. `install:` is
-deliberately free-form: it runs as the sandbox user, which is the thing being
-sandboxed.
+The temporary block includes loopback: otherwise the sandbox could relay
+requests through the proxy or systemd-resolved. In `dns: proxy` and `none`
+modes, systemd-resolved is also blocked, including lookups requested over D-Bus.
+A fresh VM has no existing sandbox files to run during its first boot.
 
-**TLS trust is the distro's, kept current, and auditable.** Non-browser TLS
-clients check no revocation: a mis-issued certificate from a compromised CA
-stays valid for them until their trust bundle is updated. devkit keeps the
-VM's bundle current by refreshing `ca-certificates` on every boot, and makes
-that bundle authoritative for runtimes that would otherwise carry their own
-stale copy (Node via `--use-openssl-ca`, Python and pip via `SSL_CERT_FILE`,
-`REQUESTS_CA_BUNDLE` and `PIP_CERT`, curl via `CURL_CA_BUNDLE`).
-`network.distrust` removes named roots on top of that, for cases where the
-distro lags the browsers, such as a cross-signing root they have stopped
-trusting. There is no CA list inside devkit to go stale: `devkit audit`
-compares what the system, Node, Java, certifi bundles and certificate files
-in the project trust against Mozilla's current root store, fetched through
-the proxy, and names anything trusted that should not be, with the
-`distrust` entry to add. `devkit up` runs it shallowly every time. What it
-cannot fix is a compiled program that embeds its own bundle and ignores the
-environment, though it can find one by fingerprint; and the proxy cannot
-inspect certificates, because TLS 1.3 encrypts them.
+`devkit up` reads progress from the serial console on the Mac. It does not poll
+over SSH, which would execute those user-writable startup files.
 
-**Container images the project does not pin are reported, not blocked.**
-devkit pins by hash everything it downloads itself; a project's images are
-the project's choice, and a tag is mutable. The audit reads the project's
-compose files and Dockerfiles (it needs no Docker: an image list cannot say
-how an image was requested, since a pulled image carries both tag and digest
-either way) and counts each reference as pinned (`@sha256:` and 64 hex
-characters), unpinned, or unresolved. Variables are resolved from the
-compose file's `.env` and from defaults in the reference, and a Dockerfile's
-from the `ARG` defaults before its first `FROM`; anything else, including a
-build argument passed on the command line, is unresolved, which is reported
-rather than assumed fine. Without PyYAML in the VM the compose reading falls
-back to line matching and says it is approximate. File names and references
-are stripped of control characters before they reach the terminal, and a
-file over 256 KB, binary or not a regular file is named as not read. Unpinned
-and unresolved images do not change the audit's exit status: they are
-common, and the audit's verdict stays about trust.
+### Failed provisioning
 
-**Toolchains are installed by the sandbox user.** Root installs only the
-manager (mise or Nix) from a release archive pinned by SHA-256 in devkit's
-source, with the pin taken after verifying the upstream signature. The
-toolchains come in afterwards as the sandbox user, through the proxy and into
-the audit log. mise runs with plugin backends disabled, provenance checks on
-every install, a three-day minimum release age, and a lockfile written in the
-VM on the first run and enforced with `--locked` afterwards. The sandbox user
-owns that lockfile, so it guards against upstream changing an archive, not
-against the sandbox itself, which can already run anything. Nix checks every
-substitute against the cache's signing key and pins inputs in `flake.lock`.
+Provisioning removes `/etc/devkit/provision.id` when it starts and writes it
+back only after applying the firewall. If `devkit up` finds a running VM without
+that stamp, it stops the VM, reports the failed step and exits with a non-zero
+status. It does this even if `limactl start` reported success, and before
+copying project files or installing project dependencies. `devkit shell` and
+`devkit sync` also refuse a VM without the stamp.
 
-**Air gap.** `network.mode: none` rejects all outbound traffic including DNS.
-Incoming SSH still works because its return packets are an established
-connection. Combined with `allow_host: true` the gap has one opening: the
-host, and therefore DNS through the host's resolver. Pair them only when
-that is what you want.
+The guest has a separate safeguard for manual starts. Before any download, the
+provisioning script sets `IPAddressDeny=any` on the sandbox user's systemd slice
+and on systemd-resolved. This needs no additional packages and blocks sockets
+per cgroup, including loopback and interface-bound sockets. The script lifts the
+block only once the firewall is ready. If provisioning fails, the block remains
+until shutdown.
 
-**The sandbox cannot loosen the policy.** The user account inside the VM can
-run exactly three commands as root, all read-only checks Lima's host agent
-needs to confirm the machine booted. Policy lives in a root-only provisioning script that Lima regenerates from
+There are two limits:
+
+- The provisioning block starts with the script. A VM that has never finished
+  provisioning has no boot-hold unit yet, so Lima's earlier SSH sessions still
+  have the network access normally available on a first boot.
+- The Mac reads the stamp over SSH as the sandbox user. Modified shell startup
+  files could forge the response. The guest's network block does not depend
+  on that response.
+
+### Connection tracking
+
+Linux connection tracking (`conntrack`) identifies flows by addresses and ports,
+not by the account that owns a socket. Its entries can outlive the socket. A
+sandbox process can therefore reuse a source port the proxy used for DNS and try
+to send through the existing flow.
+
+Before the fix, a sweep of ephemeral ports received 70 DNS answers this way. The
+firewall now accepts established outbound flows only for root and the proxy.
+Other accounts may reply to connections made to the guest, such as SSH and
+forwarded ports, or use an explicitly allowed path.
+
+The end-to-end suite repeats the port sweep while the proxy resolves names and
+requires that none of the sandbox's queries receive an answer.
+
+### Outbound connections and DNS
+
+In `allowlist` and `open` modes, the iptables `OUTPUT` chain permits loopback,
+connection replies under the ownership rules above, and permitted traffic from
+the proxy's service account. It also honours explicit DNS and host-access
+options. Other outbound traffic is rejected.
+
+By default, only the proxy can query the resolvers listed in
+`/run/systemd/resolve/resolv.conf`. It resolves allowed hosts directly through
+those upstream resolvers, bypassing the local stub. The sandbox cannot send
+its own DNS queries. `network.dns: resolvers` lets all guest accounts query
+the configured resolvers, including queries that could carry data out.
+
+The HTTP/CONNECT proxy enforces `network.allow` in `allowlist` mode and allows
+any host in `open` mode. Host entries allow ports 80 and 443; other ports must
+be listed explicitly. Allowing GitHub therefore does not also allow its SSH
+port. Tools use the system-wide `HTTP_PROXY` and `HTTPS_PROXY` settings;
+apt has a separate proxy configuration.
+
+### Security updates
+
+Root applies Ubuntu's security updates on every boot, before the firewall comes
+up, so the sandbox does not sit at the pinned image's patch level while the
+image ages. A local privilege escalation can turn the sandbox user into root.
+Under guest enforcement, root can remove the firewall and reach your Mac's
+loopback services through Lima's gateway. A kernel update installed this way
+runs from the next boot; `devkit up` does not reboot a VM whose configuration
+has not changed, so `devkit down && devkit up` is what boots into it.
+`vm.security_updates: false` turns the step off.
+
+### Restricted kernel features
+
+The guest disables or restricts kernel interfaces that development workloads
+rarely need and that can expose privilege-escalation bugs. A sysctl drop-in
+disables io_uring and restricts BPF, perf, userfaultfd and ptrace.
+
+By default, Ubuntu's `kernel.unprivileged_userns_clone = 0` also prevents
+unprivileged user namespaces. AppArmor's
+`kernel.apparmor_restrict_unprivileged_userns` remains enabled, but is not
+sufficient on its own: Ubuntu exempts programs including `rootlesskit`, `runc`,
+`slirp4netns`, `podman` and `lxc`. Tests with `rootlesskit` showed that an
+exempted program could create a namespace with `CAP_NET_ADMIN`. The kernel
+switch prevents the namespace itself; root is unaffected.
+
+`tools.containers: true` leaves user namespaces enabled because Lima's rootless
+containerd needs them. That mode relies on AppArmor, including its exemptions.
+Turning containers off closes namespaces again on the next boot. If the kernel
+lacks the switch, provisioning warns and uses AppArmor alone.
+
+`tools.containers: docker` also leaves the kernel switch on, but closes the
+exemptions: the three programs rootless Docker needs (`rootlesskit`, `runc`,
+`slirp4netns`) are executable only by Docker's own account, and every other
+stock AppArmor profile that exempts a program is disabled. For the sandbox
+user, a namespace then carries no capabilities, as without containers.
+
+### Kernel module loading
+
+Kernel modules add executable code to the guest kernel. Socket families, network
+link types and netfilter extensions can trigger module loading, including
+through requests from unprivileged processes.
+
+The last provisioning step sets `kernel.modules_disabled = 1`. After that, even
+root cannot load another module until the VM restarts. Each boot provisions and
+locks again. With `containers: true`, devkit first loads the bridge, veth,
+overlay, NAT and netfilter modules that containers need.
+
+A tool that needs an unloaded module may fail with "operation not supported" or
+"Operation not permitted". Restarting alone will not fix that, because each boot
+locks loading again. Set `vm.lock_modules: false` and run `devkit up` to leave
+loading enabled for the project.
+
+The `AF_ALG` kernel crypto socket family is separately blocked from loading and
+unloaded if present. This removes a source of kernel attack surface; it does not
+protect against bugs in other reachable kernel code.
+
+### Docker's API filter and runtime guard
+
+With `tools.containers: docker` the daemon runs rootless under its own account,
+and its socket is reachable only by devkit's API filter, which runs under
+another account, not root. The sandbox user's `DOCKER_HOST` is the filter's
+socket.
+
+The filter forwards a call only if it is in its table and its body decodes
+strictly (exact field names, no duplicates, no unknown fields) and validates. It
+forwards its own re-encoding of the body, never the client's bytes, so the
+daemon reads what was checked. It refuses privileged containers, added
+capabilities beyond Docker's defaults and two harmless ones, the VM's
+namespaces, devices, sysctls, security-option changes, runtimes other than the
+configured one, published ports beyond loopback, and bind mounts from outside
+the workspace. It drops `NET_RAW` from every container.
+
+The daemon resolves bind paths after that check, and the workspace is the
+sandbox user's to rearrange in between. So a runtime guard in front of `runc`
+reads the mounts each container actually got, before its process starts, and
+deletes the container unless they come from the workspace, Docker's volumes or
+its per-container files.
+
+Limits: under gVisor the guard is not used and the filter's check of bind paths
+stands alone. BuildKit's session stream is not parsed, and its build steps run
+under its own `runc`, outside the guard and outside gVisor. The Docker account
+is the boundary for containers: container root is that account.
+
+### Further isolation with gVisor
+
+Kernel restrictions cannot rule out every privilege-escalation bug. With
+`tools.containers: docker`, `tools.container_runtime: gvisor` runs containers
+behind gVisor's userspace kernel inside the VM, reducing their direct access to
+the guest kernel. It has compatibility and performance costs; see the README.
+
+Project processes outside containers, and an IDE's remote processes, do not run
+under it: extending it to them remains a roadmap item. The VM still provides the
+boundary between the guest kernel and your Mac.
+
+### Configuration validation
+
+`network.allow`, `repo`, `branch`, `tools.versions` and `tools.packages` are
+validated against strict grammars, and the policy files are written through
+quoted heredocs, so a hostile `devkit.yaml` cannot run commands as root in the
+VM. `install:` is deliberately free-form: it runs as the sandbox user, which is
+the thing being sandboxed.
+
+### TLS trust and certificate audits
+
+devkit refreshes Ubuntu's `ca-certificates` package on every boot. It also
+points supported runtimes at that system bundle:
+
+- Node: `--use-openssl-ca`.
+- Python and pip: `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `PIP_CERT`.
+- curl: `CURL_CA_BUNDLE`.
+
+`network.distrust` removes additional named roots, for example when Ubuntu's
+trust decisions lag behind Mozilla's. Updating root certificates does not
+provide per-certificate revocation checking.
+
+`devkit audit` compares the system, Node, Java, certifi and project certificate
+bundles with Mozilla's current root store, fetched through the proxy. It reports
+roots absent from that store and suggests `distrust` entries. `devkit up` runs a
+shallow audit; `devkit audit --deep` scans every file.
+
+A compiled program can embed its own bundle and ignore the environment. The
+audit may find embedded certificates by fingerprint, but it cannot make the
+program use the system bundle. The proxy passes TLS through without inspecting
+certificates; TLS 1.3 encrypts them.
+
+### Container image audits
+
+`devkit audit` reads Compose files and Dockerfiles and classifies image
+references as:
+
+- **Pinned:** `@sha256:` followed by 64 hexadecimal characters.
+- **Unpinned:** a tag or bare image name, which can refer to different code later.
+- **Unresolved:** a variable whose value the audit cannot determine.
+
+The audit reads the source files because Docker's image list cannot show whether
+an image was originally requested by tag or digest. Docker is not required.
+
+Compose variables are resolved from `.env` and reference defaults. Dockerfile
+variables use `ARG` defaults before the first `FROM`. Other values, including
+build arguments supplied on the command line, remain unresolved.
+
+Without PyYAML, Compose parsing falls back to line matching and is labelled
+approximate. Files over 256 KB, binary files and non-regular files are reported
+as unread. File names and references are stripped of control characters before
+display.
+
+Unpinned and unresolved images are informational: they do not change the audit's
+exit status.
+
+### Toolchain installation
+
+Root installs only the manager (mise or Nix) from a release archive pinned by
+SHA-256 in devkit's source, with the pin taken after verifying the upstream
+signature. The toolchains come in afterwards as the sandbox user, through the
+proxy and into the audit log. mise runs with plugin backends disabled,
+provenance checks on every install, a three-day minimum release age, and a
+lockfile written in the VM on the first run and enforced with `--locked`
+afterwards. The sandbox user owns that lockfile, so it guards against upstream
+changing an archive, not against the sandbox itself, which can already run
+anything. Nix checks every substitute against the cache's signing key and pins
+inputs in `flake.lock`.
+
+### Disabling outbound traffic
+
+`network.mode: none` rejects all outbound traffic including DNS. Incoming SSH
+still works because its return packets are an established connection. Combined
+with `allow_host: true` the gap has one opening: the host, and therefore DNS
+through the host's resolver. Pair them only when that is what you want.
+
+### Policy ownership
+
+The user account inside the VM can run exactly three commands as root, all
+read-only checks Lima's host agent needs to confirm the machine booted. Policy
+lives in a root-only provisioning script that Lima regenerates from
 `devkit.yaml` on every boot. To change the policy you edit the file on the host
 and run `devkit up`, which restarts the VM. Setting `sudo: true` removes this
 guarantee; it is there for convenience and says so in the config.
 
-**Trusted proxy binary.** The host drops the proxy into a staging directory
-owned by the sandbox user. A root systemd unit copies it to a root-only
-location, hashes that copy, and installs it only if the SHA-256 matches the
-hash baked into the provisioning script. The staged file is never read twice,
-so the sandbox cannot swap it between the check and the install.
+### Proxy binary verification
 
-**Audit log.** The proxy logs every request as `ALLOWED` or `BLOCKED` with the
-target host to `/var/log/devkit/egress.log`. `devkit logs` reads it, and
-`devkit up` prints a summary of blocked hosts after installing dependencies.
+The host drops the proxy into a staging directory owned by the sandbox user. A
+root systemd unit copies it to a root-only location, hashes that copy, and
+installs it only if the SHA-256 matches the hash baked into the provisioning
+script. The staged file is never read twice, so the sandbox cannot swap it
+between the check and the install.
 
-**Localhost-only exposure.** Lima forwards ports the guest listens on to
-`127.0.0.1` on the host. Nothing is reachable from your network.
+### Network logs
+
+The proxy logs every request as `ALLOWED` or `BLOCKED` with the target host to
+`/var/log/devkit/egress.log`. `devkit logs` reads it, and `devkit up` prints a
+summary of blocked hosts after installing dependencies.
+
+### Local port bindings
+
+Ports listed in `network.forward` bind to `127.0.0.1` on the Mac. These forwards
+are not exposed on the Mac's LAN interfaces.
 
 ## Enforcement on the Mac (`network.enforce: host`)
 
-With `network.enforce: host` the network policy no longer rests on the guest
-alone. Lima's host agent, the Mac process that carries all of the VM's
-traffic, is started under a macOS sandbox profile through `sandbox-exec`. It
-may open outbound connections only to unix sockets under Lima's home and,
-over TCP (`remote tcp`, not `remote ip`, which would admit UDP too), to the
-VM's SSH forward on the Mac's loopback and devkit's host proxy on the Mac's
-loopback. Unix sockets are not allowed wholesale: when they were, Lima's
-built-in DNS resolved names through the Mac's resolver socket, which is a
-channel out. No root is needed on the Mac.
+Host enforcement adds a network control outside the guest. Lima's host agent
+runs under a macOS sandbox profile through `sandbox-exec`. No root access is
+needed on the Mac.
 
-The host proxy is `devkit hostproxy`, one per VM, started by `devkit up`
-before the VM and stopped by `devkit down` and `devkit rm`. `devkit up`
-reuses a running one only if it has the same allowlist and was started by the
-same devkit binary, compared by the SHA-256 of its executable, so that an
-upgrade or rebuild of devkit replaces it; otherwise it restarts it on the same
-port. It applies the same allowlist and web-ports policy as the in-guest
-proxy, to the project's
-`network.allow` plus the hosts root's provisioning fetches from (Ubuntu's
-archive, ports and security hosts, and the toolchain manager's download
-hosts); in `open` mode it allows any host on the web ports. It refuses to
-dial any address of the Mac: loopback, link-local, and every address
-assigned to one of the Mac's interfaces at that moment (its LAN address, the
-VM network's gateway), IPv4 and IPv6. It checks after resolution, and refuses
-a name when any address it resolves to is one of these, so neither an IP
-literal in `open` mode nor an allowed name can be pointed at the Mac's own
-services. Other machines on the Mac's LAN are not refused by this; the
-allowlist decides about them as about any host. It hands redirects back to
-the in-guest proxy to decide. Its log, in `~/.devkit/<vm>/hostproxy.log`, is the
-authoritative record of what left, and `devkit logs` shows it. In the guest,
-root's apt and downloads and the in-guest proxy use it as their upstream, the
-proxy's account may reach only it, and no account may send a DNS query.
+### What the host agent can reach
 
-With root in the guest, the firewall flushed and the in-guest proxy stopped,
-`TestHostEnforcement` runs a raw-socket probe and requires every route it
-tries to fail except the host proxy: TCP to internet hosts on several ports,
-IPv6, DNS over UDP and TCP to public resolvers and to Lima's own, NTP, a
-listener on the Mac's loopback, UDP to a listener at the host proxy's port
-number, a sweep of the Mac's ports, other addresses
-on Lima's network. The profile's rules themselves are also checked without a
-VM by the `internal/hostenforce` tests.
+The profile permits outbound connections only to:
 
-What it does not cover:
+- Unix sockets under Lima's home directory.
+- The VM's SSH forward on the Mac's loopback interface, over TCP.
+- devkit's host proxy on the Mac's loopback interface, over TCP.
 
-- **Hosts the host proxy allows** stay reachable for root in the guest, on
-  the web ports: the project's allowlist and the provisioning hosts above.
-- **A VM started outside devkit** (`limactl start` by hand) runs without the
-  profile. devkit records the host agent's pid at each start it makes and
-  warns when the running one differs; it cannot prevent it.
-- **The vsock channel** between Lima's guest agent and host agent was not
-  attacked.
-- **`sandbox-exec` is deprecated.** If macOS stops shipping it, devkit
-  refuses to start a host-enforced VM rather than start it unprotected.
-- **Outbound firewalls on the Mac**, such as LuLu, see the host proxy as a
-  new program and must be told to allow it.
-- `allow_host: true`, `dns: resolvers` and `mode: none` are refused with
-  host enforcement.
+The TCP rules use `remote tcp`. Using `remote ip` would also permit UDP.
+Unix sockets are restricted because allowing all of them let Lima resolve DNS
+through the Mac's resolver socket, creating a path for data to leave the VM.
+
+### Host proxy policy and lifecycle
+
+`devkit up` starts one `devkit hostproxy` per VM before starting the VM.
+`devkit down` and `devkit rm` stop it. An existing proxy is reused only if its
+allowlist and executable SHA-256 match the current configuration and binary.
+Otherwise, devkit restarts it on the same port.
+
+The host proxy applies the same hostname and port rules as the guest proxy.
+Its allowlist includes both `network.allow` and the hosts needed for
+provisioning: Ubuntu's archive, ports and security hosts, plus the toolchain
+manager's download hosts. In `open` mode, any host is allowed on web ports.
+
+After resolving a name, the proxy refuses it if any returned address is
+loopback, link-local or assigned to a Mac interface. This covers IPv4 and IPv6,
+the Mac's LAN address and the VM gateway. IP literals are checked too. Other
+machines on the LAN are subject to the allowlist, not automatically blocked.
+Redirects are returned to the guest proxy for a new policy decision.
+
+Inside the VM, root's downloads and apt requests use the host proxy, as does
+the guest proxy. The guest proxy's account can reach only the host proxy, and
+no guest account can send DNS queries.
+
+### Logs and tests
+
+`devkit logs` reads `~/.devkit/<vm>/hostproxy.log`, the record of requests that
+reached the host proxy, including root's provisioning requests. Requests
+refused by the guest proxy stay in the guest log; `devkit up` still summarises
+those blocks.
+
+`TestHostEnforcement` removes the guest firewall and stops the guest proxy,
+then probes as guest root. It tests TCP, IPv6, DNS over UDP and TCP, NTP,
+listeners on the Mac, a port sweep and other addresses on Lima's network.
+Only the host proxy should remain reachable. Tests in `internal/hostenforce`
+also check the profile directly on the Mac, without a VM.
+
+The profile blocks ICMP sent from the Mac. A ping inside the guest may time
+out or receive a local reply from Lima's network stack; that reply does not
+show that a packet reached the external destination.
+
+### Limitations
+
+- **Allowed hosts remain reachable by guest root.** This includes provisioning
+  hosts as well as the project's allowlist.
+- **Manual starts bypass the profile.** A VM started with `limactl start`
+  lacks host enforcement. devkit records the host agent's process ID when it
+  starts the VM and warns if the running agent differs. Stop and restart
+  through devkit to restore the profile.
+- **The vsock channel is untested.** The tests did not attack communication
+  between Lima's guest agent and host agent.
+- **`sandbox-exec` is deprecated.** devkit refuses to start a host-enforced
+  VM if the required support is missing; it does not silently fall back to
+  guest enforcement. This mode requires macOS.
+- **Outbound firewalls may block the proxy.** Tools such as LuLu need to
+  allow the `devkit` binary.
+- **Some options are incompatible.** Host enforcement rejects
+  `allow_host: true`, `dns: resolvers` and `mode: none`. The first two require
+  other host access; `none` would prevent first-boot package installation.
+
+## Git review and credentials
+
+`devkit push` lets you publish commits made inside the VM while keeping your
+credentials on the Mac. Reviewing those commits is part of the security
+boundary: the VM can write malicious code and forge commit authors.
+
+### What you need to review
+
+- **Commits the VM wrote can reach your remote.** That is the point of `devkit
+  push`, and your review is the approval step (`--yes` skips the prompt). A malicious dependency can change
+  files that an agent then commits, and rely on a long diff to hide it. The
+  review lists every commit, the diffstat, the commits a forced push would
+  remove, and the changed files that run outside the VM. It cannot judge the
+  code for you.
+- **Authorship from the VM proves nothing.** The VM commits as you: it gets
+  your `user.name` and `user.email`, and can write any author it likes, so
+  the review's "other author" note catches only the careless case.
+- **Pushed commits run elsewhere.** CI runs them, with whatever secrets your
+  workflows expose to that branch. If you bring them into your checkout on
+  the Mac (`git merge refs/devkit/...`), your husky hooks, direnv, editor tasks
+  and npm scripts there run code the VM wrote. That is the risk of checking
+  out any untrusted pull request, and the one place where devkit's rule that
+  project code never runs on the Mac depends on you.
+
+### What runs on the Mac
+
+- **Parsing untrusted bytes.** A bundle from the VM is read by devkit's
+  header parser and `git index-pack --strict`, the same code as any `git
+  fetch` from an untrusted remote, capped at 512 MiB. Text in the push review is
+  stripped of control characters and bidi overrides before display.
+- **devkit runs git on your Mac.** In a copied project's directory (to build
+  the snapshot), and against your remotes (clone, sync, `ls-remote`, push),
+  with your own git config and credentials, as when you run git there
+  yourself, but with hooks disabled.
+
+### How credentials and checkouts are handled
+
+- **Cloning uses a bare repository**, so no project file is checked out
+  on the Mac; https and ssh only; no submodules, hooks or templates.
+- **Credentials stay out of the VM.** Without `devkit push`, the way to push
+  from the VM was a token or an agent inside it, usable by every dependency.
+
+**To keep the gate meaningful:** push to a feature branch and merge through a
+pull request with branch protection; don't expose CI secrets to branches from
+the VM; read the flagged files; and don't merge `refs/devkit/...` into your
+Mac's checkout and then run the project's tooling there unless you have read
+what it changes.
 
 ## Kernel crash reports, read on the Mac
 
-**What is detected.** Kernel crash reports from the guest: panics, Oopses,
-`BUG:` and `kernel BUG at`, KASAN and UBSAN reports, watchdog lockups,
-stack-protector failures and list corruption. Failed exploit attempts often
-crash the kernel before one succeeds, so these are worth seeing.
+### Detected reports
 
-**From where.** The system script adds `console=hvc0` to the kernel command
-line through a grub drop-in. hvc0 is the serial console Lima records on the
-Mac in `~/.lima/<vm>/serialv.log`; on this hypervisor the kernel's default
-console, ttyAMA0, does not exist, so before this nothing the kernel printed
-reached the Mac. Messages at levels 0 to 3 (emergency to error) arrive,
-which includes every crash report. devkit scans the log on the Mac; nothing
-runs in the guest to do it. The sandbox user cannot write to `/dev/hvc0`,
-`/dev/console` or `/dev/kmsg`, and when a process named like a crash report ("BUG:
-unable to") crashes, the kernel logs nothing for it (both tested). The
-scanner matches a signature only at the start of a kernel message, directly
-after its timestamp, so names and other text the sandbox chooses, which
-appear later in kernel lines, cannot forge a report; devkit's own progress
-lines and systemd's status lines are not kernel lines and never match.
-Everything shown is stripped of control characters and escape sequences.
+Kernel crash reports from the guest: panics, Oopses, `BUG:` and `kernel BUG at`,
+KASAN and UBSAN reports, watchdog lockups, stack-protector failures and list
+corruption. Failed exploit attempts often crash the kernel before one succeeds,
+so these are worth seeing.
 
-**From when.** The drop-in takes effect from the boot after the one that
-wrote it: a new VM reports crashes only after its first restart (`devkit
-down`, then `devkit up`), and devkit says so instead of reporting "none". If
-`update-grub` is missing or fails, provisioning warns and goes on: this is
-detection, not enforcement.
+### Reading reports on the Mac
 
-**The limit.** This catches the noisy attempt, not the clean one. An exploit
-that works the first time crashes nothing, and once it has root it can lower
-the console level or rewrite the command line, after which only what it lets
-through gets out. A guest that hangs without printing a
-report is not seen either. A report is a reason to act; the absence of one
-proves nothing.
+The provisioning script adds `console=hvc0` to the kernel command line through
+a grub drop-in. Lima records that serial console in
+`~/.lima/<vm>/serialv.log` on the Mac. The default console, `ttyAMA0`, does not
+exist on this hypervisor, so the extra setting is needed to capture kernel
+output. Messages at levels 0 to 3 (emergency to error) include the detected
+crash reports.
 
-**What to do on a report.** Every command that uses the VM warns until you
-act, and `devkit audit` exits 1, even with the VM stopped. A crash can be a
-failed attempt to break out or simply a kernel bug. If you cannot explain
-it, discard the VM with `devkit rm`: a VM where an exploit has been attempted is not worth
-repairing. Otherwise acknowledge it with `devkit audit --ack-crashes`. A
-kernel that has panicked does not answer while Lima still lists the VM as
-Running; devkit names it, and `devkit down` forces it off.
+devkit scans the log on the Mac. The sandbox user cannot write to `/dev/hvc0`,
+`/dev/console` or `/dev/kmsg`. Tests also check that crashing a process named
+"BUG: unable to" does not produce a kernel report.
 
-Reports are kept in `~/.devkit/<vm>/kernel-crashes.json` across restarts,
-since Lima starts a new serial log at every VM start; `devkit up` and
-`devkit down` read the log before that happens. A VM started with
-`limactl` directly, rather than devkit, can lose a crash from before that
-start.
+The scanner matches signatures at the start of a kernel message, immediately
+after its timestamp. User-chosen names elsewhere in a line cannot forge a
+match, and devkit progress messages and systemd status lines are excluded.
+Displayed reports are stripped of control characters and escape sequences.
+
+### When reporting starts
+
+The drop-in takes effect from the boot after the one that wrote it: a new VM
+reports crashes only after its first restart (`devkit down`, then `devkit up`),
+and devkit says so instead of reporting "none". If `update-grub` is missing or
+fails, provisioning warns and goes on: this is detection, not enforcement.
+
+### Detection limits
+
+This catches the noisy attempt, not the clean one. An exploit that works the
+first time crashes nothing, and once it has root it can lower the console level
+or rewrite the command line, after which only what it lets through gets out. A
+guest that hangs without printing a report is not detected either. A report is a
+reason to act; the absence of one proves nothing.
+
+### Responding to a report
+
+Every command that uses the VM warns until you act, and `devkit audit` exits 1,
+even with the VM stopped. A crash can be a failed exploit or an ordinary kernel
+bug. If you cannot explain it, discard the VM with `devkit rm`. Otherwise
+acknowledge it with `devkit audit --ack-crashes`. A kernel that has panicked
+does not answer while Lima still lists the VM as Running; devkit names it, and
+`devkit down` forces it off.
+
+Reports are kept in `~/.devkit/<vm>/kernel-crashes.json` across restarts, since
+Lima starts a new serial log at every VM start; `devkit up` and `devkit down`
+read the log before that happens. A VM started with `limactl` directly, rather
+than devkit, can lose a crash from before that start.
 
 ## What the escape tests cover
 
-`tests/e2e/escape_test.go` runs inside a real VM and tries, as the sandbox
-user, to: reach the host by name, gateway IP, every port form, UDP and IPv6,
-directly and through the proxy; flush the firewall, open raw sockets, bind
-port 22, switch to the proxy's user, kill the proxy, or use a user namespace
-to get around the OUTPUT chain; read secrets from Lima's cidata, find a host
-mount, or dial the host over vsock; write to any policy file; and get a file
-back onto the host by rewriting the workspace before `devkit up`. Hypervisor
-escapes are not tested, because no test of ours would find one.
+The [escape-test reference](docs/escape-tests.md) maps each attempted escape to
+its control, tests and remaining limits.
+
+`tests/e2e/escape_test.go` runs inside a real VM and tries, as the sandbox user,
+to: reach the host by name, gateway IP, every port form, UDP and IPv6, directly
+and through the proxy; flush the firewall, open raw sockets, bind port 22,
+switch to the proxy's user, kill the proxy, or use a user namespace to get
+around the OUTPUT chain; read secrets from Lima's cidata, find a host mount, or
+dial the host over vsock; write to any policy file; and get a file back onto the
+host by rewriting the workspace before `devkit up`. The suite does not test for
+hypervisor escapes.
 
 `examples/hostile-project` is the same idea by hand: a project whose code and
 install step try the same escapes and report, line by line, whether each was
-stopped. Run it in any mode to watch the boundary hold, and loosen
-`devkit.yaml` to watch it give way where you told it to.
+stopped. Run it in any mode to watch the boundary hold, and loosen `devkit.yaml`
+to watch it give way where you told it to.
 
 ## Accepted risks
 
@@ -428,12 +577,12 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
   escalation in the guest removes both; the VM boundary still protects your
   files. `network.enforce: host` (opt-in, see "Enforcement on the Mac"
   above) moves the line for the network: the Mac then refuses everything but
-  devkit's host proxy, whatever root in the guest does. The mitigations are the security-pocket updates at boot, the kernel
+  devkit's host proxy, whatever root in the guest does. The mitigations are the security updates at boot, the kernel
   surface we take away (unprivileged user namespaces unless
   `containers: true`, module loading after provisioning, io_uring, BPF,
   perf, and the `AF_ALG` crypto family), and, for those who want it, an inner gVisor
-  sandbox on the roadmap. See "The guest is patched" and the two points
-  after it. A kernel bug in a subsystem none of that covers still escalates;
+  sandbox on the roadmap. See [security updates](#security-updates) and
+  [restricted kernel features](#restricted-kernel-features). A kernel bug in a subsystem none of that covers still escalates;
   that is the residual risk and the reason the boundary we rely on is the
   hypervisor, not the guest kernel.
 - **Allowed hosts are trusted.** If you allow `**.github.com`, code can push to
@@ -444,25 +593,24 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
   history, hooks, config or credentials) and your SSH public key. If you paste a
   token into the sandbox, assume the sandbox has it.
 - **Commits you push from the VM.** `devkit push` is the one way VM-written
-  content leaves with your credentials, and your review is its only gate.
+  content leaves with your credentials, and your review is the approval step (`--yes` skips the prompt).
   The VM commits under your git identity and can forge any author. Pushed
   commits run in CI, and if you merge `refs/devkit/...` into your Mac's
   checkout, its hooks, direnv and scripts run code the VM wrote. Push to a
   feature branch behind branch protection, and read the files the review
   flags. The bundle itself is checked by `git index-pack --strict` with no
-  hooks; a bug in git's pack parsing is the residual risk there. See "What
-  git in the VM changes" in the README.
+  hooks; a bug in git's pack parsing is the residual risk there. See [Git review and credentials](#git-review-and-credentials).
 - **Hypervisor bugs.** A VM escape in Virtualization.framework would defeat
   everything here. There is no mitigation beyond keeping macOS updated.
 - **Resource use.** The VM is sized by `vm:`. Code inside can exhaust its own
   CPU, memory and disk but not the host's beyond those limits.
 - **Supply chain before the sandbox.** devkit itself and Lima are installed
   by you; verify them. The Ubuntu image, mise and Nix are pinned by digest,
-  and apt verifies Ubuntu packages. See "What gets downloaded" in the README.
+  and apt verifies Ubuntu packages. See the [download verification table](README.md#what-gets-downloaded-and-how-it-is-verified).
   Between boot and the end of provisioning the firewall is not yet applied,
   and root uses that window to fetch and hash-check the manager's archive.
-  The sandbox user gets no network in it: see "No network before the
-  firewall" above.
+  The sandbox user gets no network in it: see [network access during boot](#network-access-during-boot)
+  and [failed provisioning](#failed-provisioning).
 - **Toolchain verification is uneven.** mise verifies Node against upstream's
   signed checksums, Go against a same-origin checksum, Python and Ruby builds
   against GitHub attestations, and `rustup-init` not at all. The lockfile
@@ -474,5 +622,5 @@ stopped. Run it in any mode to watch the boundary hold, and loosen
 
 ## Reporting
 
-Please report vulnerabilities privately to the maintainer rather than in a public
-issue.
+Please report vulnerabilities privately to the maintainer rather than in a
+public issue.
