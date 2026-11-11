@@ -73,9 +73,10 @@ devkit completion fish > ~/.config/fish/completions/devkit.fish
 devkit completion zsh > "${fpath[1]}/_devkit"        # or: eval "$(devkit completion zsh)"
 ```
 
-New to devkit? [docs/walkthrough.md](docs/walkthrough.md) goes from a
-repository URL to a reviewed push in ten minutes, with what each step
-protects you from.
+New to devkit? [docs/walkthrough.md](docs/walkthrough.md) takes ten minutes
+and covers both ways in, a checkout you already have (`devkit init`) and a
+repository you do not have yet (`devkit clone`), through to a pull request,
+with what each step protects you from.
 
 To start from a repository rather than a directory on your Mac:
 
@@ -637,7 +638,7 @@ internal/embedded     embedded proxy binary
 internal/fakelima     a stand-in limactl for unit tests
 tests/e2e             creates a real VM and checks the guarantees
 examples/hostile-project   a project that tries to break out and reports each attempt
-docs/walkthrough.md   from a repository URL to a reviewed push
+docs/walkthrough.md   from a checkout or a URL to a pull request, step by step
 ```
 
 ## Roadmap
