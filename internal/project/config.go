@@ -84,6 +84,10 @@ type Tools struct {
 	// true (Lima's rootless containerd and nerdctl) or docker (rootless
 	// Docker under an account of its own). See Containers.
 	Containers Containers `yaml:"containers"`
+	// ContainerRuntime is Docker's default runtime: runc (the default), or
+	// gVisor's runsc in one of two network modes. Only with containers:
+	// docker. See ContainerRuntime.
+	ContainerRuntime ContainerRuntime `yaml:"container_runtime,omitempty"`
 	// Packages are extra apt packages.
 	Packages []string `yaml:"packages,omitempty"`
 }
@@ -142,6 +146,43 @@ func (c Containers) MarshalYAML() (any, error) {
 	}
 	return string(c), nil
 }
+
+// ContainerRuntime is the value of tools.container_runtime.
+type ContainerRuntime string
+
+// Values of ContainerRuntime.
+const (
+	// RuntimeRunc runs containers on the VM's kernel, as Docker does by
+	// default.
+	RuntimeRunc ContainerRuntime = "runc"
+	// RuntimeGvisor runs them under gVisor's user-space kernel, with
+	// gVisor's own network stack. Docker's embedded DNS does not answer
+	// there, so Compose service names do not resolve.
+	RuntimeGvisor ContainerRuntime = "gvisor"
+	// RuntimeGvisorHostnet runs them under gVisor with socket calls passed
+	// to the VM's kernel, inside the container's network namespace, so
+	// service names resolve; file, process and memory calls stay in gVisor.
+	RuntimeGvisorHostnet ContainerRuntime = "gvisor-hostnet"
+)
+
+// Gvisor reports whether containers run under gVisor by default.
+func (r ContainerRuntime) Gvisor() bool {
+	return r == RuntimeGvisor || r == RuntimeGvisorHostnet
+}
+
+// DockerName is the name Docker knows the default runtime by.
+func (r ContainerRuntime) DockerName() string {
+	switch r {
+	case RuntimeGvisor:
+		return "runsc"
+	case RuntimeGvisorHostnet:
+		return "runsc-hostnet"
+	}
+	return "runc"
+}
+
+// IsZero lets omitempty leave the default out of a saved devkit.yaml.
+func (r ContainerRuntime) IsZero() bool { return r == "" || r == RuntimeRunc }
 
 // VM sizes the virtual machine.
 type VM struct {
@@ -277,6 +318,9 @@ func (c *Config) applyDefaults() {
 			c.Tools.Manager = ManagerMise
 		}
 	}
+	if c.Tools.ContainerRuntime == "" {
+		c.Tools.ContainerRuntime = RuntimeRunc
+	}
 	if c.Network.Allow == nil {
 		c.Network.Allow = append([]string(nil), DefaultAllow...)
 	}
@@ -384,6 +428,15 @@ func (c *Config) Validate() error {
 		}
 	default:
 		return fmt.Errorf("tools.containers must be false, true or docker (got %q)", string(c.Tools.Containers))
+	}
+	switch c.Tools.ContainerRuntime {
+	case "", RuntimeRunc:
+	case RuntimeGvisor, RuntimeGvisorHostnet:
+		if !c.Tools.Containers.Docker() {
+			return fmt.Errorf("tools.container_runtime: %s needs tools.containers: docker (gVisor is set up as a Docker runtime)", c.Tools.ContainerRuntime)
+		}
+	default:
+		return fmt.Errorf("tools.container_runtime must be runc, gvisor or gvisor-hostnet (got %q)", string(c.Tools.ContainerRuntime))
 	}
 	switch c.Network.Mode {
 	case NetworkOpen, NetworkAllowlist, NetworkNone:
@@ -496,6 +549,10 @@ func (c *Config) AptPackages() []string {
 	}
 	if c.Tools.Containers.Docker() {
 		pkgs = append(pkgs, DockerPackages...)
+		if c.Tools.ContainerRuntime.Gvisor() {
+			// gVisor's release archive is compressed with zstd.
+			pkgs = append(pkgs, "zstd")
+		}
 	}
 	return pkgs
 }

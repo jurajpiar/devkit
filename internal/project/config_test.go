@@ -310,3 +310,69 @@ func TestContainersRejects(t *testing.T) {
 		t.Errorf("containerd with source: mount stays valid: %v", err)
 	}
 }
+
+func TestContainerRuntimeValues(t *testing.T) {
+	for src, want := range map[string]ContainerRuntime{
+		"":                                RuntimeRunc,
+		"\n  container_runtime: runc\n":   RuntimeRunc,
+		"\n  container_runtime: gvisor\n": RuntimeGvisor,
+		"\n  container_runtime: gvisor-hostnet\n": RuntimeGvisorHostnet,
+	} {
+		c, err := Parse([]byte("name: a\ntools:\n  containers: docker" + src + "\n  manager: none\n"))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if c.Tools.ContainerRuntime != want {
+			t.Errorf("%q: got %q, want %q", src, c.Tools.ContainerRuntime, want)
+		}
+		if c.Tools.ContainerRuntime.Gvisor() != (want != RuntimeRunc) {
+			t.Errorf("%q: Gvisor() disagrees with %q", src, want)
+		}
+		hasZstd := false
+		for _, p := range c.AptPackages() {
+			hasZstd = hasZstd || p == "zstd"
+		}
+		if hasZstd != (want != RuntimeRunc) {
+			t.Errorf("%q: zstd belongs to the gVisor modes only: %v", src, c.AptPackages())
+		}
+		path := filepath.Join(t.TempDir(), "devkit.yaml")
+		if err := c.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Load(path)
+		if err != nil || got.Tools.ContainerRuntime != want {
+			t.Fatalf("%q: round trip gave %q, %v", src, got.Tools.ContainerRuntime, err)
+		}
+		data, _ := os.ReadFile(path)
+		if has := strings.Contains(string(data), "container_runtime"); has != (want != RuntimeRunc) {
+			t.Errorf("%q: container_runtime should be saved only when it is not the default:\n%s", src, data)
+		}
+		if want != RuntimeRunc && !strings.Contains(string(data), "container_runtime: "+string(want)+"\n") {
+			t.Errorf("%q: saved file should say %s:\n%s", src, want, data)
+		}
+	}
+	if got := map[ContainerRuntime]string{RuntimeRunc: "runc", RuntimeGvisor: "runsc", RuntimeGvisorHostnet: "runsc-hostnet"}; got[RuntimeRunc] != RuntimeRunc.DockerName() ||
+		got[RuntimeGvisor] != RuntimeGvisor.DockerName() || got[RuntimeGvisorHostnet] != RuntimeGvisorHostnet.DockerName() {
+		t.Error("Docker's names for the runtimes are runc, runsc and runsc-hostnet")
+	}
+}
+
+func TestContainerRuntimeRejects(t *testing.T) {
+	for _, v := range []string{"runsc", "kata", "gVisor", "gvisor-hostinet", "true", "[gvisor]"} {
+		_, err := Parse([]byte("name: a\ntools:\n  containers: docker\n  container_runtime: " + v + "\n"))
+		if err == nil {
+			t.Errorf("container_runtime %q should be refused", v)
+		}
+	}
+	for _, containers := range []string{"false", "true"} {
+		for _, v := range []string{"gvisor", "gvisor-hostnet"} {
+			_, err := Parse([]byte("name: a\ntools:\n  containers: " + containers + "\n  container_runtime: " + v + "\n"))
+			if err == nil || !strings.Contains(err.Error(), "needs tools.containers: docker") {
+				t.Errorf("containers: %s with %s must be refused, saying docker is needed: %v", containers, v, err)
+			}
+		}
+		if _, err := Parse([]byte("name: a\ntools:\n  containers: " + containers + "\n  container_runtime: runc\n")); err != nil {
+			t.Errorf("runc is valid without docker: %v", err)
+		}
+	}
+}
