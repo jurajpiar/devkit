@@ -59,7 +59,7 @@ func TestSyncKeepsVMEditsAndRefusesConflicts(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a file changed on both sides should fail the sync:\n%s", out)
 	}
-	for _, want := range []string{"not synced", "main.txt", "Nothing in the VM was changed", "devkit sync --overwrite"} {
+	for _, want := range []string{"not synced", "main.txt", "nothing in the VM was changed", "devkit sync --overwrite"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal should say %q:\n%v", want, err)
 		}
@@ -187,5 +187,54 @@ func TestUpComesUpWhenTheWorkspaceCannotBeSynced(t *testing.T) {
 	}
 	if mentions(f.Calls(), "git reset") {
 		t.Error("no .git may be set up over a workspace that was not synced")
+	}
+}
+
+// Something in the VM in the way of the Mac's changes stops devkit sync
+// with git's account of it, and without offering --overwrite, which does
+// not move it.
+func TestSyncRefusesWhatIsInTheWay(t *testing.T) {
+	_, dir, guest := copyProject(t)
+	if out, err := syncOut(t); err != nil {
+		t.Fatalf("first sync: %v\n%s", err, out)
+	}
+	must(t, os.MkdirAll(filepath.Join(guest, "workspace", "clash"), 0o755))
+	must(t, os.WriteFile(filepath.Join(guest, "workspace", "clash", "inner"), []byte("vm\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(dir, "clash"), []byte("mac\n"), 0o644))
+	for _, args := range [][]string{nil, {"--overwrite"}} {
+		_, err := syncOut(t, args...)
+		if err == nil {
+			t.Fatalf("sync %v should be refused", args)
+		}
+		msg := err.Error()
+		for _, want := range []string{"not synced", "nothing in the VM was changed", "clash", "Move or remove what is in the way in the VM"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("sync %v: the refusal should say %q:\n%s", args, want, msg)
+			}
+		}
+		if strings.Contains(msg, "--overwrite") {
+			t.Errorf("sync %v: --overwrite does not resolve this and must not be offered:\n%s", args, msg)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(guest, "workspace", "clash", "inner")); string(b) != "vm\n" {
+		t.Errorf("the VM's directory changed: %q", b)
+	}
+}
+
+func TestUpComesUpWhenSomethingIsInTheWay(t *testing.T) {
+	f := upProject(t, "Stopped")
+	provisioned(f, "current")
+	f.OnShell(`devkit-sync "`, "devkit-refused error: Updating 'clash' would lose untracked files in it\x1b[2J\ndevkit-exit=4\n", 0)
+	var err error
+	out := captureStdout(t, func() { _, err = runDevkit(t, "", "up", "--no-install") })
+	if err != nil {
+		t.Fatalf("up should not fail when the sync is refused: %v\n%s", err, out)
+	}
+	tail := out[strings.Index(out, "Ready"):]
+	if !strings.Contains(out, "Updating 'clash' would lose untracked files") || !strings.Contains(tail, "NOT synced") || !strings.Contains(tail, "Move or remove") {
+		t.Errorf("up should show git's reason and remind after Ready what to do:\n%s", out)
+	}
+	if strings.Contains(out, "--overwrite") || strings.Contains(out, "\x1b") {
+		t.Errorf("no --overwrite advice and no control characters from the VM:\n%q", out)
 	}
 }

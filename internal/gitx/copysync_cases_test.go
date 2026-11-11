@@ -709,3 +709,105 @@ func TestCopyRepoRefusesASymlink(t *testing.T) {
 		t.Errorf("something was written through the symlink: %v", entries)
 	}
 }
+
+// workspaceState records every entry of the VM's workspace: mode, time,
+// content or symlink target. The VM's own .git is left out of nothing.
+func workspaceState(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	must(t, filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		extra := ""
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			extra, _ = os.Readlink(p)
+		case info.Mode().IsRegular():
+			extra = read(t, p)
+		}
+		fmt.Fprintf(&b, "%s %v %d %q\n", strings.TrimPrefix(p, dir), info.Mode(), info.ModTime().UnixNano(), extra)
+		return nil
+	}))
+	return b.String()
+}
+
+// Something in the VM in the way of the Mac's changes (a directory where
+// the Mac adds a file, a file where it adds a directory) stops the sync
+// as a refusal, with nothing changed, also under --overwrite, which does
+// not resolve it. Moving it out of the way lets the sync through.
+func TestCopySyncRefusesWhatIsInTheWay(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		inTheWay  func(f *copyFixture)
+		macAdds   string
+		overwrite bool
+	}{
+		{"a directory where the Mac adds a file", func(f *copyFixture) { put(t, f.vm.ws("clash/inner"), "vm\n") }, "clash", false},
+		{"a directory where the Mac adds a file, --overwrite", func(f *copyFixture) { put(t, f.vm.ws("clash/inner"), "vm\n") }, "clash", true},
+		{"a file where the Mac adds a directory", func(f *copyFixture) { put(t, f.vm.ws("clash"), "vm\n") }, "clash/inner", false},
+		{"a file where the Mac adds a directory, --overwrite", func(f *copyFixture) { put(t, f.vm.ws("clash"), "vm\n") }, "clash/inner", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newCopyFixture(t)
+			m := func(rel string) string { return filepath.Join(f.mac, rel) }
+			put(t, m("a.txt"), "a\n")
+			put(t, m("both.txt"), "both\n")
+			f.mustSync()
+			c.inTheWay(f)
+			// A conflict too, which --overwrite would resolve: it must
+			// not be reset when the sync is refused.
+			put(t, f.vm.ws("both.txt"), "both, the VM's\n")
+			put(t, m("both.txt"), "both, the Mac's\n")
+			put(t, m(c.macAdds), "the Mac's\n")
+			put(t, m("late.txt"), "late\n")
+			before := workspaceState(t, f.vm.ws(""))
+			index := read(t, filepath.Join(f.vm.vmRepo(), "index"))
+
+			res := f.sync(c.overwrite)
+			if res.Synced || len(res.Refused) == 0 || !strings.Contains(strings.Join(res.Refused, "\n"), "clash") {
+				t.Fatalf("want a refusal naming clash, got %+v", res)
+			}
+			if strings.Join(res.Conflicts, ",") != "both.txt" {
+				t.Errorf("the refusal should also list the conflict: %+v", res)
+			}
+			if after := workspaceState(t, f.vm.ws("")); after != before {
+				t.Errorf("a refused sync changed the workspace:\n before %s\n after  %s", before, after)
+			}
+			if read(t, filepath.Join(f.vm.vmRepo(), "index")) != index {
+				t.Error("a refused sync changed the VM's index")
+			}
+			if f.vmSynced() != f.syncedCommit() {
+				t.Error("a refused sync moved a record")
+			}
+
+			must(t, os.Rename(f.vm.ws("clash"), f.vm.ws("clash.mine")))
+			if res := f.sync(true); !res.Synced {
+				t.Fatalf("with nothing in the way the sync should apply: %+v", res)
+			}
+			f.wantVM(c.macAdds, "the Mac's\n")
+			f.wantVM("late.txt", "late\n")
+			f.wantVM("both.txt", "both, the Mac's\n")
+		})
+	}
+}
+
+// Under --overwrite, a file the VM changed that the Mac turned into a
+// directory is reset, then replaced: the rehearsal must not refuse it.
+func TestCopySyncOverwriteOfAFileTheMacMadeADirectory(t *testing.T) {
+	f := newCopyFixture(t)
+	m := func(rel string) string { return filepath.Join(f.mac, rel) }
+	put(t, m("x"), "x\n")
+	f.mustSync()
+	put(t, f.vm.ws("x"), "x, the VM's\n")
+	must(t, os.Remove(m("x")))
+	put(t, m("x/y"), "y\n")
+	res := f.sync(false)
+	if res.Synced || strings.Join(res.Conflicts, ",") != "x" {
+		t.Fatalf("want a conflict on x, got %+v", res)
+	}
+	if res := f.sync(true); !res.Synced {
+		t.Fatalf("--overwrite should apply: %+v", res)
+	}
+	f.wantVM("x/y", "y\n")
+}

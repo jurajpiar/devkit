@@ -23,11 +23,13 @@ func (g limaGuest) Put(ctx context.Context, local, name string) (string, error) 
 	return dst, lima.CopyTo(ctx, g.name, local, dst)
 }
 
-// notSyncedError is a copy sync the VM refused because files changed on
-// both sides. Nothing in the VM was changed. devkit up reports it and goes
-// on; devkit sync fails with it.
+// notSyncedError is a copy sync the VM refused, having changed nothing:
+// files changed on both sides, or something in the VM in the way of this
+// Mac's changes (refused, git's own account of it). devkit up reports it
+// and goes on; devkit sync fails with it.
 type notSyncedError struct {
 	conflicts []string
+	refused   []string
 }
 
 // maxListed caps the paths a message lists.
@@ -35,11 +37,32 @@ const maxListed = 20
 
 func (e *notSyncedError) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "the workspace was not synced: %s changed both on this Mac and in the VM since the last sync:\n", plural(len(e.conflicts), "file"))
-	b.WriteString(listPaths(e.conflicts, maxListed, "  ", "\n"))
-	b.WriteString("\nNothing in the VM was changed. Run 'devkit sync --overwrite' to take this Mac's version of exactly these files; " +
-		"the VM's other changes are kept. To keep the VM's versions, commit them in the VM or copy them out first.")
+	b.WriteString("the workspace was not synced, and nothing in the VM was changed.")
+	if len(e.refused) > 0 {
+		b.WriteString("\nSomething in the VM is in the way of this Mac's changes:\n")
+		b.WriteString(listPaths(e.refused, maxListed, "  ", "\n"))
+	}
+	if len(e.conflicts) > 0 {
+		fmt.Fprintf(&b, "\n%s changed both on this Mac and in the VM since the last sync:\n", plural(len(e.conflicts), "file"))
+		b.WriteString(listPaths(e.conflicts, maxListed, "  ", "\n"))
+	}
+	b.WriteString("\n" + e.remedy())
 	return b.String()
+}
+
+// remedy says what to do, for the message and for devkit up's reminder.
+// --overwrite does not move what is in the way, so it is offered only for
+// files changed on both sides, and only once nothing is in the way.
+func (e *notSyncedError) remedy() string {
+	var steps []string
+	if len(e.refused) > 0 {
+		steps = append(steps, "Move or remove what is in the way in the VM, then sync again.")
+	}
+	if len(e.conflicts) > 0 {
+		steps = append(steps, "Run 'devkit sync --overwrite' to take this Mac's version of exactly the files changed on both sides; "+
+			"the VM's other changes are kept. To keep the VM's versions, commit them in the VM or copy them out first.")
+	}
+	return strings.Join(steps, " Then: ")
 }
 
 // syncCopy brings the project directory into ws as a snapshot (see package
@@ -77,7 +100,7 @@ func syncCopy(ctx context.Context, cfg *project.Config, cwd, ws string, overwrit
 		return fmt.Errorf("%s", reviewable(err.Error()))
 	}
 	if !res.Synced {
-		return &notSyncedError{conflicts: res.Conflicts}
+		return &notSyncedError{conflicts: res.Conflicts, refused: res.Refused}
 	}
 	if len(res.Skipped) > 0 {
 		fmt.Printf("Warning: the VM left these alone, as they lead outside the workspace or through a symlink: %s\n", listPaths(res.Skipped, 5, "", ", "))

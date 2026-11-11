@@ -177,7 +177,10 @@ $ devkit shell go test ./...
 If the same file changed on both sides since the last sync, `sync` changes
 nothing, lists the files and stops. Run `devkit sync --overwrite` to take
 your Mac's version of exactly those files; the VM's other changes stay. To
-keep the VM's version, commit it in the VM or copy it out first.
+keep the VM's version, commit it in the VM or copy it out first. If
+something in the VM is in the way of the Mac's change, such as a directory
+where your Mac now has a file, `sync` says so and changes nothing: move it
+in the VM and sync again.
 
 Editing on your Mac means editing only: the project's tests, builds and
 installs run in the VM (habit 1). Nothing comes back the other way. Commit

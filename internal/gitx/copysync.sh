@@ -8,10 +8,12 @@
 #   devkit-conflict <path>   changed in the VM and by this snapshot
 #   devkit-kept <path>       differs from the snapshot after the sync
 #   devkit-skip <path>       a manifest entry left alone
+#   devkit-refused <text>    git's reason the merge cannot be done
 #   devkit-error <text>
 #   devkit-synced <commit>
-# Paths are git's C-quoted form, one line each. Exits 3 on a conflict,
-# having changed nothing in the workspace.
+# Paths are git's C-quoted form, one line each. Exits 3 on a conflict and
+# 4 on a refusal (something in the VM in the way of the Mac's changes),
+# having changed nothing in the workspace either way.
 set -u
 umask 022
 for v in $(compgen -e); do
@@ -121,10 +123,48 @@ cat "$tmp/vm" "$tmp/add" >"$tmp/vm+add"
 both "$tmp/vm+add" "$tmp/differ" >"$tmp/c-new"
 cat "$tmp/c-del" "$tmp/c-new" | sort -u >"$tmp/conflicts"
 
+# Rehearse the merge before anything is changed: git checks every path
+# (a directory in the way of a file, a file in the way of a directory)
+# and, as a dry run, writes nothing. It runs on a scratch copy of the
+# index, prepared as the real one will be below, so the answer is the one
+# the real merge will give, and a refusal leaves the index and the
+# workspace exactly as they were.
+if [ -f "$repo/index" ]; then cp "$repo/index" "$tmp/rehearsal" || fail "could not copy the index"; fi
+h() { GIT_INDEX_FILE="$tmp/rehearsal" g "$@"; }
+rold=$old
+# The files in conflict are rehearsed as --overwrite leaves them, with or
+# without it, so what is in the way is found either way and reported
+# together with them.
+if [ -s "$tmp/conflicts" ]; then
+  # Files the Mac adds or changes get its version in the index, as below.
+  if [ -s "$tmp/c-new" ]; then
+    pick "$tmp/c-new" "$tmp/new.info" | h update-index --index-info || fail "could not rehearse the sync"
+  fi
+  # Files the Mac deleted are put back to the last snapshot's version
+  # below, then deleted by the merge. Without touching them, the same is
+  # rehearsed by letting the VM's version stand in for the last
+  # snapshot's, in the index and in the old tree alike: the merge then
+  # sees an unchanged file it may delete, as it will.
+  if [ -s "$tmp/c-del" ]; then
+    h update-index --add --stdin <"$tmp/c-del" &&
+      GIT_INDEX_FILE="$tmp/old-index" g read-tree "$old" &&
+      GIT_INDEX_FILE="$tmp/old-index" g update-index --add --stdin <"$tmp/c-del" &&
+      rold=$(GIT_INDEX_FILE="$tmp/old-index" g write-tree) || fail "could not rehearse the sync"
+  fi
+fi
+cat "$tmp/differ" "$tmp/missing" >"$tmp/not-same"
+omit "$tmp/not-same" "$tmp/new.info" | h update-index --index-info || fail "could not rehearse the sync"
+h update-index -q --refresh >/dev/null 2>&1
+if ! h read-tree -m -u -n "$rold" "$incoming" 2>"$tmp/err"; then
+  sed 's/^/devkit-conflict /' "$tmp/conflicts"
+  head -n 20 "$tmp/err" | sed 's/^/devkit-refused /'
+  exit 4
+fi
 if [ -s "$tmp/conflicts" ] && [ "$overwrite" != 1 ]; then
   sed 's/^/devkit-conflict /' "$tmp/conflicts"
   exit 3
 fi
+
 if [ "$overwrite" = 1 ]; then
   # The Mac's version of exactly these: back to the last snapshot's for
   # the merge to delete, or the Mac's own version written now.
@@ -138,7 +178,6 @@ if [ "$overwrite" = 1 ]; then
 fi
 # Files already as the Mac has them are taken as they are, so the merge
 # does not refuse to overwrite them and nothing is rewritten.
-cat "$tmp/differ" "$tmp/missing" >"$tmp/not-same"
 omit "$tmp/not-same" "$tmp/new.info" | g update-index --index-info ||
   fail "could not record the files that already match"
 g update-index -q --refresh >/dev/null 2>&1

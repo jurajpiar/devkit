@@ -274,6 +274,10 @@ across a branch switch:
   made a different one, stops the sync: nothing is applied and the files are
   listed. `devkit sync --overwrite` takes the Mac's version of exactly those
   files. `devkit up` reports the same and comes up without syncing.
+- Something in the VM in the way of the Mac's changes, such as a directory
+  where the Mac now has a file, also stops the sync, with git's reason and
+  nothing applied. Move it in the VM and sync again; `--overwrite` does not
+  cover this.
 
 Only what the VM lacks is sent. Bytes are copied as they are on disk: no
 `.gitattributes`, filters or line-ending conversion apply, on either side,

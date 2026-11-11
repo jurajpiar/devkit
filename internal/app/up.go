@@ -233,7 +233,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  IDE:     ssh %s   (VS Code / Cursor Remote-SSH, folder ~/%s)\n", cfg.SSHHost(), provision.WorkspaceDir)
 	fmt.Printf("  Audit:   devkit logs\n")
 	if notSynced != nil {
-		fmt.Printf("\nThe workspace was NOT synced: %s changed on both sides (listed above). Run 'devkit sync --overwrite' to take this Mac's versions of them.\n", plural(len(notSynced.conflicts), "file"))
+		fmt.Printf("\nThe workspace was NOT synced (see above). %s\n", notSynced.remedy())
 	}
 	return nil
 }

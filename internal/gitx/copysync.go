@@ -47,7 +47,10 @@ const copyPending = "refs/devkit/pending/"
 const copyManifestFile = "devkit-synced.manifest"
 
 // Exit codes of the VM's sync script besides 0.
-const ExitCopyConflict = 3
+const (
+	ExitCopyConflict = 3
+	ExitCopyRefused  = 4
+)
 
 //go:embed copysync.sh
 var copySyncScript string
@@ -608,6 +611,10 @@ type CopyResult struct {
 	// Conflicts are the files changed in the VM that the snapshot also
 	// changes; the VM applied nothing.
 	Conflicts []string
+	// Refused is git's account of what in the VM is in the way of the
+	// snapshot, such as a directory where it has a file; the VM applied
+	// nothing.
+	Refused []string
 	// Kept are the files that differ in the VM from the snapshot after
 	// it was applied: the VM's own changes.
 	Kept []string
@@ -618,7 +625,8 @@ type CopyResult struct {
 // DeliverCopy hands snap to the VM: it asks which snapshot the VM has,
 // sends the objects it lacks and the manifest, and has the VM apply them
 // to ws. Only when the VM confirms is snap recorded as the VM's; otherwise
-// the Mac's record stays as it was. A conflict is a result, not an error.
+// the Mac's record stays as it was. A conflict or a refusal is a result,
+// not an error.
 func DeliverCopy(ctx context.Context, repo *CopyRepo, snap *CopySnapshot, guest CopyGuest, ws string, overwrite bool) (*CopyResult, error) {
 	recorded := false
 	defer func() {
@@ -674,6 +682,8 @@ func DeliverCopy(ctx context.Context, repo *CopyRepo, snap *CopySnapshot, guest 
 			res.Kept = append(res.Kept, rest)
 		case "devkit-skip":
 			res.Skipped = append(res.Skipped, rest)
+		case "devkit-refused":
+			res.Refused = append(res.Refused, rest)
 		case "devkit-error":
 			errs = append(errs, rest)
 		case "devkit-synced":
@@ -691,7 +701,8 @@ func DeliverCopy(ctx context.Context, repo *CopyRepo, snap *CopySnapshot, guest 
 		}
 		recorded = true
 		return res, nil
-	case exit == fmt.Sprint(ExitCopyConflict) && len(res.Conflicts) > 0:
+	case exit == fmt.Sprint(ExitCopyConflict) && len(res.Conflicts) > 0,
+		exit == fmt.Sprint(ExitCopyRefused) && len(res.Refused) > 0:
 		res.Synced = false
 		return res, nil
 	case len(errs) > 0:
