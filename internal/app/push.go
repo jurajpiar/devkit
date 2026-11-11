@@ -188,7 +188,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	printReview(ctx, cwd, r, ref, remote, to)
+	printReview(ctx, cwd, r, ref, remote, to, bare)
 
 	yes, _ := cmd.Flags().GetBool("yes")
 	question := fmt.Sprintf("Push %d commit(s) to %s %s?", len(r.Commits), remote, to)
@@ -222,7 +222,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printReview(ctx context.Context, cwd string, r *gitx.ReviewSummary, ref, remote, to string) {
+func printReview(ctx context.Context, cwd string, r *gitx.ReviewSummary, ref, remote, to string, bare bool) {
 	me := hostGitConfig(ctx, cwd, "user.email")
 	fmt.Printf("\nCommits from the VM for %s %s (stored at %s):\n", remote, to, ref)
 	const show = 50
@@ -252,7 +252,18 @@ func printReview(ctx context.Context, cwd string, r *gitx.ReviewSummary, ref, re
 			fmt.Printf("  %s\n", reviewable(p))
 		}
 	}
-	fmt.Printf("\nInspect in full with: git log -p %s\n\n", ref)
+	fmt.Printf("\nInspect in full with: %s\n\n", inspectCommand(bare, ref))
+}
+
+// inspectCommand is the command, run from the project directory, that shows
+// the commits at ref in full. A project made by devkit clone is not a git
+// repository itself: its commits are in the bare copy, which git has to be
+// pointed at.
+func inspectCommand(bare bool, ref string) string {
+	if bare {
+		return fmt.Sprintf("git --git-dir %s log -p %s", filepath.Join(project.LockDir, "repo.git"), ref)
+	}
+	return "git log -p " + ref
 }
 
 // reviewable makes text from the VM safe to show: no control characters,

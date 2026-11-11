@@ -22,7 +22,7 @@ test:
 
 # End-to-end: creates a real VM (several minutes on first run). Requires Lima.
 test-e2e: build
-	DEVKIT_E2E=1 go test ./tests/e2e/... -v -count=1 -timeout 30m
+	DEVKIT_E2E=1 go test ./tests/e2e/... -v -count=1 -timeout 90m
 
 install: build
 	install -d $(BINDIR)

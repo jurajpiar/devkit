@@ -21,10 +21,16 @@ macOS on Apple silicon.
   toolchains and locks their download checksums after the first install.
   `--toolchain nix` uses a `flake.nix` instead. Dependency installation uses
   project lockfiles where available.
+- **Reviewed pushes.** `devkit clone` fetches a repository without checking
+  it out on your Mac, and `devkit push` pushes commits made in the VM from
+  your Mac, after you review them. The VM never holds your credentials.
 - **Familiar tools.** Use a shell or connect VS Code, Cursor or Zed over SSH.
   Ports you list in `network.forward` are exposed on your Mac's `127.0.0.1`.
 
-Start with [Quick start](#quick-start), then see
+Start with [Quick start](#quick-start) or the ten-minute
+[walkthrough](docs/walkthrough.md), which covers a checkout you already have
+(`devkit init`) and a repository you do not have yet (`devkit clone`) through
+to a pull request. Then see
 [Configuration](#configuration), [Toolchains](#toolchains) or the [command
 reference](#commands). Contributors can use the [contributing
 guide](CONTRIBUTING.md).
@@ -62,6 +68,14 @@ Shell completion comes from `devkit completion`:
 ```bash
 devkit completion fish > ~/.config/fish/completions/devkit.fish
 devkit completion zsh > "${fpath[1]}/_devkit"        # or: eval "$(devkit completion zsh)"
+```
+
+To start from a repository rather than a directory on your Mac:
+
+```bash
+devkit clone github.com/org/repo   # bare clone on the Mac: no project file is written out
+cd repo && devkit up               # the VM checks the files out
+devkit push                        # later: review the VM's commits, then push them from the Mac
 ```
 
 To work from an IDE, connect with Remote-SSH to the host `devkit-<name>`. devkit
@@ -197,6 +211,7 @@ vm:
   cpus: 4
   memory_gb: 8
   disk_gb: 50
+  # security_updates: true   # apply Ubuntu's security pocket at every boot
   # lock_modules: true   # no kernel module loads after provisioning, root included, until restart
 
 ssh_port: 2222
@@ -460,7 +475,7 @@ Hardhat and Foundry verify; install Foundry with `install:` and pin its version.
 |---|---|
 | `devkit clone <url> [dir]`, `devkit <url>` | New project from a repository, without checking it out on the Mac. `git://` becomes `https://`. Flags: `--branch`, `--name`, `--toolchain`, `--node`, `--network` |
 | `devkit init [repo-url]` | Write `devkit.yaml`. Flags: `--name`, `--toolchain`, `--node`, `--network`, `--force` |
-| `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock` |
+| `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock`, `--no-security-updates` |
 | `devkit shell [cmd]` | Shell in the VM, or run a command |
 | `devkit sync` | Copy the directory again; for a cloned project, fetch upstream on the Mac and fast-forward the VM |
 | `devkit push [branch]` | Review commits made in the VM and push them from your Mac with your own credentials. Flags: `--remote`, `--to`, `--yes`, `--force-with-lease` |
@@ -524,20 +539,26 @@ cmd/egressproxy       the proxy that runs inside the VM
 internal/app          commands
 internal/project      devkit.yaml schema and validation
 internal/detect       language detection for devkit init
+internal/gitx         git on the Mac: bare clones, bundles from the VM, the push review
 internal/lima         limactl wrapper and instance config rendering
 internal/provision    scripts that run inside the VM (the security policy)
 internal/egressproxy  proxy implementation
 internal/hostenforce  the macOS sandbox profile for network.enforce: host
 internal/embedded     embedded proxy binary
+internal/fakelima     a stand-in limactl for unit tests
 tests/e2e             creates a real VM and checks the guarantees
+examples/hostile-project   a project that tries to break out and reports each attempt
+docs/walkthrough.md   from a checkout or a URL to a pull request, step by step
+docs/escape-tests.md  the escape attempts and the tests that check them
 ```
 
 ## Roadmap
 
 - `devkit cp vm:path dest`: an explicit, user-initiated way to pull a file
-  out of the VM, such as a build artefact or a test report. devkit itself will
-  still never write to the host on its own; whatever comes out is treated as
-  untrusted data, and you name both paths.
+  out of the VM, such as a build artefact or a test report. Today the only
+  thing that leaves is git commits through `devkit push`; this would add
+  files, still only when you ask, treated as untrusted data, with both paths
+  named by you.
 - Escape tests for `source: mount`, including a read-only mount refusing
   writes, in a VM of their own.
 - `nix develop` for IDE terminals over SSH, probably through direnv.

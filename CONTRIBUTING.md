@@ -9,8 +9,26 @@ and test from the repository root:
 brew install lima
 make build          # cross-compiles the egress proxy and builds devkit
 make test           # unit tests, no VM
-make test-e2e       # creates a real VM; several minutes on first run
+make test-e2e       # creates real VMs, one test after another; over half an hour
 ```
+
+The end-to-end suite skips what needs more unless you ask for it:
+
+```bash
+DEVKIT_E2E=1 DEVKIT_E2E_SUDO=1 DEVKIT_E2E_NIX=1 go test ./tests/e2e/ -v -count=1 -timeout 150m
+DEVKIT_E2E=1 go test ./tests/e2e/ -run 'TestKernelLockdown$' -v -count=1 -timeout 60m   # one test
+```
+
+`DEVKIT_E2E_SUDO=1` adds the tests that need root in the guest, and
+`DEVKIT_E2E_NIX=1` the Nix toolchain. One of the root tests,
+`TestRootInGuestReachesHost`, fails on purpose: it records what root in the
+guest can still reach when only the guest enforces the network. With an
+outbound firewall on the Mac such as LuLu, set `DEVKIT_E2E_BIN` to a fixed
+absolute path and allow that binary once; the host-enforcement tests make
+their connections from it.
+
+To see devkit from a user's side first, follow
+[docs/walkthrough.md](docs/walkthrough.md).
 
 ## Principles
 
