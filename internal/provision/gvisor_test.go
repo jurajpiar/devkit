@@ -242,8 +242,8 @@ func TestGvisorDaemonJSON(t *testing.T) {
 		t.Errorf("runc: %v", got)
 	}
 	runtimes := map[string]any{
-		"runsc":         map[string]any{"path": "/usr/local/bin/runsc", "runtimeArgs": []any{"--ignore-cgroups"}},
-		"runsc-hostnet": map[string]any{"path": "/usr/local/bin/runsc", "runtimeArgs": []any{"--ignore-cgroups", "--network=host"}},
+		"runsc":         map[string]any{"path": "/usr/local/bin/devkit-runsc-guard", "runtimeArgs": []any{"--ignore-cgroups"}},
+		"runsc-hostnet": map[string]any{"path": "/usr/local/bin/devkit-runsc-hostnet-guard", "runtimeArgs": []any{"--ignore-cgroups", "--network=host"}},
 	}
 	gvisorVariants(t, func(t *testing.T, p Params, s string) {
 		want := map[string]any{"no-new-privileges": true, "ip": "127.0.0.1", "runtimes": runtimes,

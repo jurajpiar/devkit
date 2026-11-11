@@ -54,10 +54,10 @@ func TestDockerFilterSettings(t *testing.T) {
 		if p.Config.Tools.ContainerRuntime.Gvisor() {
 			want = []string{p.Config.Tools.ContainerRuntime.DockerName()}
 		}
-		// The filter is stricter about bind sources where nothing checks
-		// the mounts as made: under gVisor.
-		if fc.RuntimeGuard == p.Config.Tools.ContainerRuntime.Gvisor() {
-			t.Errorf("filter.json runtime_guard is %v under %s", fc.RuntimeGuard, p.Config.Tools.ContainerRuntime)
+		// The runtime guard checks the mounts as made in front of runc and
+		// of runsc alike.
+		if !fc.RuntimeGuard {
+			t.Errorf("filter.json runtime_guard is false under %s", p.Config.Tools.ContainerRuntime)
 		}
 		if fc.DaemonSocket != DockerSocket || fc.Workspace != "/home/alice/workspace" || !reflect.DeepEqual(fc.Runtimes, want) ||
 			!reflect.DeepEqual(fc.Capabilities, []string{"IPC_LOCK", "NET_BIND_SERVICE"}) {
@@ -73,7 +73,14 @@ func TestDockerFilterSettings(t *testing.T) {
 		if err := dec.Decode(&gc); err != nil {
 			t.Fatalf("guard.json: %v\n%s", err, body)
 		}
-		if gc != (runcguard.Config{Runc: "/usr/sbin/runc", Workspace: "/home/alice/workspace", DataRoot: DockerHome + "/.local/share/docker", DockerInit: "/usr/bin/docker-init"}) {
+		wantGC := runcguard.Config{Runc: "/usr/sbin/runc", Workspace: "/home/alice/workspace", DataRoot: DockerHome + "/.local/share/docker", DockerInit: "/usr/bin/docker-init"}
+		if p.Config.Tools.ContainerRuntime.Gvisor() {
+			// The runsc guard's real runsc and, per runtime, exactly the
+			// arguments daemon.json gives it.
+			wantGC.Runsc = &runcguard.RunscConfig{Path: "/usr/local/bin/runsc", RuntimeArgs: map[string][]string{
+				"runsc": {"--ignore-cgroups"}, "runsc-hostnet": {"--ignore-cgroups", "--network=host"}}}
+		}
+		if !reflect.DeepEqual(gc, wantGC) {
 			t.Errorf("guard.json: %+v", gc)
 		}
 		// Every path written into them is checked first: a quote or a
@@ -92,13 +99,24 @@ func TestDockerFilterSettings(t *testing.T) {
 				t.Errorf("missing %q", want)
 			}
 		}
-		// daemon.json: the guard is registered as the default with runc
-		// and not at all under gVisor.
+		// The runsc guard's names are linked under gVisor only.
+		runscLinks := `for l in /usr/local/bin/devkit-runsc-guard /usr/local/bin/devkit-runsc-hostnet-guard; do ln -sfn ` + EgressBinary + ` "$l"; done`
+		if strings.Contains(s, runscLinks) != p.Config.Tools.ContainerRuntime.Gvisor() {
+			t.Errorf("the runsc guard's links under %s: %v", p.Config.Tools.ContainerRuntime, !p.Config.Tools.ContainerRuntime.Gvisor())
+		}
+		// daemon.json: the guard is registered as the default with runc;
+		// under gVisor runc's guard is not registered, and both gVisor
+		// runtimes are the guard under its runsc names.
 		d := daemonJSON(t, s)
 		rts, _ := d["runtimes"].(map[string]any)
 		_, guard := rts["devkit-runc"]
 		if gv := p.Config.Tools.ContainerRuntime.Gvisor(); gv == guard || (!gv && d["default-runtime"] != "devkit-runc") {
 			t.Errorf("daemon.json runtimes: %v", d)
+		}
+		for name, prog := range map[string]string{"runsc": "devkit-runsc-guard", "runsc-hostnet": "devkit-runsc-hostnet-guard"} {
+			if r, ok := rts[name].(map[string]any); ok && r["path"] != "/usr/local/bin/"+prog {
+				t.Errorf("daemon.json runtime %s: %v", name, r)
+			}
 		}
 	})
 }

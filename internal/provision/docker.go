@@ -3,6 +3,7 @@ package provision
 import (
 	"encoding/json"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/jurajpiar/devkit/internal/dockerfilter"
@@ -46,14 +47,49 @@ func filterRuntimes(c *project.Config) string {
 	return string(b)
 }
 
-// filterRuntimeGuard says, as JSON, whether the runtime guard is in front
-// of the runtime: with runc it is, under gVisor nothing checks the mounts
-// as made, and the filter is stricter about bind sources.
-func filterRuntimeGuard(c *project.Config) string {
-	if c != nil && c.Tools.ContainerRuntime.Gvisor() {
-		return "false"
+// gvisorRuntimeArgs are the arguments daemon.json gives each gVisor
+// runtime. The runtime guard in front of runsc reads the same lists from
+// guard.json and passes no other global flag of runsc's, so the two are
+// written from this one place.
+var gvisorRuntimeArgs = map[string][]string{
+	"runsc":         {"--ignore-cgroups"},
+	"runsc-hostnet": {"--ignore-cgroups", "--network=host"},
+}
+
+// guardRunscBinary is the link the guard runs under in front of the
+// given gVisor runtime.
+func guardRunscBinary(runtime string) string {
+	for prog, rt := range runcguard.RunscPrograms {
+		if rt == runtime {
+			return "/usr/local/bin/" + prog
+		}
 	}
-	return "true"
+	panic("no runtime guard program for " + runtime) // fixed tables: cannot happen
+}
+
+// guardRunscBinaries are the guard's links in front of runsc, sorted, for
+// the script to install and remove.
+func guardRunscBinaries() string {
+	var out []string
+	for prog := range runcguard.RunscPrograms {
+		out = append(out, "/usr/local/bin/"+prog)
+	}
+	sort.Strings(out)
+	return strings.Join(out, " ")
+}
+
+// guardRunscJSON is the runsc entry of guard.json, with its line break,
+// indentation and trailing comma, or "" when the configured runtime is
+// runc: the guard then refuses to run under a runsc name.
+func guardRunscJSON(c *project.Config) string {
+	if c == nil || !c.Tools.ContainerRuntime.Gvisor() {
+		return ""
+	}
+	b, err := json.Marshal(runcguard.RunscConfig{Path: GvisorRunsc, RuntimeArgs: gvisorRuntimeArgs})
+	if err != nil {
+		panic(err) // fixed types: cannot fail
+	}
+	return "\n  \"runsc\": " + string(b) + ","
 }
 
 // dockerProxy is the in-guest egress proxy as containers reach it: rootless
@@ -207,8 +243,10 @@ if __name__ == "__main__":
 // bind to the VM's loopback and no container process gains privileges
 // through setuid programs. With runc, the runtime guard is registered and is
 // the default; the API filter refuses any other runtime by name. With a
-// gVisor runtime both gVisor runtimes are registered and the configured one
-// is the default; the filter allows that one only. --ignore-cgroups is how
+// gVisor runtime both gVisor runtimes are registered, each as the runtime
+// guard under the name that tells it which runtime it fronts, and the
+// configured one is the default; the filter allows that one only. Their
+// names stay runsc and runsc-hostnet. --ignore-cgroups is how
 // runsc was proven under the rootless daemon; it also means memory and CPU
 // limits set on a container are not enforced under gVisor.
 func dockerDaemonJSON(c *project.Config) string {
@@ -228,9 +266,9 @@ func dockerDaemonJSON(c *project.Config) string {
 		DefaultRuntime:  runcguard.RuntimeName,
 	}
 	if c != nil && c.Tools.ContainerRuntime.Gvisor() {
-		d.Runtimes = map[string]runtime{
-			"runsc":         {GvisorRunsc, []string{"--ignore-cgroups"}},
-			"runsc-hostnet": {GvisorRunsc, []string{"--ignore-cgroups", "--network=host"}},
+		d.Runtimes = map[string]runtime{}
+		for name, args := range gvisorRuntimeArgs {
+			d.Runtimes[name] = runtime{guardRunscBinary(name), args}
 		}
 		d.DefaultRuntime = c.Tools.ContainerRuntime.DockerName()
 	}

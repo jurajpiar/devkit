@@ -131,7 +131,8 @@ func render(src string, p Params) (string, error) {
 		FilterConfig:       FilterConfig,
 		GuardConfig:        GuardConfig,
 		FilterRuntimes:     filterRuntimes(p.Config),
-		FilterRuntimeGuard: filterRuntimeGuard(p.Config),
+		GuardRunscBinaries: guardRunscBinaries(),
+		GuardRunscJSON:     guardRunscJSON(p.Config),
 
 		GvisorRelease:     GvisorRelease,
 		GvisorArm64SHA512: GvisorArm64SHA512,
@@ -989,13 +990,13 @@ cat > {{.FilterConfig}} <<EOF
   "daemon_socket": "{{.DockerSocket}}",
   "workspace": "$WS_REAL",
   "runtimes": {{.FilterRuntimes}},
-  "runtime_guard": {{.FilterRuntimeGuard}},
+  "runtime_guard": true,
   "capabilities": ["IPC_LOCK", "NET_BIND_SERVICE"]
 }
 EOF
 cat > {{.GuardConfig}} <<EOF
 {
-  "runc": "$RUNC_REAL",
+  "runc": "$RUNC_REAL",{{.GuardRunscJSON}}
   "workspace": "$WS_REAL",
   "data_root": "$DATA_ROOT",
   "docker_init": "$DOCKER_INIT"
@@ -1004,6 +1005,13 @@ EOF
 chmod 644 {{.FilterConfig}} {{.GuardConfig}}
 ln -sfn {{.EgressBinary}} {{.FilterBinary}}
 ln -sfn {{.EgressBinary}} {{.GuardBinary}}
+{{- if .Config.Tools.ContainerRuntime.Gvisor}}
+# The guard in front of runsc, one name per gVisor runtime: the name tells
+# it which runtime's arguments to expect. Like gVisor itself, the links stay
+# if the runtime changes back to runc; guard.json then has no runsc entry,
+# and the guard under these names refuses everything.
+for l in {{.GuardRunscBinaries}}; do ln -sfn {{.EgressBinary}} "$l"; done
+{{- end}}
 # Socket activation: systemd holds the socket, root's and the sandbox
 # user's group's only, in a directory only root may change, and starts the
 # filter on the first connection. A daemon that is not up yet is answered
@@ -1495,7 +1503,8 @@ type templateData struct {
 	DockerProxy, DockerConfigScript, ContainerPreload                          string
 	DockerDaemonJSON                                                           string
 	FilterAccount, FilterSocket, FilterUnit, FilterBinary, GuardBinary         string
-	FilterConfig, GuardConfig, FilterRuntimes, FilterRuntimeGuard              string
+	FilterConfig, GuardConfig, FilterRuntimes                                  string
+	GuardRunscBinaries, GuardRunscJSON                                         string
 	GvisorRelease, GvisorArm64SHA512, GvisorAmd64SHA512                        string
 }
 
