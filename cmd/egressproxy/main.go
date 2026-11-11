@@ -17,10 +17,14 @@ import (
 )
 
 func main() {
-	// The guest binary is three programs, chosen by the name it is run
-	// under: provisioning links devkit-dockerfilter and devkit-runc-guard
-	// to it. One binary keeps one embedded file per architecture and one
-	// hash that root checks before installing it.
+	// The guest binary is several programs, chosen by the name it is run
+	// under: provisioning links devkit-dockerfilter, devkit-runc-guard and
+	// the runsc guard's names to it. One binary keeps one embedded file per
+	// architecture and one hash that root checks before installing it.
+	if rt, ok := runcguard.RunscPrograms[filepath.Base(os.Args[0])]; ok {
+		// Invoked by containerd's shim exactly as runsc is.
+		os.Exit(runcguard.NewFor(rt).Main(os.Args[1:]))
+	}
 	switch filepath.Base(os.Args[0]) {
 	case dockerfilter.ProgramName:
 		os.Exit(dockerfilter.Main(os.Args[1:]))

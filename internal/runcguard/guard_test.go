@@ -19,12 +19,12 @@ func TestParse(t *testing.T) {
 		{
 			[]string{"--root", "/run/user/999/docker/runtime-runc/moby", "--log", "/b/log.json", "--log-format", "json", "--systemd-cgroup", "create", "--bundle", "/b", "--pid-file", "/b/init.pid", "abc"},
 			Invocation{Global: []string{"--root", "/run/user/999/docker/runtime-runc/moby", "--log", "/b/log.json", "--log-format", "json", "--systemd-cgroup"},
-				Root: "/run/user/999/docker/runtime-runc/moby", Log: "/b/log.json", LogFormat: "json", Sub: "create", PidFile: "/b/init.pid", ID: "abc"},
+				Root: "/run/user/999/docker/runtime-runc/moby", Log: "/b/log.json", LogFormat: "json", Sub: "create", Bundle: "/b", PidFile: "/b/init.pid", ID: "abc"},
 		},
 		{
 			[]string{"--root=/r", "--log=/l", "--log-format=json", "--rootless=true", "--debug=false", "create", "-b", "/b", "--console-socket", "/s.sock", "--pid-file=/p", "--no-pivot", "--no-new-keyring", "--preserve-fds", "2", "id1"},
 			Invocation{Global: []string{"--root=/r", "--log=/l", "--log-format=json", "--rootless=true", "--debug=false"},
-				Root: "/r", Log: "/l", LogFormat: "json", Sub: "create", PidFile: "/p", PreserveFDs: 2, ID: "id1"},
+				Root: "/r", Log: "/l", LogFormat: "json", Sub: "create", Bundle: "/b", PidFile: "/p", PreserveFDs: 2, ID: "id1"},
 		},
 		{
 			[]string{"-root", "/r", "--rootless", "auto", "create", "--pid-file", "/p", "--pidfd-socket", "/f", "x"},

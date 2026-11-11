@@ -1,0 +1,5 @@
+65 63 253:1 / / rw,relatime master:68 - ext4 /dev/root rw,discard,errors=remount-ro,commit=30
+314 65 259:0 / /boot rw,relatime master:249 - ext4 /dev/vda16 rw
+317 65 253:1 /home/jurajpiar.guest/workspace /home/jurajpiar.guest/workspace rw,relatime,idmapped master:68 - ext4 /dev/root rw,discard,errors=remount-ro,commit=30
+319 320 253:1 /etc /etc/.ro2036018104 rw,relatime master:68 - ext4 /dev/root rw,discard,errors=remount-ro,commit=30
+335 65 0:53 / /var/lib/devkit-docker/.local/share/docker/rootfs/overlayfs/365559744f882dfc1fecfe89b8f41efa52c97db8cc7bb20b73840371b98a1849 rw,relatime - overlay overlay rw,lowerdir=/var/lib/devkit-doc

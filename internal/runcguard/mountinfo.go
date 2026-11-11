@@ -110,6 +110,15 @@ type Policy struct {
 	// Cgroup is the container's own cgroup, as /proc/<pid>/cgroup gives it
 	// to the guard. A cgroup2 mount passes only at or below it.
 	Cgroup string
+	// Gofer says the table is a gVisor gofer's rather than a runc
+	// container's. A gofer holds only the container's root and the host
+	// files it serves to the sandbox: its proc, sysfs, cgroups, devices and
+	// tmpfs mounts are the sandbox's own and never appear in its table. So
+	// none of runc's exceptions for kernel filesystems applies, and neither
+	// does the pass for a filesystem made for the container: anything in a
+	// gofer's table other than its root overlay and the allowed paths of
+	// the VM's root filesystem is refused.
+	Gofer bool
 }
 
 // containerFiles are the files Docker mounts into a container from the
@@ -167,6 +176,15 @@ func Check(host, ctr []MountEntry, p Policy) *MountEntry {
 		if m.FSType == "nsfs" {
 			return m // a handle on another namespace: Docker never mounts one
 		}
+		if p.Gofer {
+			if m.FSType == "overlay" && m.Point == "/" && m.Root == "/" {
+				continue
+			}
+			if rootMount != nil && m.Dev == rootMount.Dev && allowedOnRoot(m.Root, p, fsPath) {
+				continue
+			}
+			return m
+		}
 		if !devs[m.Dev] {
 			continue
 		}
@@ -188,6 +206,26 @@ func Check(host, ctr []MountEntry, p Policy) *MountEntry {
 			continue
 		}
 		return m
+	}
+	return nil
+}
+
+// CheckSandbox returns what is wrong with a gVisor sandbox's mount table,
+// or nil. The sentry runs in a mount namespace whose only mount is a new
+// tmpfs at its root: every host file it reaches comes through the gofer,
+// whose table Check judges. Anything more, or a root that is a filesystem
+// of the VM's, is returned.
+func CheckSandbox(host, sb []MountEntry) *MountEntry {
+	for i := range sb {
+		m := &sb[i]
+		if i > 0 || m.FSType != "tmpfs" || m.Point != "/" || m.Root != "/" {
+			return m
+		}
+		for _, h := range host {
+			if h.Dev == m.Dev {
+				return m
+			}
+		}
 	}
 	return nil
 }

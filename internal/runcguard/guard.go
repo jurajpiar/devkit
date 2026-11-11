@@ -10,6 +10,12 @@
 // mount of an existing filesystem comes from where mounts may come from.
 // Mounts are bound to inodes, so what the user rearranges afterwards does
 // not matter.
+//
+// The same guard stands in front of gVisor's runsc. There the container's
+// bind mounts are made by runsc's gofer, a host process that serves the
+// container's files to the sandbox; "runsc create" returns with the gofer
+// and the sandbox waiting, and the guard checks the gofer's mount table by
+// the same rules, and that the sandbox has no host mount of its own.
 package runcguard
 
 import (
@@ -34,6 +40,17 @@ const (
 	RuntimeName = "devkit-runc"
 )
 
+// RunscPrograms are the names the guest binary runs the guard under in
+// front of runsc, each for the Docker runtime it is registered as. The
+// name says which runtime's arguments to expect: Docker gives the guard
+// the arguments daemon.json lists for the runtime and nothing that says
+// which runtime it is, and the guard takes nothing from its environment.
+// Both names are links root installs, and daemon.json, root's, names them.
+var RunscPrograms = map[string]string{
+	"devkit-runsc-guard":         "runsc",
+	"devkit-runsc-hostnet-guard": "runsc-hostnet",
+}
+
 // DefaultConfigPath is where provisioning writes the guard's settings. The
 // guard takes nothing from its environment or working directory.
 const DefaultConfigPath = "/etc/devkit/docker/guard.json"
@@ -41,10 +58,20 @@ const DefaultConfigPath = "/etc/devkit/docker/guard.json"
 // Config is the guard's root-owned configuration.
 type Config struct {
 	// Runc is the real runc, at the path Ubuntu's AppArmor profile exempts.
-	Runc       string `json:"runc"`
-	Workspace  string `json:"workspace"`
-	DataRoot   string `json:"data_root"`
-	DockerInit string `json:"docker_init"`
+	Runc string `json:"runc"`
+	// Runsc is present when the guard also stands in front of runsc.
+	Runsc      *RunscConfig `json:"runsc,omitempty"`
+	Workspace  string       `json:"workspace"`
+	DataRoot   string       `json:"data_root"`
+	DockerInit string       `json:"docker_init"`
+}
+
+// RunscConfig is the real runsc and, for each runtime the guard fronts,
+// the arguments daemon.json gives it: the only global flags the guard
+// passes to runsc beyond the shim's own.
+type RunscConfig struct {
+	Path        string              `json:"path"`
+	RuntimeArgs map[string][]string `json:"runtime_args"`
 }
 
 func loadConfig(data []byte) (*Config, error) {
@@ -59,11 +86,29 @@ func loadConfig(data []byte) (*Config, error) {
 			return nil, fmt.Errorf("%s must be a clean absolute path other than /", name)
 		}
 	}
+	if r := c.Runsc; r != nil {
+		if !filepath.IsAbs(r.Path) || filepath.Clean(r.Path) != r.Path || r.Path == "/" {
+			return nil, errors.New("runsc.path must be a clean absolute path other than /")
+		}
+		for name, args := range r.RuntimeArgs {
+			if name == "" {
+				return nil, errors.New("runsc.runtime_args has a runtime without a name")
+			}
+			for _, a := range args {
+				if !strings.HasPrefix(a, "--") {
+					return nil, fmt.Errorf("runsc.runtime_args: %q is not a flag", a)
+				}
+			}
+		}
+	}
 	return &c, nil
 }
 
 // Guard is the guard with what it touches made replaceable for tests.
 type Guard struct {
+	// Runtime is the runsc runtime the guard stands in for, or "" for
+	// runc.
+	Runtime    string
 	ConfigPath string
 	// Self is the guard's own executable, resolved.
 	Self func() (string, error)
@@ -74,11 +119,19 @@ type Guard struct {
 	Run      func(path string, args []string, extra []*os.File) (int, error)
 	ReadFile func(string) ([]byte, error)
 	Stderr   io.Writer
+	// Proc is where the processes are, read for runsc's gofer and sandbox.
+	Proc   string
+	Getuid func() int
 }
 
-// New returns the guard as installed.
-func New() *Guard {
+// New returns the guard as installed in front of runc.
+func New() *Guard { return NewFor("") }
+
+// NewFor returns the guard as installed in front of the given runsc
+// runtime, or of runc for "".
+func NewFor(runtime string) *Guard {
 	return &Guard{
+		Runtime:    runtime,
 		ConfigPath: DefaultConfigPath,
 		Self: func() (string, error) {
 			p, err := os.Executable()
@@ -91,6 +144,8 @@ func New() *Guard {
 		Run:      run,
 		ReadFile: os.ReadFile,
 		Stderr:   os.Stderr,
+		Proc:     "/proc",
+		Getuid:   os.Getuid,
 	}
 }
 
@@ -119,6 +174,9 @@ func (g *Guard) Main(args []string) int {
 		fmt.Fprintf(g.Stderr, "devkit: refused: the runtime guard is not usable: %v\n", err)
 		return 1
 	}
+	if g.Runtime != "" {
+		return g.mainRunsc(cfg, real, args)
+	}
 	inv, err := Parse(args)
 	if err != nil {
 		fmt.Fprintf(g.Stderr, "devkit: refused: the runtime guard cannot read the runc command line: %v\n", err)
@@ -129,15 +187,50 @@ func (g *Guard) Main(args []string) int {
 		g.fail(inv, fmt.Sprintf("devkit: refused: runc %s is not allowed: the guard checks mounts only between create and start", inv.Sub))
 		return 1
 	case "create":
-		return g.create(cfg, real, inv, args)
+		return g.create(cfg, real, inv, args, g.check)
 	}
 	err = g.Exec(real, append([]string{real}, args...), os.Environ())
 	fmt.Fprintf(g.Stderr, "devkit: the runtime guard could not run runc: %v\n", err)
 	return 1
 }
 
-// setup reads the configuration and refuses to work when runc would be the
-// guard itself.
+// runscPassThrough are the subcommands containerd's runc shim gives a
+// runtime besides create, run, checkpoint and restore, and "" for
+// --version. They make no mounts. runsc's other subcommands (do, boot,
+// gofer, debug, install, ...) are no business of the shim's and are
+// refused.
+var runscPassThrough = map[string]bool{
+	"": true, "start": true, "state": true, "kill": true, "delete": true, "exec": true, "ps": true,
+	"events": true, "wait": true, "pause": true, "resume": true, "update": true, "features": true,
+}
+
+func (g *Guard) mainRunsc(cfg *Config, real string, args []string) int {
+	inv, err := ParseRunsc(args, cfg.Runsc.RuntimeArgs[g.Runtime])
+	if err != nil {
+		fmt.Fprintf(g.Stderr, "devkit: refused: the runtime guard cannot read the runsc command line: %v\n", err)
+		return 1
+	}
+	switch {
+	case inv.Sub == "run" || inv.Sub == "restore":
+		g.fail(inv, fmt.Sprintf("devkit: refused: runsc %s is not allowed: the guard checks mounts only between create and start", inv.Sub))
+		return 1
+	case inv.Sub == "checkpoint":
+		g.fail(inv, "devkit: refused: runsc checkpoint is not allowed: a checkpoint is only of use to restore, which the guard refuses")
+		return 1
+	case inv.Sub == "create":
+		return g.create(cfg, real, inv, args, g.checkRunsc)
+	case !runscPassThrough[inv.Sub]:
+		g.fail(inv, fmt.Sprintf("devkit: refused: runsc %s is not a subcommand the guard passes", printable(inv.Sub)))
+		return 1
+	}
+	err = g.Exec(real, append([]string{real}, args...), os.Environ())
+	fmt.Fprintf(g.Stderr, "devkit: the runtime guard could not run runsc: %v\n", err)
+	return 1
+}
+
+// setup reads the configuration and refuses to work when the runtime would
+// be the guard itself, or when the guard is to front a runsc runtime the
+// configuration does not describe.
 func (g *Guard) setup() (*Config, string, error) {
 	data, err := g.ReadFile(g.ConfigPath)
 	if err != nil {
@@ -147,34 +240,47 @@ func (g *Guard) setup() (*Config, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("%s: %v", g.ConfigPath, err)
 	}
-	real, err := filepath.EvalSymlinks(cfg.Runc)
+	name, path := "runc", cfg.Runc
+	if g.Runtime != "" {
+		if cfg.Runsc == nil {
+			return nil, "", fmt.Errorf("%s: no runsc", g.ConfigPath)
+		}
+		if _, ok := cfg.Runsc.RuntimeArgs[g.Runtime]; !ok {
+			return nil, "", fmt.Errorf("%s: no arguments for the runtime %s", g.ConfigPath, g.Runtime)
+		}
+		name, path = "runsc", cfg.Runsc.Path
+	}
+	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("runc: %v", err)
+		return nil, "", fmt.Errorf("%s: %v", name, err)
 	}
 	self, err := g.Self()
 	if err != nil {
 		return nil, "", err
 	}
 	if real == self {
-		return nil, "", fmt.Errorf("the configured runc %s is the guard itself", cfg.Runc)
+		return nil, "", fmt.Errorf("the configured %s %s is the guard itself", name, path)
 	}
 	return cfg, real, nil
 }
 
-func (g *Guard) create(cfg *Config, real string, inv *Invocation, args []string) int {
+// create runs the real runtime's create and then check; unless the check
+// passes, it deletes the container and refuses.
+func (g *Guard) create(cfg *Config, real string, inv *Invocation, args []string,
+	check func(*Config, string, *Invocation) (*MountEntry, error)) int {
 	extra := make([]*os.File, inv.PreserveFDs)
 	for i := range extra {
 		extra[i] = os.NewFile(uintptr(3+i), "preserved")
 	}
 	code, err := g.Run(real, args, extra)
 	if err != nil {
-		fmt.Fprintf(g.Stderr, "devkit: the runtime guard could not run runc: %v\n", err)
+		fmt.Fprintf(g.Stderr, "devkit: the runtime guard could not run %s: %v\n", filepath.Base(real), err)
 		return 1
 	}
 	if code != 0 {
 		return code
 	}
-	bad, err := g.check(cfg, inv)
+	bad, err := check(cfg, real, inv)
 	if err == nil && bad == nil {
 		return 0
 	}
@@ -189,14 +295,24 @@ func (g *Guard) create(cfg *Config, real string, inv *Invocation, args []string)
 	return 1
 }
 
-func (g *Guard) check(cfg *Config, inv *Invocation) (*MountEntry, error) {
+// readPid reads the pid the runtime wrote: runc's container process, or
+// runsc's sandbox.
+func (g *Guard) readPid(inv *Invocation) (int, error) {
 	pidData, err := g.ReadFile(inv.PidFile)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
 	if err != nil || pid <= 0 {
-		return nil, fmt.Errorf("the pid file holds %q", pidData)
+		return 0, fmt.Errorf("the pid file holds %q", pidData)
+	}
+	return pid, nil
+}
+
+func (g *Guard) check(cfg *Config, _ string, inv *Invocation) (*MountEntry, error) {
+	pid, err := g.readPid(inv)
+	if err != nil {
+		return nil, err
 	}
 	host, err := g.mountinfo("/proc/self/mountinfo")
 	if err != nil {
@@ -215,6 +331,78 @@ func (g *Guard) check(cfg *Config, inv *Invocation) (*MountEntry, error) {
 	}
 	return Check(host, ctr, Policy{Workspace: cfg.Workspace, DataRoot: cfg.DataRoot, DockerInit: cfg.DockerInit,
 		ContainerID: inv.ID, Cgroup: unifiedCgroup(cg)}), nil
+}
+
+// checkRunsc checks what runsc create left: the sandbox, whose pid runsc
+// writes to the pid file, and its gofer, which holds the container's bind
+// mounts. Both are held open while they are read, so that neither can be
+// swapped for another process under the same pid in between.
+func (g *Guard) checkRunsc(cfg *Config, real string, inv *Invocation) (*MountEntry, error) {
+	// containerd's bundle directory is named after the container, and the
+	// gofer is recognised by its bundle: the two must agree.
+	if !validID(inv.ID) || filepath.Base(inv.Bundle) != inv.ID {
+		return nil, fmt.Errorf("the bundle %q is not the container %q's", inv.Bundle, inv.ID)
+	}
+	fi, err := os.Stat(real)
+	if err != nil {
+		return nil, err
+	}
+	runsc, err := statID(fi)
+	if err != nil {
+		return nil, err
+	}
+	pid, err := g.readPid(inv)
+	if err != nil {
+		return nil, err
+	}
+	host, err := g.mountinfo("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	uid := g.Getuid()
+	sb, err := openProc(g.Proc, pid)
+	if err != nil {
+		return nil, fmt.Errorf("the sandbox: %v", err)
+	}
+	defer sb.Close()
+	sbInfo, err := readProcInfo(sb)
+	if err != nil {
+		return nil, fmt.Errorf("the sandbox: %v", err)
+	}
+	if sbInfo.UID != uid {
+		return nil, fmt.Errorf("the sandbox %d is not the guard's uid's", pid)
+	}
+	sbTable, err := tableOf(sb)
+	if err != nil {
+		return nil, fmt.Errorf("the sandbox: %v", err)
+	}
+	gofer, err := findGofer(g.Proc, pid, sbInfo.PPid, uid, runsc, inv.Bundle)
+	if err != nil {
+		return nil, err
+	}
+	defer gofer.Close()
+	goferTable, err := tableOf(gofer)
+	if err != nil {
+		return nil, fmt.Errorf("the gofer: %v", err)
+	}
+	// The descriptor keeps the process, but a process can exec: what was
+	// read must still be the gofer's once it has been read.
+	if !isGofer(gofer, sbInfo.PPid, uid, runsc, inv.Bundle) {
+		return nil, errors.New("the gofer changed while its mounts were read")
+	}
+	if bad := Check(host, goferTable, Policy{Workspace: cfg.Workspace, DataRoot: cfg.DataRoot, DockerInit: cfg.DockerInit,
+		ContainerID: inv.ID, Gofer: true}); bad != nil {
+		return bad, nil
+	}
+	return CheckSandbox(host, sbTable), nil
+}
+
+func tableOf(e procEntry) ([]MountEntry, error) {
+	data, err := e.ReadFile("mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	return ParseMountinfo(bytes.NewReader(data))
 }
 
 // unifiedCgroup is the cgroup2 path of a /proc/<pid>/cgroup table (its

@@ -17,6 +17,7 @@ type Invocation struct {
 	// Sub is the subcommand; empty for runc --version and the like.
 	Sub string
 	// For create: its flags and the container ID.
+	Bundle      string
 	PidFile     string
 	PreserveFDs int
 	ID          string
@@ -28,6 +29,18 @@ var globalFlags = map[string]bool{
 	"root": true, "log": true, "log-format": true, "criu": true, "rootless": true,
 	"debug": false, "systemd-cgroup": false,
 	"help": false, "h": false, "version": false, "v": false,
+}
+
+// runsc's global flags as the shim passes them (go-runc with containerd's
+// runc shim: --root, --log, --log-format json, and --systemd-cgroup when
+// the daemon uses systemd), and --version, which the daemon asks for. The
+// arguments daemon.json gives the runtime come before them and are matched
+// separately, exactly. runsc has many more global flags (--rootless,
+// --network, --overlay2, --directfs, ...), each of which changes how the
+// sandbox is built; none of them is passed through.
+var runscGlobalFlags = map[string]bool{
+	"root": true, "log": true, "log-format": true,
+	"systemd-cgroup": false, "version": false,
 }
 
 // create's flags, and whether each takes a value.
@@ -49,7 +62,38 @@ func flag(a string) (name, val string, hasVal, ok bool) {
 // Parse reads runc's arguments (without the program name). An argument
 // list it cannot read is an error, whatever the subcommand.
 func Parse(args []string) (*Invocation, error) {
-	inv := &Invocation{}
+	return parse(args, nil, globalFlags)
+}
+
+// ParseRunsc reads runsc's arguments (without the program name). Docker
+// runs a runtime with runtimeArgs through a script that puts them first, so
+// the list must start with exactly runtimeArgs, the ones devkit wrote into
+// daemon.json for this runtime; after them only the shim's own global
+// flags may follow. A create must name its bundle, which is how the guard
+// recognises the container's gofer.
+func ParseRunsc(args, runtimeArgs []string) (*Invocation, error) {
+	if len(args) < len(runtimeArgs) {
+		return nil, fmt.Errorf("want the runtime's arguments %q first", runtimeArgs)
+	}
+	for i, a := range runtimeArgs {
+		if args[i] != a {
+			return nil, fmt.Errorf("want the runtime's arguments %q first, got %q", runtimeArgs, args[:len(runtimeArgs)])
+		}
+	}
+	inv, err := parse(args[len(runtimeArgs):], runtimeArgs, runscGlobalFlags)
+	if err != nil {
+		return nil, err
+	}
+	if inv.Sub == "create" && inv.Bundle == "" {
+		return nil, errors.New("create: no --bundle, so the container's gofer cannot be recognised")
+	}
+	return inv, nil
+}
+
+// parse reads a runtime's arguments after prefix, which it has already
+// matched and which stays at the front of Global.
+func parse(args, prefix []string, globalFlags map[string]bool) (*Invocation, error) {
+	inv := &Invocation{Global: append([]string(nil), prefix...)}
 	i := 0
 	for ; i < len(args); i++ {
 		a := args[i]
@@ -118,6 +162,8 @@ func Parse(args []string) (*Invocation, error) {
 			}
 		}
 		switch name {
+		case "bundle", "b":
+			inv.Bundle = val
 		case "pid-file":
 			inv.PidFile = val
 		case "preserve-fds":
