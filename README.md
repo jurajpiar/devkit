@@ -487,8 +487,14 @@ default set, which a container may add back after `--cap-drop ALL`, plus
 `IPC_LOCK` and `NET_BIND_SERVICE`; nothing else, and never `ALL`. `NET_RAW`
 is dropped from every container, so raw sockets and `ping` inside a
 container do not work. Published ports bind to the VM's loopback only
-(`127.0.0.1` or `::1`). The runtime is fixed by `tools.container_runtime`:
-asking for another by name, `runc` included, is refused. Logs stay in the
+(`127.0.0.1` or `::1`), on every network: Docker's own setting covers its
+default bridge only, so the filter gives every network you make, which
+includes every Compose project's, loopback as its default address, and a
+port published with no address gets `127.0.0.1`. A network made by an
+earlier devkit has no such default: `-P` on it is refused until it is made
+again (`docker network rm`, or `docker compose down`). The runtime is fixed
+by `tools.container_runtime`: asking for another by name, `runc` included,
+is refused. Logs stay in the
 VM (`json-file`, `local` or `none`). Bind mounts must come from the
 workspace: a bind of `/etc`, your home, `~/.ssh` or Docker's own files is
 refused, by its path as written and by where its symlinks lead; named
@@ -496,7 +502,13 @@ volumes use the `local` driver with no options, so a volume cannot bind a
 path either. `docker exec --privileged`, `docker update`, plugins, swarm,
 services, secrets and configs are unavailable. Builds work, as do
 `docker compose`, `docker cp`, `attach`, `exec` and the rest of everyday
-use.
+use, with one exception: `docker cp` to or from a container with a bind
+mount is refused. To copy files, the daemon makes the container's mounts
+itself, without the runtime and so without the check below, and it would
+follow a bind source you had since replaced with a symlink. The files of a
+bind mount are in the workspace already; for the rest, `docker exec
+<container> cat <file>` or `tar` works. Containers with only volumes are
+copied to and from as usual.
 
 The filter checks the request, but the daemon resolves a bind's path later,
 when the container starts, and the workspace is yours to rearrange in
@@ -505,7 +517,9 @@ by then. So with `runc`, every container runs through a second check,
 `devkit-runc-guard`, registered as Docker's default runtime: it lets `runc`
 set the container up, reads the mounts actually made before the container's
 first process starts, and deletes the container unless each one comes from
-the workspace, a Docker volume or Docker's own per-container files. The
+the workspace, a Docker volume, or the three files Docker gives each
+container from its own directory (`hosts`, `hostname`, `resolv.conf`, never
+those of another container, nor the settings Docker keeps beside them). The
 error then reads `devkit: refused: a mount comes from outside the
 workspace`.
 
@@ -514,12 +528,20 @@ buildx, and Compose builds) is passed through unparsed; BuildKit runs build
 steps with its own `runc`, not through the guard, and takes no host paths,
 and the daemon refuses the `security.insecure` entitlement. Under gVisor
 the mount check is the filter's alone: the guard is not in front of
-`runsc` (which does not pass the VM's Unix sockets into a container). The
+`runsc` (which does not pass the VM's Unix sockets into a container). So
+under gVisor the filter refuses a bind source it cannot follow to its end,
+such as one inside a directory only you may enter (`chmod 700`): make the
+directories on the way readable by others, or mount another path. It also
+checks a container's bind sources again each time it starts, but a source
+replaced with a symlink while the container is starting is followed, to
+anything the Docker account may read or write, Docker's stored container
+settings included. The
 Docker account is the trust boundary for containers: container root is that
 account, so what the account may read or write, a container may too, inside
 the workspace and outside it. A container made before the filter existed is
-started through it only if its runtime and privileges are ones it would
-allow today; one with a restart policy is restarted by the daemon itself at
+started through it only if its runtime, privileges and published ports
+(and under gVisor its bind sources) are ones it would allow today; the rest
+of its settings are not checked again. One with a restart policy is restarted by the daemon itself at
 boot, unchecked, so remove containers made by an earlier devkit (`docker
 rm -f`) after upgrading. Turning `containers: docker` off stops the daemon and the
 filter and puts back what devkit changed in AppArmor and file modes; the
@@ -547,8 +569,7 @@ namespace, so service names work, while file, process and memory calls stay
 behind gVisor. What it gives up is gVisor's network stack: the VM kernel's
 networking code is within a container's reach again. In both modes a container still has
 only the network described above: the firewall and the proxy apply as they do
-to `runc`. `--cap-add NET_ADMIN` configures gVisor's network stack, not the
-VM's.
+to `runc`. `--cap-add NET_ADMIN` is refused under every runtime.
 
 What it costs, from one run of each on an arm64 Mac, without KVM: starting
 and stopping a container, and file I/O, took about as long as under `runc`;
@@ -560,7 +581,8 @@ steps with BuildKit, which has its own `runc` worker.
 The runtime is a control, not a default: the API filter allows only the
 configured gVisor runtime by name, so `docker run --runtime=runc` (or the
 other gVisor mode) is refused. The mount check under gVisor is the filter's
-alone (see above). Switching back to `runc` takes gVisor out of the daemon's
+alone, and a bind source swapped while a container starts is not caught
+(see above). Switching back to `runc` takes gVisor out of the daemon's
 configuration and leaves its files installed.
 
 Root installs gVisor at boot from Google's release bucket,
