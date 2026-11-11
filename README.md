@@ -722,11 +722,10 @@ tests/e2e             creates a real VM and checks the guarantees
 - Rust toolchain verification: pin `rustup-init` by hash in devkit until mise
   verifies it.
 - Foundry as a first-class, hash-pinned install for Solidity projects.
-- An opt-in inner sandbox (gVisor) that runs project processes behind a
-  userspace kernel, so a guest kernel exploit meets it before the real kernel.
-  Defence in depth against the one case the VM boundary does not cover, a
-  privilege escalation reaching the host's loopback; see SECURITY.md for the
-  trade-offs.
+- gVisor for project processes outside containers. `tools.container_runtime`
+  already runs Docker's containers behind gVisor's userspace kernel; a shell,
+  a test run or an IDE's remote processes still run on the guest kernel
+  directly. See SECURITY.md for the trade-offs.
 
 ## Licence
 
