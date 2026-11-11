@@ -157,6 +157,26 @@ included. The value follows `devkit.yaml` on every boot, so turning
 containers off closes them again. On a kernel without the switch,
 provisioning carries on with AppArmor's restriction only and says so.
 
+**Docker's API is filtered.** With `tools.containers: docker` the daemon runs
+rootless under its own account, and its socket is reachable only by
+devkit's API filter, which runs under another account, not root. The
+sandbox user's `DOCKER_HOST` is the filter's socket. The filter forwards a
+call only if it is in its table and its body decodes strictly (exact field
+names, no duplicates, no unknown fields) and validates; it forwards its own
+re-encoding of the body, never the client's bytes, so the daemon reads what
+was checked. It refuses privileged containers, added capabilities beyond
+Docker's defaults and two harmless ones, the VM's namespaces, devices,
+sysctls, security-option changes, runtimes other than the configured one,
+published ports beyond loopback, and bind mounts from outside the
+workspace; it drops `NET_RAW` from every container. Because the daemon
+resolves bind paths after the check, a runtime guard in front of `runc`
+reads the mounts each container actually got before its process starts and
+deletes it unless they come from the workspace, Docker's volumes or its
+per-container files. Under gVisor the guard is not used and the filter's
+check of bind paths stands alone. BuildKit's session stream is not parsed.
+The Docker account is the boundary for containers: container root is that
+account.
+
 **No kernel modules after provisioning.** Any process can make the kernel
 load a module, for a socket family nobody uses or, from a namespace, a link
 type or a netfilter extension: kernel code that would otherwise never run.

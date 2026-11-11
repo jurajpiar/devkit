@@ -496,9 +496,10 @@ needs them with capabilities inside, and only that account gets them. Ubuntu's
 AppArmor profiles exempt `rootlesskit`, `runc` and `slirp4netns` by path; devkit
 makes those three executable by the account only, and disables every other
 stock profile that exempts a program, so for the sandbox user user namespaces
-stay as closed as without containers. The sandbox user reaches the daemon with
-no setup: `DOCKER_HOST` points every session at its socket. The rootful
-`docker.service` is masked and never runs.
+stay as closed as without containers. The sandbox user reaches Docker with
+no setup: `DOCKER_HOST` points every session at devkit's API filter (below),
+never at the daemon's own socket, which only the filter can reach. The
+rootful `docker.service` is masked and never runs.
 
 Containers have the network the rest of the VM has. Their traffic leaves
 through `slirp4netns`, under the account's UID, which the firewall rejects
@@ -541,17 +542,72 @@ pull from it needs these hosts in `network.allow`:
     - "**.r2.cloudflarestorage.com"
 ```
 
-Two defaults are set in the daemon's root-owned configuration:
-`no-new-privileges`, so setuid programs in a container gain nothing, and
-published ports bind to the VM's 127.0.0.1. A `docker run` can override
-either today. The
-Docker API itself is not filtered yet: anyone who can reach the socket, which
-is the sandbox user and whatever it runs, can ask the daemon for privileged
-containers, host bind mounts of what the account may read and the rest. All
-of that stays inside the account's user namespace and behind the firewall,
-but it is more than the sandbox user can do on its own. Turning
-`containers: docker` off stops the daemon and puts back what devkit changed
-in AppArmor and file modes; the account and its images are kept.
+**What Docker may be asked for.** Anyone who can use the daemon's socket can
+ask it for anything the account may do: privileged containers, extra
+capabilities, the VM's namespaces, bind mounts of whatever the account can
+read. So the sandbox user never gets that socket. It gets devkit's API
+filter, `devkit-dockerfilter`, a small proxy on `/run/devkit/docker.sock`
+that runs under an account of its own (not root), and forwards a call only
+when the call is in its table and its settings are ones it knows to be
+harmless. Everything else is refused, including what it does not recognise:
+an unknown endpoint, query parameter or field is a refusal, not a pass. A
+refusal looks like this:
+
+```
+Error response from daemon: devkit: refused: POST /containers/create: HostConfig.Privileged is not allowed
+```
+
+and is logged, one line with the method, path and reason, never a request
+body, in the filter's journal (`journalctl -u devkit-dockerfilter`, with
+`sudo: true`).
+
+Refused, because each widens the VM kernel's surface or reaches past the
+container: `--privileged`; devices and device rules; sysctls; the VM's
+PID, IPC, UTS, cgroup or user namespace and `--network host`; security
+options other than `no-new-privileges` (no seccomp, AppArmor or system-path
+changes); a cgroup parent, a volume driver, storage options, a negative OOM
+score, real-time CPU and block I/O device settings. Capabilities: Docker's
+default set, which a container may add back after `--cap-drop ALL`, plus
+`IPC_LOCK` and `NET_BIND_SERVICE`; nothing else, and never `ALL`. `NET_RAW`
+is dropped from every container, so raw sockets and `ping` inside a
+container do not work. Published ports bind to the VM's loopback only
+(`127.0.0.1` or `::1`). The runtime is fixed by `tools.container_runtime`:
+asking for another by name, `runc` included, is refused. Logs stay in the
+VM (`json-file`, `local` or `none`). Bind mounts must come from the
+workspace: a bind of `/etc`, your home, `~/.ssh` or Docker's own files is
+refused, by its path as written and by where its symlinks lead; named
+volumes use the `local` driver with no options, so a volume cannot bind a
+path either. `docker exec --privileged`, `docker update`, plugins, swarm,
+services, secrets and configs are unavailable. Builds work, as do
+`docker compose`, `docker cp`, `attach`, `exec` and the rest of everyday
+use.
+
+The filter checks the request, but the daemon resolves a bind's path later,
+when the container starts, and the workspace is yours to rearrange in
+between: a directory that passed can be a symlink to the daemon's sockets
+by then. So with `runc`, every container runs through a second check,
+`devkit-runc-guard`, registered as Docker's default runtime: it lets `runc`
+set the container up, reads the mounts actually made before the container's
+first process starts, and deletes the container unless each one comes from
+the workspace, a Docker volume or Docker's own per-container files. The
+error then reads `devkit: refused: a mount comes from outside the
+workspace`.
+
+What this does not cover. BuildKit's own stream (`docker build` with
+buildx, and Compose builds) is passed through unparsed; BuildKit runs build
+steps with its own `runc`, not through the guard, and takes no host paths,
+and the daemon refuses the `security.insecure` entitlement. Under gVisor
+the mount check is the filter's alone: the guard is not in front of
+`runsc` (which does not pass the VM's Unix sockets into a container). The
+Docker account is the trust boundary for containers: container root is that
+account, so what the account may read or write, a container may too, inside
+the workspace and outside it. A container made before the filter existed is
+started through it only if its runtime and privileges are ones it would
+allow today; one with a restart policy is restarted by the daemon itself at
+boot, unchecked, so remove containers made by an earlier devkit (`docker
+rm -f`) after upgrading. Turning `containers: docker` off stops the daemon and the
+filter and puts back what devkit changed in AppArmor and file modes; the
+accounts and the images are kept.
 
 **gVisor.** `tools.container_runtime` chooses what runs Docker's containers.
 `runc`, the default, runs them on the VM's kernel, as Docker normally does.
@@ -583,10 +639,11 @@ spawning processes was about 3.5 times slower. `runsc` runs with
 enforced under gVisor. Builds are not covered: `docker build` runs its `RUN`
 steps with BuildKit, which has its own `runc` worker.
 
-The runtime is a default, not a control, until the Docker API is filtered:
-`docker run --runtime=runc` still runs a container on the VM's kernel, since
-both runtimes stay registered. Switching back to `runc` takes gVisor out of
-the daemon's configuration and leaves its files installed.
+The runtime is a control, not a default: the API filter allows only the
+configured gVisor runtime by name, so `docker run --runtime=runc` (or the
+other gVisor mode) is refused. The mount check under gVisor is the filter's
+alone (see above). Switching back to `runc` takes gVisor out of the daemon's
+configuration and leaves its files installed.
 
 Root installs gVisor at boot from Google's release bucket,
 `storage.googleapis.com/gvisor/releases/release/<release>/<arch>/`, one
