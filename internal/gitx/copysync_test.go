@@ -30,6 +30,9 @@ type localGuest struct {
 	failScript bool
 	// failManifest fails the manifest's upload, after the pack's.
 	failManifest bool
+	// dropReply runs the sync script but loses its answer, as when the
+	// connection drops after the VM applied a snapshot.
+	dropReply bool
 	// answer, when set, replaces what the VM says it has.
 	answer *string
 	// packObjects counts the objects of each pack the VM was sent.
@@ -64,6 +67,9 @@ func (g *localGuest) Exec(ctx context.Context, command string) (string, error) {
 	err := cmd.Run()
 	if stderr.Len() > 0 {
 		g.t.Logf("guest stderr: %s", stderr.String())
+	}
+	if g.dropReply && strings.Contains(command, "devkit-sync ") {
+		return "", io.ErrUnexpectedEOF
 	}
 	return stdout.String(), err
 }

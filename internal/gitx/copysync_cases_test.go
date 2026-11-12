@@ -1019,3 +1019,104 @@ func TestCopySyncSeesAnEditThatKeepsSizeAndTime(t *testing.T) {
 	}
 	f.wantVM("a.txt", "bbbb\n")
 }
+
+// syncLost delivers a snapshot the VM applies but whose answer is lost,
+// so this Mac does not record it.
+func (f *copyFixture) syncLost() {
+	f.t.Helper()
+	f.vm.dropReply = true
+	defer func() { f.vm.dropReply = false }()
+	before := f.syncedCommit()
+	if _, err := DeliverCopy(context.Background(), f.repo, f.snapshot(), f.vm, `$HOME/workspace`, false); err == nil {
+		f.t.Fatal("a lost answer should fail the sync")
+	}
+	if f.syncedCommit() != before {
+		f.t.Fatal("a lost answer must not move this Mac's record")
+	}
+}
+
+// The VM keeps the manifest it applied, so what went away since is undone
+// even when this Mac never learnt that the VM applied the last one.
+func TestCopySyncManifestAfterALostAnswer(t *testing.T) {
+	for _, c := range []struct{ name, dir, file string }{
+		{"plain names", "empty/inner", "f.txt"},
+		{"hostile names", "d ir\n\"q'/in ner", "f\nx \"y\""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newCopyFixture(t)
+			m := func(rel string) string { return filepath.Join(f.mac, rel) }
+			put(t, m("a.txt"), "a\n")
+			put(t, m(c.file), "f\n")
+			f.mustSync()
+
+			must(t, os.MkdirAll(m(c.dir), 0o755))
+			chmod(t, m(c.file), 0o600)
+			f.syncLost()
+			if !exists(f.vm.ws(c.dir)) || permOf(t, f.vm.ws(c.file)) != 0o600 {
+				t.Fatal("the VM should have applied the lost sync")
+			}
+
+			top := strings.SplitN(c.dir, "/", 2)[0]
+			must(t, os.RemoveAll(m(top)))
+			chmod(t, m(c.file), 0o644)
+			f.mustSync()
+			if exists(f.vm.ws(top)) {
+				t.Errorf("%q, removed on the Mac, is still in the VM", top)
+			}
+			if got := permOf(t, f.vm.ws(c.file)); got != 0o644 {
+				t.Errorf("%q in the VM is %v, want 0644", c.file, got)
+			}
+		})
+	}
+}
+
+// A change of mode alone keeps the commit id; after a lost answer it must
+// still be undone.
+func TestCopySyncModeOnlyChangeAfterALostAnswer(t *testing.T) {
+	f := newCopyFixture(t)
+	m := func(rel string) string { return filepath.Join(f.mac, rel) }
+	put(t, m("f.txt"), "f\n")
+	put(t, m("run.sh"), "#!/bin/sh\n")
+	chmod(t, m("run.sh"), 0o755)
+	f.mustSync()
+	commit := f.syncedCommit()
+	chmod(t, m("f.txt"), 0o600)
+	chmod(t, m("run.sh"), 0o700)
+	f.syncLost()
+	if permOf(t, f.vm.ws("f.txt")) != 0o600 || permOf(t, f.vm.ws("run.sh")) != 0o700 {
+		t.Fatal("the VM should have applied the lost sync")
+	}
+	chmod(t, m("f.txt"), 0o644)
+	chmod(t, m("run.sh"), 0o755)
+	f.mustSync()
+	if f.syncedCommit() != commit {
+		t.Error("a change of mode alone should keep the commit id")
+	}
+	if permOf(t, f.vm.ws("f.txt")) != 0o644 || permOf(t, f.vm.ws("run.sh")) != 0o755 {
+		t.Errorf("modes in the VM: %v %v, want 0644 0755", permOf(t, f.vm.ws("f.txt")), permOf(t, f.vm.ws("run.sh")))
+	}
+}
+
+// The manifest the VM keeps is the VM's own data, but a malformed one must
+// not make the script act outside the workspace.
+func TestCopySyncStoredManifestStaysInTheWorkspace(t *testing.T) {
+	f := newCopyFixture(t)
+	put(t, filepath.Join(f.mac, "a.txt"), "a\n")
+	f.mustSync()
+	outside := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(outside, "victim"), 0o755))
+	put(t, filepath.Join(outside, "file"), "outside\n")
+	chmod(t, filepath.Join(outside, "file"), 0o600)
+	must(t, os.MkdirAll(filepath.Join(f.vm.home, "escape"), 0o755))
+	must(t, os.Symlink(outside, f.vm.ws("out")))
+	must(t, os.Symlink(filepath.Join(outside, "file"), f.vm.ws("outfile")))
+	stored := "d0755 out/victim\x00d0755 ../escape\x00f0600 outfile\x00f0600 out/file\x00d0755 " + outside + "/victim\x00"
+	must(t, os.WriteFile(filepath.Join(f.vm.vmRepo(), "devkit-applied.manifest"), []byte(stored), 0o600))
+	f.mustSync()
+	if !exists(filepath.Join(outside, "victim")) || !exists(filepath.Join(f.vm.home, "escape")) {
+		t.Error("a directory outside the workspace was removed")
+	}
+	if permOf(t, filepath.Join(outside, "file")) != 0o600 {
+		t.Error("a file outside the workspace had its mode changed")
+	}
+}

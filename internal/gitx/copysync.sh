@@ -25,6 +25,9 @@ export LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_P
 
 ws=$1 pack=$2 manifest=$3 incoming=$4 overwrite=$5
 repo=$HOME/.local/state/devkit/sync.git
+# The manifest last applied to the workspace: the VM's own record of the
+# directories and modes it made, to undo what the next one no longer has.
+applied=$repo/devkit-applied.manifest
 empty=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/devkit-sync.XXXXXX") || exit 1
@@ -94,7 +97,7 @@ if [ -z "$synced" ]; then
   # First sync into this workspace: whatever is there is compared with
   # the snapshot, nothing is assumed.
   old=$empty
-  rm -f "$repo/index"
+  rm -f "$repo/index" "$applied"
 else
   old=$synced
   [ -f "$repo/index" ] || r read-tree "$old" || fail "could not read the last snapshot"
@@ -268,12 +271,61 @@ if [ -n "$manifest" ]; then
       continue
     fi
     case $kind in
-      r) if [ -d "$p" ]; then rmdir -- "$p" 2>/dev/null; fi ;;
       d) { [ -d "$p" ] || mkdir -p -- "$p"; } && chmod -- "$mode" "$p" || printf 'devkit-skip %q\n' "$p" ;;
       f) if [ -f "$p" ]; then chmod -- "$mode" "$p" || printf 'devkit-skip %q\n' "$p"; fi ;;
       *) printf 'devkit-skip %q\n' "$p" ;;
     esac
   done <"$manifest"
+
+  # Undo what the last applied manifest had and this one has not: empty
+  # directories that went away, deepest first, and files whose odd mode
+  # went back to git's. Each record becomes a line, its kind and path in
+  # hex, so the two manifests are compared by awk in one pass whatever
+  # bytes the paths hold; then the old records are read again, raw, beside
+  # one flag line each. The cost is linear in the size of the manifests.
+  keys() {
+    od -An -v -tx1 "$1" | awk '{
+      for (i = 1; i <= NF; i++) {
+        if ($i == "00") { print k; k = ""; n = 0 }
+        else { n++; if (n == 1) k = $i; else if (n >= 7) k = k $i }
+      }
+    }'
+  }
+  if [ -f "$applied" ]; then
+    keys "$manifest" >"$tmp/new.keys" && keys "$applied" >"$tmp/old.keys" &&
+      awk 'BEGIN { while ((getline l < ARGV[1]) > 0) a[l]; ARGV[1] = "" } { print (($0 in a) ? 0 : 1) }' \
+        "$tmp/new.keys" "$tmp/old.keys" >"$tmp/gone" || fail "could not compare manifests"
+    ngone=0
+    while IFS= read -r -d '' rec && IFS= read -r flag <&3; do
+      [ "$flag" = 1 ] || continue
+      # The VM's own file, but checked as the Mac's records are.
+      p=${rec:6}
+      if [ "${rec:5:1}" != " " ] || ! inside "$p"; then continue; fi
+      case ${rec:0:1} in
+        d) gone[ngone]=$p ngone=$((ngone + 1)) ;;
+        f)
+          if [ -f "$p" ]; then
+            # Back to git's mode for this path, from its index entry.
+            e=
+            IFS= read -r -d '' e < <(GIT_LITERAL_PATHSPECS=1 g ls-files -s -z -- "$p")
+            if [ "${e#*$'\t'}" = "$p" ]; then
+              case ${e%% *} in
+                100755) chmod -- 0755 "$p" ;;
+                100644) chmod -- 0644 "$p" ;;
+              esac
+            fi
+          fi
+          ;;
+      esac
+    done <"$applied" 3<"$tmp/gone"
+    # Parents come before children in a manifest: removed in reverse.
+    while [ "$ngone" -gt 0 ]; do
+      ngone=$((ngone - 1))
+      if [ -d "${gone[ngone]}" ]; then rmdir -- "${gone[ngone]}" 2>/dev/null; fi
+    done
+  fi
+  cp "$manifest" "$repo/.applied.tmp" && mv -f "$repo/.applied.tmp" "$applied" ||
+    fail "could not record the manifest"
 fi
 
 g update-index -q --refresh >/dev/null 2>&1

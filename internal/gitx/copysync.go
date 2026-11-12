@@ -43,11 +43,6 @@ const CopySyncRepoDir = "sync.git"
 // copyPending is where a snapshot waits until the VM has applied it.
 const copyPending = "refs/devkit/pending/"
 
-// copyManifestFile, inside the Mac's private repository, is the manifest of
-// the snapshot at CopySyncedRef: what git cannot carry, needed to tell the
-// VM which directories went away and which modes went back to git's.
-const copyManifestFile = "devkit-synced.manifest"
-
 // Exit codes of the VM's sync script besides 0.
 const (
 	ExitCopyConflict = 3
@@ -219,13 +214,10 @@ type CopySnapshot struct {
 type Manifest struct {
 	Dirs  map[string]uint32
 	Modes map[string]uint32
-	// exec records every regular file's git mode, to know what a file
-	// whose odd mode went away goes back to. Not stored.
-	exec map[string]bool
 }
 
 func newManifest() *Manifest {
-	return &Manifest{Dirs: map[string]uint32{}, Modes: map[string]uint32{}, exec: map[string]bool{}}
+	return &Manifest{Dirs: map[string]uint32{}, Modes: map[string]uint32{}}
 }
 
 // Snapshot reads a tar stream of the directory and writes it into the
@@ -270,6 +262,8 @@ func (snap *CopySnapshot) write(w *bufio.Writer, archive io.Reader) error {
 	msg := "devkit snapshot\n"
 	fmt.Fprintf(w, "commit %s\nauthor devkit <devkit@localhost> 0 +0000\ncommitter devkit <devkit@localhost> 0 +0000\ndata %d\n%s", snap.ref, len(msg), msg)
 	m := snap.Manifest
+	// The regular files sent so far, for a hard link to copy.
+	files := map[string]bool{}
 	tr := tar.NewReader(archive)
 	for {
 		h, err := tr.Next()
@@ -305,12 +299,12 @@ func (snap *CopySnapshot) write(w *bufio.Writer, archive io.Reader) error {
 				// tar sends a second name of a file as a link to the
 				// first; the VM gets a second copy, as extracting did.
 				src, ok := tarPath(h.Linkname)
-				if _, seen := m.exec[src]; !ok || !seen {
+				if !ok || !files[src] {
 					snap.Skipped = append(snap.Skipped, Skipped{p, "a hard link to a file not sent"})
 					continue
 				}
 				fmt.Fprintf(w, "C %s %s\n", fastImportPath(src), fastImportPath(p))
-				m.exec[p] = m.exec[src]
+				files[p] = true
 				if mode, ok := m.Modes[src]; ok {
 					m.Modes[p] = mode
 				}
@@ -326,7 +320,7 @@ func (snap *CopySnapshot) write(w *bufio.Writer, archive io.Reader) error {
 				return fmt.Errorf("read %s from the archive after %d bytes: %w", p, n, err)
 			}
 			w.WriteByte('\n')
-			m.exec[p] = exec
+			files[p] = true
 			if perm != def {
 				m.Modes[p] = perm
 			}
@@ -394,72 +388,24 @@ func fastImportPath(p string) string {
 	return b.String()
 }
 
-// Encode writes the manifest the VM applies after the merge, given the one
-// the VM had (nil when unknown): directories that went away, deepest first,
-// to be removed when empty; every directory, parents first, to be made and
-// given its mode; and files whose mode is not git's, including files whose
-// odd mode went away and go back to git's. Records end with NUL, as a path
-// may hold any other byte; each is a kind, four octal digits and a space.
-func (m *Manifest) Encode(prev *Manifest) []byte {
+// Encode writes the manifest the VM applies after the merge, whole: every
+// directory, parents first, to be made and given its mode; and the files
+// whose mode is not git's. The VM keeps the one it applied and works out
+// itself what went away since, so nothing here depends on what this Mac
+// believes the VM has. Records end with NUL, as a path may hold any other
+// byte; each is a kind, four octal digits and a space.
+func (m *Manifest) Encode() []byte {
 	var b bytes.Buffer
 	rec := func(kind byte, mode uint32, p string) {
 		fmt.Fprintf(&b, "%c%04o %s\x00", kind, mode, p)
 	}
-	if prev != nil {
-		gone := []string{}
-		for p := range prev.Dirs {
-			if _, ok := m.Dirs[p]; !ok {
-				gone = append(gone, p)
-			}
-		}
-		// A directory sorts before everything inside it.
-		sort.Sort(sort.Reverse(sort.StringSlice(gone)))
-		for _, p := range gone {
-			rec('r', 0, p)
-		}
-	}
 	for _, p := range sortedKeys(m.Dirs) {
 		rec('d', m.Dirs[p], p)
 	}
-	modes := map[string]uint32{}
-	if prev != nil {
-		for p := range prev.Modes {
-			if exec, ok := m.exec[p]; ok {
-				modes[p] = 0o644
-				if exec {
-					modes[p] = 0o755
-				}
-			}
-		}
-	}
-	for p, mode := range m.Modes {
-		modes[p] = mode
-	}
-	for _, p := range sortedKeys(modes) {
-		rec('f', modes[p], p)
+	for _, p := range sortedKeys(m.Modes) {
+		rec('f', m.Modes[p], p)
 	}
 	return b.Bytes()
-}
-
-// parseManifest reads what Encode(nil) wrote.
-func parseManifest(data []byte) *Manifest {
-	m := newManifest()
-	for _, r := range bytes.Split(data, []byte{0}) {
-		if len(r) < 7 || r[5] != ' ' {
-			continue
-		}
-		var mode uint32
-		if _, err := fmt.Sscanf(string(r[1:5]), "%o", &mode); err != nil {
-			continue
-		}
-		switch p := string(r[6:]); r[0] {
-		case 'd':
-			m.Dirs[p] = mode
-		case 'f':
-			m.Modes[p] = mode
-		}
-	}
-	return m
 }
 
 func sortedKeys(m map[string]uint32) []string {
@@ -491,22 +437,6 @@ func (r *CopyRepo) Base(ctx context.Context, answer string) string {
 		return ""
 	}
 	return c
-}
-
-// SyncedManifest is the manifest of base when base is the snapshot this
-// Mac recorded as the VM's; otherwise nil.
-func (r *CopyRepo) SyncedManifest(ctx context.Context, base string) *Manifest {
-	if base == "" {
-		return nil
-	}
-	if cur, err := r.git(ctx, nil, "rev-parse", "-q", "--verify", CopySyncedRef+"^{commit}"); err != nil || cur != base {
-		return nil
-	}
-	data, err := os.ReadFile(filepath.Join(r.Dir, copyManifestFile))
-	if err != nil {
-		return nil
-	}
-	return parseManifest(data)
 }
 
 // WritePack writes to w a pack of the objects of commit that base does not
@@ -555,9 +485,6 @@ func (r *CopyRepo) WritePack(ctx context.Context, commit, base string, w io.Writ
 // so do their objects, so the repository holds about one compressed copy
 // of the directory.
 func (r *CopyRepo) Record(ctx context.Context, snap *CopySnapshot) error {
-	if err := writeFileAtomic(filepath.Join(r.Dir, copyManifestFile), snap.Manifest.Encode(nil)); err != nil {
-		return err
-	}
 	if _, err := r.git(ctx, nil, "update-ref", CopySyncedRef, snap.Commit); err != nil {
 		return err
 	}
@@ -694,7 +621,7 @@ func DeliverCopy(ctx context.Context, repo *CopyRepo, snap *CopySnapshot, guest 
 		return nil, err
 	}
 	manifestPath := filepath.Join(tmp, "sync.manifest")
-	if err := os.WriteFile(manifestPath, snap.Manifest.Encode(repo.SyncedManifest(ctx, base)), 0o600); err != nil {
+	if err := os.WriteFile(manifestPath, snap.Manifest.Encode(), 0o600); err != nil {
 		return nil, err
 	}
 	// The script removes what was put once it runs. If it never ran (an
