@@ -7,7 +7,9 @@
 # files in conflict. Prints lines the Mac reads:
 #   devkit-conflict <path>   changed in the VM and by this snapshot
 #   devkit-kept <path>       differs from the snapshot after the sync
-#   devkit-skip <path>       a manifest entry left alone
+#   devkit-skip <path>       a manifest entry left alone after the merge:
+#                            not a plain path in the workspace, through a
+#                            symlink, or something unexpected in the way
 #   devkit-refused <text>    git's reason the merge cannot be done
 #   devkit-error <text>
 #   devkit-synced <commit>
@@ -160,6 +162,48 @@ if ! h read-tree -m -u -n "$rold" "$incoming" 2>"$tmp/err"; then
   head -n 20 "$tmp/err" | sed 's/^/devkit-refused /'
   exit 4
 fi
+# Empty directories exist only in the manifest, so the rehearsal cannot
+# see what is in their way. Each directory to be made, and every directory
+# above it, must be free or a directory already, or be a file or symlink
+# the merge removes (one the last snapshot had and the Mac deleted; one the
+# VM changed is in conflict and, as above, counted as --overwrite leaves
+# it). Paths are raw here, so git is asked about each with a literal
+# pathspec rather than matched against its quoted lists.
+blocks() {
+  local rest=$1 part cur=
+  case $rest in '' | /* | */) return 1 ;; esac
+  while :; do
+    case $rest in
+      */*) part=${rest%%/*} rest=${rest#*/} ;;
+      *) part=$rest rest= ;;
+    esac
+    case $part in '' | . | .. | [.][gG][iI][tT]) return 1 ;; esac
+    cur=${cur:+$cur/}$part
+    if [ -L "$cur" ] || { [ -e "$cur" ] && [ ! -d "$cur" ]; }; then
+      if [ -n "$(GIT_LITERAL_PATHSPECS=1 g diff-tree -r --name-only --diff-filter=D "$old" "$incoming" -- "$cur")" ]; then
+        return 1 # the merge removes it, and nothing below it exists
+      fi
+      blocked=$cur
+      return 0
+    fi
+    [ -z "$rest" ] && return 1
+  done
+}
+if [ -n "$manifest" ]; then
+  : >"$tmp/blocked"
+  while IFS= read -r -d '' rec; do
+    [ "${rec:0:1}" = d ] || continue
+    if blocks "${rec:6}"; then
+      printf "devkit-refused %q is in the way of a directory this Mac adds\n" "$blocked" >>"$tmp/blocked"
+    fi
+  done <"$manifest"
+  if [ -s "$tmp/blocked" ]; then
+    sed 's/^/devkit-conflict /' "$tmp/conflicts"
+    sort -u "$tmp/blocked" | head -n 20
+    exit 4
+  fi
+fi
+
 if [ -s "$tmp/conflicts" ] && [ "$overwrite" != 1 ]; then
   sed 's/^/devkit-conflict /' "$tmp/conflicts"
   exit 3

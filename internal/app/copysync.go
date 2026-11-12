@@ -109,7 +109,7 @@ func syncCopy(ctx context.Context, cfg *project.Config, cwd, ws string, overwrit
 		return &notSyncedError{conflicts: res.Conflicts, refused: res.Refused}
 	}
 	if len(res.Skipped) > 0 {
-		fmt.Printf("Warning: the VM left these alone, as they lead outside the workspace or through a symlink: %s\n", listPaths(res.Skipped, 5, "", ", "))
+		fmt.Printf("Warning: the VM could not apply the directory or mode of these (the path leads outside the workspace or through a symlink, or something was in the way): %s\n", listPaths(res.Skipped, 5, "", ", "))
 	}
 	if len(res.Kept) > 0 {
 		fmt.Printf("Kept the VM's own changes, which now differ from this Mac: %s\n", listPaths(res.Kept, 5, "", ", "))

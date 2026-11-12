@@ -389,7 +389,7 @@ func TestCopySyncManifestStaysInTheWorkspace(t *testing.T) {
 
 	var mf bytes.Buffer
 	for _, r := range []string{
-		"d0700 ../escape", "d0700 " + outside + "/abs", "d0700 out/sub", "f0600 outfile", "f0600 out/file",
+		"d0700 ../escape", "d0700 " + outside + "/abs", "f0600 outfile", "f0600 out/file",
 		"r0000 out/victim", "d0700 .git/x", "d0700 a//b", "d0700 ./x", "d0700 sub/../../escape2", "dxyz1 p",
 		"f0600 a.txt\nnot-a-record",
 	} {
@@ -402,7 +402,7 @@ func TestCopySyncManifestStaysInTheWorkspace(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	// The last record names a file that does not exist and is ignored.
-	if n := strings.Count(out, "devkit-skip "); n != 11 {
+	if n := strings.Count(out, "devkit-skip "); n != 10 {
 		t.Errorf("every record should be skipped (%d were):\n%s", n, out)
 	}
 	if exists(filepath.Join(filepath.Dir(f.vm.ws("")), "escape")) || exists(filepath.Join(f.vm.home, "escape2")) || exists(filepath.Join(outside, "abs")) || exists(filepath.Join(outside, "sub")) {
@@ -413,6 +413,16 @@ func TestCopySyncManifestStaysInTheWorkspace(t *testing.T) {
 	}
 	if permOf(t, f.vm.ws("a.txt")) != 0o644 {
 		t.Error("a record with a newline in it named another file")
+	}
+	// A directory through a symlink the VM made is in the way: refused
+	// before anything is applied.
+	must(t, os.WriteFile(manifest, []byte("d0700 out/sub\x00"), 0o600))
+	out, err = f.vm.Exec(context.Background(), CopySyncCommand(`$HOME/workspace`, "", manifest, f.syncedCommit(), false))
+	if err != nil || !strings.Contains(out, "devkit-refused out is in the way") || !strings.Contains(out, "devkit-exit=4") {
+		t.Errorf("want a refusal naming out:\n%s", out)
+	}
+	if exists(filepath.Join(outside, "sub")) {
+		t.Error("a directory was made through the symlink")
 	}
 }
 
@@ -823,4 +833,85 @@ func TestLockCopyRepoIsExclusive(t *testing.T) {
 	unlock2, err := LockCopyRepo(dir)
 	must(t, err)
 	unlock2()
+}
+
+// An empty directory exists only in the manifest, so what is in its way
+// is found before the merge: refused, with nothing changed, with or
+// without --overwrite. What the merge itself removes is not in the way.
+func TestCopySyncEmptyDirectoryInTheWay(t *testing.T) {
+	refused := func(t *testing.T, f *copyFixture, overwrite bool, name string) {
+		t.Helper()
+		before := workspaceState(t, f.vm.ws(""))
+		index := read(t, filepath.Join(f.vm.vmRepo(), "index"))
+		mac, vm := f.syncedCommit(), f.vmSynced()
+		res := f.sync(overwrite)
+		if res.Synced || !strings.Contains(strings.Join(res.Refused, "\n"), name) {
+			t.Fatalf("want a refusal naming %q, got %+v", name, res)
+		}
+		if workspaceState(t, f.vm.ws("")) != before || read(t, filepath.Join(f.vm.vmRepo(), "index")) != index {
+			t.Error("a refused sync changed the workspace or the index")
+		}
+		if f.syncedCommit() != mac || f.vmSynced() != vm {
+			t.Error("a refused sync moved a record")
+		}
+	}
+	isDir := func(t *testing.T, p string) {
+		t.Helper()
+		if st, err := os.Lstat(p); err != nil || !st.IsDir() {
+			t.Errorf("%s should be a directory: %v", p, err)
+		}
+	}
+	for _, c := range []struct {
+		name, vmFile, macDir, blocked string
+		symlink                       bool
+	}{
+		{"a VM file where the Mac adds an empty directory", "clash", "clash", "clash", false},
+		{"a VM symlink where the Mac adds an empty directory", "clash", "clash", "clash", true},
+		{"a VM file above an empty directory the Mac adds", "a", "a/b", "a", false},
+		{"a hostile name", "we ird \"q'\nx", "we ird \"q'\nx", `$'we ird "q\'\nx'`, false},
+	} {
+		for _, overwrite := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, overwrite %v", c.name, overwrite), func(t *testing.T) {
+				f := newCopyFixture(t)
+				put(t, filepath.Join(f.mac, "keep.txt"), "k\n")
+				f.mustSync()
+				if c.symlink {
+					must(t, os.Symlink(t.TempDir(), f.vm.ws(c.vmFile)))
+				} else {
+					put(t, f.vm.ws(c.vmFile), "the VM's\n")
+				}
+				must(t, os.MkdirAll(filepath.Join(f.mac, c.macDir), 0o755))
+				put(t, filepath.Join(f.mac, "late.txt"), "late\n")
+				refused(t, f, overwrite, c.blocked)
+				if exists(f.vm.ws("late.txt")) {
+					t.Error("late.txt arrived with the sync refused")
+				}
+				must(t, os.Rename(f.vm.ws(c.vmFile), f.vm.ws("moved-aside")))
+				f.mustSync()
+				isDir(t, f.vm.ws(c.macDir))
+				f.wantVM("late.txt", "late\n")
+			})
+		}
+	}
+
+	t.Run("a file the Mac replaced by an empty directory", func(t *testing.T) {
+		f := newCopyFixture(t)
+		put(t, filepath.Join(f.mac, "x"), "x\n")
+		put(t, filepath.Join(f.mac, "y"), "y\n")
+		f.mustSync()
+		for _, p := range []string{"x", "y"} {
+			must(t, os.Remove(filepath.Join(f.mac, p)))
+			must(t, os.MkdirAll(filepath.Join(f.mac, p), 0o755))
+		}
+		// y was changed in the VM: a conflict, which --overwrite resolves.
+		put(t, f.vm.ws("y"), "y, the VM's\n")
+		if res := f.sync(false); res.Synced || len(res.Refused) != 0 || strings.Join(res.Conflicts, ",") != "y" {
+			t.Fatalf("want a conflict on y only, got %+v", res)
+		}
+		if res := f.sync(true); !res.Synced {
+			t.Fatalf("%+v", res)
+		}
+		isDir(t, f.vm.ws("x"))
+		isDir(t, f.vm.ws("y"))
+	})
 }
