@@ -28,6 +28,8 @@ type localGuest struct {
 	extraEnv   []string
 	failPut    bool
 	failScript bool
+	// failManifest fails the manifest's upload, after the pack's.
+	failManifest bool
 	// answer, when set, replaces what the VM says it has.
 	answer *string
 	// packObjects counts the objects of each pack the VM was sent.
@@ -67,7 +69,7 @@ func (g *localGuest) Exec(ctx context.Context, command string) (string, error) {
 }
 
 func (g *localGuest) Put(ctx context.Context, local, name string) (string, error) {
-	if g.failPut {
+	if g.failPut || g.failManifest && strings.HasSuffix(name, ".manifest") {
 		return "", io.ErrClosedPipe
 	}
 	data, err := os.ReadFile(local)

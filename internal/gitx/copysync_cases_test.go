@@ -915,3 +915,34 @@ func TestCopySyncEmptyDirectoryInTheWay(t *testing.T) {
 		isDir(t, f.vm.ws("y"))
 	})
 }
+
+// Files put into the VM for a sync whose script never ran are removed,
+// or every retry would leave another pack behind.
+func TestCopySyncCleansUpWhenTheScriptDidNotRun(t *testing.T) {
+	guestFiles := func(f *copyFixture) []string {
+		names, _ := filepath.Glob(filepath.Join(f.vm.tmp, "devkit-sync-*"))
+		return names
+	}
+	for _, c := range []struct {
+		name string
+		fail func(g *localGuest)
+	}{
+		{"the manifest's upload fails after the pack's", func(g *localGuest) { g.failManifest = true }},
+		{"the command fails", func(g *localGuest) { g.failScript = true }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newCopyFixture(t)
+			put(t, filepath.Join(f.mac, "a.txt"), "a\n")
+			c.fail(f.vm)
+			if _, err := DeliverCopy(context.Background(), f.repo, f.snapshot(), f.vm, `$HOME/workspace`, false); err == nil {
+				t.Fatal("the sync should fail")
+			}
+			if len(f.vm.packObjects) == 0 {
+				t.Fatal("the pack should have been put")
+			}
+			if left := guestFiles(f); len(left) != 0 {
+				t.Errorf("left in the VM: %q", left)
+			}
+		})
+	}
+}

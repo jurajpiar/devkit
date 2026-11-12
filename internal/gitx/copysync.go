@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // A copied project reaches the VM as snapshots: the Mac records its
@@ -696,20 +697,44 @@ func DeliverCopy(ctx context.Context, repo *CopyRepo, snap *CopySnapshot, guest 
 	if err := os.WriteFile(manifestPath, snap.Manifest.Encode(repo.SyncedManifest(ctx, base)), 0o600); err != nil {
 		return nil, err
 	}
+	// The script removes what was put once it runs. If it never ran (an
+	// upload or the command failed first), the files are removed here, or
+	// a project-sized pack would be left in the VM on every retry. The
+	// paths are devkit's own.
+	var put []string
+	exit := ""
+	defer func() {
+		if exit != "" || len(put) == 0 {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := "rm -f --"
+		for _, p := range put {
+			cmd += " " + shq(p)
+		}
+		_, _ = guest.Exec(cleanup, cmd)
+	}()
 	guestPack := ""
 	if n > 0 {
-		if guestPack, err = guest.Put(ctx, packPath, "devkit-sync-"+id+".pack"); err != nil {
+		guestPack, err = guest.Put(ctx, packPath, "devkit-sync-"+id+".pack")
+		if guestPack != "" {
+			put = append(put, guestPack)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("copy the snapshot into the VM: %w", err)
 		}
 	}
 	guestManifest, err := guest.Put(ctx, manifestPath, "devkit-sync-"+id+".manifest")
+	if guestManifest != "" {
+		put = append(put, guestManifest)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("copy the snapshot into the VM: %w", err)
 	}
 	out, execErr := guest.Exec(ctx, CopySyncCommand(ws, guestPack, guestManifest, snap.Commit, overwrite))
 	res := &CopyResult{}
 	var errs []string
-	exit := ""
 	for _, l := range strings.Split(out, "\n") {
 		kind, rest, _ := strings.Cut(l, " ")
 		switch kind {
