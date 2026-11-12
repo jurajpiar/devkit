@@ -268,6 +268,29 @@ func TestSyncKeepsVMEdits(t *testing.T) {
 		is(t, "clash.mine/inner", "vm\n")
 	})
 
+	t.Run("a file in the VM where the Mac adds an empty directory stops the sync", func(t *testing.T) {
+		vm(`printf 'vm\n' > hollow`)
+		if err := os.MkdirAll(mac("hollow"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write("later.txt", "after the empty directory\n")
+		if out, ok := sync(); ok || !strings.Contains(out, "hollow") {
+			t.Errorf("sync should refuse and name what is in the way (ok=%v):\n%s", ok, out)
+		}
+		is(t, "hollow", "vm\n")
+		if got := vm("ls later.txt 2>&1"); !strings.Contains(got, "No such file") {
+			t.Errorf("a refused sync must apply nothing, but later.txt arrived: %s", got)
+		}
+		vm("rm hollow")
+		if out, ok := sync(); !ok {
+			t.Fatalf("sync should succeed once nothing is in the way:\n%s", out)
+		}
+		if got := vm("stat -c %F hollow 2>&1"); got != "directory\n" {
+			t.Errorf("the empty directory should arrive: %q", got)
+		}
+		is(t, "later.txt", "after the empty directory\n")
+	})
+
 	t.Run("a new VM gets everything again", func(t *testing.T) {
 		s.mustRun("rm", "--force")
 		s.mustRun("up", "--no-install")
