@@ -66,7 +66,8 @@ host project directory remains byte-for-byte unchanged.
 ### Terminal output
 
 The blocked-host summary that `devkit up` prints is built from hostnames the
-sandbox chose, so it is stripped of control characters first. Several other streams are shown raw: dependency and toolchain installs, `devkit
+sandbox chose, so it is stripped of control characters first, as are the file
+names `devkit sync` reports from the VM. Several other streams are shown raw: dependency and toolchain installs, `devkit
 shell`, `devkit logs`. A hostile install script can therefore write terminal
 control sequences at you, the same as any build you run on your Mac. Your
 terminal emulator is the defence there, not devkit.
@@ -443,6 +444,16 @@ boundary: the VM can write malicious code and forge commit authors.
   the snapshot), and against your remotes (clone, sync, `ls-remote`, push),
   with your own git config and credentials, as when you run git there
   yourself, but with hooks disabled.
+- **A copied project's sync keeps snapshots on the Mac,** in
+  `~/.devkit/<vm>/sync.git`, a private repository that is never the
+  project's own and is outside the project directory, so a project cannot
+  supply or influence it (devkit refuses that directory, or the one above
+  it, if it is a symlink). git there runs with none of your config or the project's, no hooks, and
+  only plumbing (`fast-import` fed from `tar`), so the project's files are
+  data: no attributes, filters or conversions apply. The VM's answer to which
+  snapshot it has is accepted only as a commit id this Mac holds, and the
+  file names it reports back are stripped of control characters and bidi
+  overrides before display.
 
 ### How credentials and checkouts are handled
 

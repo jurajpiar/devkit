@@ -170,7 +170,17 @@ var shellCmd = &cobra.Command{
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Copy the current directory into the VM again, or bring in new upstream commits",
+	Short: "Bring this Mac's changes into the VM, keeping the VM's own, or bring in new upstream commits",
+	Long: `Bring the project into the VM again.
+
+For a copied project (source: copy), the files that changed on this Mac
+since the last sync arrive, files deleted here are deleted there, and
+files changed only in the VM are kept. If a file changed on both sides,
+nothing is synced and the files are listed; --overwrite then takes this
+Mac's version of exactly those files.
+
+For a project made by devkit clone, new upstream commits are fetched on
+this Mac and handed to the VM.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireLima(); err != nil {
 			return err
@@ -190,9 +200,13 @@ var syncCmd = &cobra.Command{
 		}
 		warnRunning(cmd.Context(), cfg)
 		cwd, _ := os.Getwd()
+		overwrite, _ := cmd.Flags().GetBool("overwrite")
+		if overwrite && cfg.Source != project.SourceCopy {
+			return fmt.Errorf("--overwrite applies to copied projects (source: copy) only")
+		}
 		if cfg.Source == project.SourceGit && isDir(bareRepo(cwd)) {
 			ws := "$HOME/" + provision.WorkspaceDir
-			if err := syncSource(cmd.Context(), cfg, cwd); err != nil {
+			if err := syncSource(cmd.Context(), cfg, cwd, false); err != nil {
 				return err
 			}
 			return syncUpstream(cmd.Context(), cfg, cwd, ws)
@@ -200,7 +214,7 @@ var syncCmd = &cobra.Command{
 		if cfg.Source == project.SourceGit {
 			return lima.ExecStream(cmd.Context(), cfg.VMName(), "git -C \"$HOME/"+provision.WorkspaceDir+"\" pull --ff-only")
 		}
-		return syncSource(cmd.Context(), cfg, cwd)
+		return syncSource(cmd.Context(), cfg, cwd, overwrite)
 	},
 }
 
@@ -243,6 +257,7 @@ func init() {
 	rmCmd.Flags().BoolP("force", "f", false, "do not ask for confirmation")
 	logsCmd.Flags().BoolP("follow", "f", false, "keep following the log")
 	logsCmd.Flags().IntP("lines", "n", 100, "number of lines to show")
+	syncCmd.Flags().Bool("overwrite", false, "for files changed both on this Mac and in the VM, take this Mac's version (copied projects)")
 }
 
 // removeHostState stops the VM's host proxy and deletes devkit's host-side

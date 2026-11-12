@@ -89,30 +89,29 @@ func tarStreams(calls [][]string, inputs [][]byte) (cmds []string, streams [][]b
 
 func TestCopySyncAddsAFreshCloneGit(t *testing.T) {
 	f, _ := fakeHome(t)
+	guest := f.LocalGuest()
 	src, secret := hostRepo(t)
 	cfg := project.Default()
 	cfg.Name = "gitsync"
-	if err := syncSource(context.Background(), cfg, src); err != nil {
+	if err := syncSource(context.Background(), cfg, src, false); err != nil {
 		t.Fatal(err)
 	}
 	calls := f.Calls()
 	_, streams := tarStreams(calls, f.Inputs())
-	if len(streams) != 2 {
-		t.Fatalf("want the working tree and then .git, got %d tar streams", len(streams))
+	if len(streams) != 1 {
+		t.Fatalf("want one tar stream, of .git; the files travel as a snapshot. Got %d", len(streams))
 	}
 	for _, n := range untar(t, streams[0], t.TempDir()) {
-		if n == ".git" || strings.HasPrefix(n, ".git/") {
-			t.Fatalf("the working-tree copy must not carry the host's .git: %s", n)
-		}
-	}
-	vm := t.TempDir()
-	for _, n := range untar(t, streams[1], vm) {
 		if n != "" && n != "." && n != ".git" && !strings.HasPrefix(n, ".git/") {
 			t.Errorf("the git stream should hold only .git, has %s", n)
 		}
 		if strings.HasPrefix(n, ".git/hooks/") {
 			t.Errorf("hook copied: %s", n)
 		}
+	}
+	vm := filepath.Join(guest, "workspace")
+	if b, _ := os.ReadFile(filepath.Join(vm, "app.txt")); string(b) != "hello\n" {
+		t.Errorf("the files should be in the workspace, app.txt is %q", b)
 	}
 	if n := gitIn(t, vm, "rev-list", "--count", "HEAD"); n != "1" {
 		t.Errorf("VM history: %s commits, want 1", n)
@@ -122,6 +121,9 @@ func TestCopySyncAddsAFreshCloneGit(t *testing.T) {
 	}
 	if u := gitIn(t, vm, "config", "remote.origin.url"); strings.Contains(u, "ghp_token") {
 		t.Errorf("credential in the VM's remote: %s", u)
+	}
+	if st := gitIn(t, vm, "status", "--porcelain"); st != "" {
+		t.Errorf("the VM's repository should match the files: %q", st)
 	}
 	if !mentions(calls, "git reset -q") {
 		t.Error("the VM should rebuild the index from HEAD without touching the files")
@@ -133,16 +135,16 @@ func TestCopySyncAddsAFreshCloneGit(t *testing.T) {
 
 func TestCopySyncKeepsTheVMsRepository(t *testing.T) {
 	f, _ := fakeHome(t)
+	f.LocalGuest()
 	src, _ := hostRepo(t)
 	cfg := project.Default()
 	cfg.Name = "gitsync"
 	f.OnShell(`/.git" && echo yes`, "yes", 0)
-	if err := syncSource(context.Background(), cfg, src); err != nil {
+	if err := syncSource(context.Background(), cfg, src, false); err != nil {
 		t.Fatal(err)
 	}
-	_, streams := tarStreams(f.Calls(), f.Inputs())
-	if len(streams) != 1 {
-		t.Fatalf("an existing VM repository holds commits not on the host; only the working tree may be sent, got %d streams", len(streams))
+	if _, streams := tarStreams(f.Calls(), f.Inputs()); len(streams) != 0 {
+		t.Fatalf("an existing VM repository holds commits not on the host; no .git may be sent, got %d streams", len(streams))
 	}
 	if mentions(f.Calls(), "git reset") {
 		t.Error("the VM's index must be left alone")
@@ -151,15 +153,19 @@ func TestCopySyncKeepsTheVMsRepository(t *testing.T) {
 
 func TestCopySyncOfAPlainDirectorySendsNoGit(t *testing.T) {
 	f, _ := fakeHome(t)
+	guest := f.LocalGuest()
 	src := t.TempDir()
 	must(t, os.WriteFile(filepath.Join(src, "a.txt"), []byte("a"), 0o644))
 	cfg := project.Default()
 	cfg.Name = "gitsync"
-	if err := syncSource(context.Background(), cfg, src); err != nil {
+	if err := syncSource(context.Background(), cfg, src, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, streams := tarStreams(f.Calls(), f.Inputs()); len(streams) != 1 {
-		t.Fatalf("got %d streams, want only the working tree", len(streams))
+	if _, streams := tarStreams(f.Calls(), f.Inputs()); len(streams) != 0 {
+		t.Fatalf("got %d streams, want none", len(streams))
+	}
+	if b, _ := os.ReadFile(filepath.Join(guest, "workspace", "a.txt")); string(b) != "a" {
+		t.Errorf("a.txt in the VM: %q", b)
 	}
 }
 

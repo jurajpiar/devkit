@@ -1,0 +1,337 @@
+# devkit's copy sync, the VM's side. Runs as the sandbox user (and in
+# tests, on a Mac, with a temporary HOME), so it keeps to bash 3.2 and to
+# what BSD and GNU tools share.
+#
+# Arguments: workspace, pack ("" when the VM has every object), manifest,
+# the incoming snapshot's commit id, and 1 to take the Mac's version of the
+# files in conflict. Prints lines the Mac reads:
+#   devkit-conflict <path>   changed in the VM and by this snapshot
+#   devkit-kept <path>       differs from the snapshot after the sync
+#   devkit-skip <path>       a manifest entry left alone after the merge:
+#                            not a plain path in the workspace, through a
+#                            symlink, or something unexpected in the way
+#   devkit-refused <text>    git's reason the merge cannot be done
+#   devkit-error <text>
+#   devkit-synced <commit>
+# Paths are git's C-quoted form, one line each. Exits 3 on a conflict and
+# 4 on a refusal (something in the VM in the way of the Mac's changes),
+# having changed nothing in the workspace either way.
+set -u
+umask 022
+for v in $(compgen -e); do
+  case $v in GIT_* | LC_* | LANG) unset "$v" ;; esac
+done
+export LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+
+ws=$1 pack=$2 manifest=$3 incoming=$4 overwrite=$5
+repo=$HOME/.local/state/devkit/sync.git
+# The manifest last applied to the workspace: the VM's own record of the
+# directories and modes it made, to undo what the next one no longer has.
+applied=$repo/devkit-applied.manifest
+empty=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/devkit-sync.XXXXXX") || exit 1
+cleanup() {
+  rm -rf "$tmp"
+  if [ -n "$pack" ]; then rm -f "$pack"; fi
+  if [ -n "$manifest" ]; then rm -f "$manifest"; fi
+}
+trap cleanup EXIT
+fail() { echo "devkit-error $*"; exit 1; }
+# r is the private repository; g the same with the workspace as work tree.
+r() { git -c core.hooksPath=/dev/null --git-dir="$repo" "$@"; }
+g() { git -c core.hooksPath=/dev/null --git-dir="$repo" --work-tree="$ws" "$@"; }
+# t works on a scratch index, to compare files with the snapshot's
+# versions without touching the real one.
+t() { GIT_INDEX_FILE="$tmp/index" g "$@"; }
+# Sets of paths, C-quoted and one a line, so a line is a path. The first
+# file is read whole before the second, even when it is empty.
+#   both A B: the lines of B that are also in A
+#   pick A INFO / omit A INFO: the index-info lines of INFO whose path is,
+#   or is not, in A
+both() { awk 'BEGIN { while ((getline l < ARGV[1]) > 0) a[l]; ARGV[1] = "" } ($0 in a)' "$1" "$2"; }
+pick() { awk -F '\t' 'BEGIN { while ((getline l < ARGV[1]) > 0) a[l]; ARGV[1] = "" } ($2 in a)' "$1" "$2"; }
+omit() { awk -F '\t' 'BEGIN { while ((getline l < ARGV[1]) > 0) a[l]; ARGV[1] = "" } !($2 in a)' "$1" "$2"; }
+
+case $incoming in *[!0-9a-f]* | '') fail "not a commit id: $incoming" ;; esac
+[ ${#incoming} -eq 40 ] || fail "not a commit id: $incoming"
+
+if [ ! -f "$repo/HEAD" ]; then
+  mkdir -p "$repo" && git -c init.templateDir= init -q --bare --object-format=sha1 "$repo" >/dev/null ||
+    fail "could not create $repo"
+fi
+# Only plain files: no line endings, filters or encodings, whatever the
+# project's .gitattributes ask for. info/attributes outranks it.
+mkdir -p "$repo/info" &&
+  printf '* -text -eol -ident -filter -working-tree-encoding\n' >"$repo/info/attributes" || fail "could not write $repo/info/attributes"
+# A Linux work tree. The inode's change time is trusted: an edit that
+# keeps the size and puts the modification time back is still seen. A
+# change time that moved alone (the manifest's chmod) only makes the
+# refresh rehash that file.
+for kv in core.trustctime=true core.filemode=true core.symlinks=true core.ignorecase=false \
+  core.precomposeunicode=false core.protectNTFS=false core.protectHFS=false core.autocrlf=false \
+  core.quotePath=true core.untrackedCache=false core.fsmonitor=false core.splitIndex=false gc.auto=0; do
+  r config "${kv%%=*}" "${kv#*=}" || fail "could not configure $repo"
+done
+
+# A sync interrupted while git held the index leaves its lock behind, and
+# every later sync would fail on it. One older than ten minutes is stale.
+if [ -n "$(find "$repo/index.lock" -mmin +10 2>/dev/null)" ]; then
+  rm -f "$repo/index.lock"
+fi
+
+# A workspace that is gone starts again from nothing.
+if [ ! -d "$ws" ]; then
+  r update-ref -d refs/devkit/synced 2>/dev/null
+  mkdir -p "$ws" || fail "could not create $ws"
+fi
+cd "$ws" || fail "could not enter $ws"
+
+if [ -n "$pack" ]; then
+  r index-pack --stdin <"$pack" >/dev/null 2>"$tmp/err" || fail "could not take the snapshot: $(head -c 300 "$tmp/err" | tr '\n' ' ')"
+fi
+r cat-file -e "$incoming^{commit}" 2>/dev/null || fail "the snapshot $incoming did not arrive"
+
+synced=$(r rev-parse -q --verify 'refs/devkit/synced^{commit}' 2>/dev/null) || synced=
+if [ -z "$synced" ]; then
+  # First sync into this workspace: whatever is there is compared with
+  # the snapshot, nothing is assumed.
+  old=$empty
+  rm -f "$repo/index" "$applied"
+else
+  old=$synced
+  [ -f "$repo/index" ] || r read-tree "$old" || fail "could not read the last snapshot"
+fi
+
+# A timestamp alone must not count as a change.
+g update-index -q --refresh >/dev/null 2>&1
+
+# What the VM changed since the last snapshot (not counting deletions,
+# which the merge restores if the Mac changed the file), what the Mac
+# deleted and what it added.
+g diff-files --name-only --diff-filter=d >"$tmp/vm" || fail "could not compare the workspace"
+g diff-tree -r --no-renames --name-only --diff-filter=D "$old" "$incoming" >"$tmp/del" || fail "could not compare snapshots"
+g diff-tree -r --no-renames --name-only --diff-filter=A "$old" "$incoming" >"$tmp/add" || fail "could not compare snapshots"
+# Every path the Mac added or changed, as index entries of its new
+# version, compared with the workspace in a scratch index.
+g diff-tree -r --no-renames --diff-filter=d "$old" "$incoming" |
+  awk -F '\t' '{ split($1, f, " "); print f[2] " " f[4] "\t" $2 }' >"$tmp/new.info" || fail "could not compare snapshots"
+t update-index --index-info <"$tmp/new.info" || fail "could not compare the workspace"
+t update-index -q --refresh >/dev/null 2>&1
+t diff-files --name-status >"$tmp/cmp" || fail "could not compare the workspace"
+awk -F '\t' '$1 != "D" { print $2 }' "$tmp/cmp" >"$tmp/differ"   # there, and not the Mac's version
+awk -F '\t' '$1 == "D" { print $2 }' "$tmp/cmp" >"$tmp/missing"
+
+# In conflict: a file the VM changed that the Mac deleted; and a file the
+# Mac added or changed that is in the workspace, differs from the Mac's,
+# and is not simply the last snapshot's (changed in the VM, or never part
+# of a snapshot). A file already equal to the Mac's version is not.
+both "$tmp/vm" "$tmp/del" >"$tmp/c-del"
+cat "$tmp/vm" "$tmp/add" >"$tmp/vm+add"
+both "$tmp/vm+add" "$tmp/differ" >"$tmp/c-new"
+cat "$tmp/c-del" "$tmp/c-new" | sort -u >"$tmp/conflicts"
+
+# Rehearse the merge before anything is changed: git checks every path
+# (a directory in the way of a file, a file in the way of a directory)
+# and, as a dry run, writes nothing. It runs on a scratch copy of the
+# index, prepared as the real one will be below, so the answer is the one
+# the real merge will give, and a refusal leaves the index and the
+# workspace exactly as they were.
+if [ -f "$repo/index" ]; then cp "$repo/index" "$tmp/rehearsal" || fail "could not copy the index"; fi
+h() { GIT_INDEX_FILE="$tmp/rehearsal" g "$@"; }
+rold=$old
+# The files in conflict are rehearsed as --overwrite leaves them, with or
+# without it, so what is in the way is found either way and reported
+# together with them.
+if [ -s "$tmp/conflicts" ]; then
+  # Files the Mac adds or changes get its version in the index, as below.
+  if [ -s "$tmp/c-new" ]; then
+    pick "$tmp/c-new" "$tmp/new.info" | h update-index --index-info || fail "could not rehearse the sync"
+  fi
+  # Files the Mac deleted are put back to the last snapshot's version
+  # below, then deleted by the merge. Without touching them, the same is
+  # rehearsed by letting the VM's version stand in for the last
+  # snapshot's, in the index and in the old tree alike: the merge then
+  # sees an unchanged file it may delete, as it will.
+  if [ -s "$tmp/c-del" ]; then
+    h update-index --add --stdin <"$tmp/c-del" &&
+      GIT_INDEX_FILE="$tmp/old-index" g read-tree "$old" &&
+      GIT_INDEX_FILE="$tmp/old-index" g update-index --add --stdin <"$tmp/c-del" &&
+      rold=$(GIT_INDEX_FILE="$tmp/old-index" g write-tree) || fail "could not rehearse the sync"
+  fi
+fi
+cat "$tmp/differ" "$tmp/missing" >"$tmp/not-same"
+omit "$tmp/not-same" "$tmp/new.info" | h update-index --index-info || fail "could not rehearse the sync"
+h update-index -q --refresh >/dev/null 2>&1
+if ! h read-tree -m -u -n "$rold" "$incoming" 2>"$tmp/err"; then
+  sed 's/^/devkit-conflict /' "$tmp/conflicts"
+  head -n 20 "$tmp/err" | sed 's/^/devkit-refused /'
+  exit 4
+fi
+# Empty directories exist only in the manifest, so the rehearsal cannot
+# see what is in their way. Each directory to be made, and every directory
+# above it, must be free or a directory already, or be a file or symlink
+# the merge removes (one the last snapshot had and the Mac deleted; one the
+# VM changed is in conflict and, as above, counted as --overwrite leaves
+# it). Paths are raw here, so git is asked about each by name rather than
+# matched against its quoted lists.
+blocks() {
+  local rest=$1 part cur=
+  case $rest in '' | /* | */) return 1 ;; esac
+  while :; do
+    case $rest in
+      */*) part=${rest%%/*} rest=${rest#*/} ;;
+      *) part=$rest rest= ;;
+    esac
+    case $part in '' | . | .. | [.][gG][iI][tT]) return 1 ;; esac
+    cur=${cur:+$cur/}$part
+    if [ -L "$cur" ] || { [ -e "$cur" ] && [ ! -d "$cur" ]; }; then
+      # The merge removes it only if the last snapshot had a file or
+      # symlink at exactly this path and the new one has none there.
+      # <tree>:<path> names that one entry, never what is below it, and
+      # takes the raw path as it is (no component is . or ..).
+      if [ "$(r cat-file -t "$rold:$cur" 2>/dev/null)" = blob ] &&
+        [ "$(r cat-file -t "$incoming:$cur" 2>/dev/null)" != blob ]; then
+        return 1 # nothing below it exists either
+      fi
+      blocked=$cur
+      return 0
+    fi
+    [ -z "$rest" ] && return 1
+  done
+}
+if [ -n "$manifest" ]; then
+  : >"$tmp/blocked"
+  while IFS= read -r -d '' rec; do
+    [ "${rec:0:1}" = d ] || continue
+    if blocks "${rec:6}"; then
+      printf "devkit-refused %q is in the way of a directory this Mac adds\n" "$blocked" >>"$tmp/blocked"
+    fi
+  done <"$manifest"
+  if [ -s "$tmp/blocked" ]; then
+    sed 's/^/devkit-conflict /' "$tmp/conflicts"
+    sort -u "$tmp/blocked" | head -n 20
+    exit 4
+  fi
+fi
+
+if [ -s "$tmp/conflicts" ] && [ "$overwrite" != 1 ]; then
+  sed 's/^/devkit-conflict /' "$tmp/conflicts"
+  exit 3
+fi
+
+if [ "$overwrite" = 1 ]; then
+  # The Mac's version of exactly these: back to the last snapshot's for
+  # the merge to delete, or the Mac's own version written now.
+  if [ -s "$tmp/c-del" ]; then
+    g checkout-index -f -u --stdin <"$tmp/c-del" || fail "could not reset the files in conflict"
+  fi
+  if [ -s "$tmp/c-new" ]; then
+    pick "$tmp/c-new" "$tmp/new.info" | g update-index --index-info &&
+      g checkout-index -f -u --stdin <"$tmp/c-new" || fail "could not reset the files in conflict"
+  fi
+fi
+# Files already as the Mac has them are taken as they are, so the merge
+# does not refuse to overwrite them and nothing is rewritten.
+omit "$tmp/not-same" "$tmp/new.info" | g update-index --index-info ||
+  fail "could not record the files that already match"
+g update-index -q --refresh >/dev/null 2>&1
+
+if ! g read-tree -m -u "$old" "$incoming" 2>"$tmp/err"; then
+  head -n 20 "$tmp/err" | sed 's/^/devkit-error /'
+  exit 1
+fi
+r update-ref refs/devkit/synced "$incoming" || fail "could not record the snapshot"
+
+# inside P: P is a relative path in the workspace (the current directory)
+# with no ., .., empty or .git component, and nothing on the way to it,
+# itself included, is a symlink, so nothing below acts outside the
+# workspace.
+inside() {
+  local rest=$1 part cur=
+  case $rest in '' | /* | */) return 1 ;; esac
+  while :; do
+    case $rest in
+      */*) part=${rest%%/*} rest=${rest#*/} ;;
+      *) part=$rest rest= ;;
+    esac
+    case $part in '' | . | .. | [.][gG][iI][tT]) return 1 ;; esac
+    cur=${cur:+$cur/}$part
+    [ -L "$cur" ] && return 1
+    [ -z "$rest" ] && return 0
+  done
+}
+# What git cannot carry: directories, empty ones too, and modes.
+if [ -n "$manifest" ]; then
+  while IFS= read -r -d '' rec; do
+    kind=${rec:0:1} mode=${rec:1:4} p=${rec:6}
+    case $mode in [0-7][0-7][0-7][0-7]) ;; *) kind=bad ;; esac
+    if [ "${rec:5:1}" != " " ] || ! inside "$p"; then
+      printf 'devkit-skip %q\n' "$p"
+      continue
+    fi
+    case $kind in
+      d) { [ -d "$p" ] || mkdir -p -- "$p"; } && chmod -- "$mode" "$p" || printf 'devkit-skip %q\n' "$p" ;;
+      f) if [ -f "$p" ]; then chmod -- "$mode" "$p" || printf 'devkit-skip %q\n' "$p"; fi ;;
+      *) printf 'devkit-skip %q\n' "$p" ;;
+    esac
+  done <"$manifest"
+
+  # Undo what the last applied manifest had and this one has not: empty
+  # directories that went away, deepest first, and files whose odd mode
+  # went back to git's. Each record becomes a line, its kind and path in
+  # hex, so the two manifests are compared by awk in one pass whatever
+  # bytes the paths hold; then the old records are read again, raw, beside
+  # one flag line each. The cost is linear in the size of the manifests.
+  keys() {
+    od -An -v -tx1 "$1" | awk '{
+      for (i = 1; i <= NF; i++) {
+        if ($i == "00") { print k; k = ""; n = 0 }
+        else { n++; if (n == 1) k = $i; else if (n >= 7) k = k $i }
+      }
+    }'
+  }
+  if [ -f "$applied" ]; then
+    keys "$manifest" >"$tmp/new.keys" && keys "$applied" >"$tmp/old.keys" &&
+      awk 'BEGIN { while ((getline l < ARGV[1]) > 0) a[l]; ARGV[1] = "" } { print (($0 in a) ? 0 : 1) }' \
+        "$tmp/new.keys" "$tmp/old.keys" >"$tmp/gone" || fail "could not compare manifests"
+    ngone=0
+    while IFS= read -r -d '' rec && IFS= read -r flag <&3; do
+      [ "$flag" = 1 ] || continue
+      # The VM's own file, but checked as the Mac's records are.
+      p=${rec:6}
+      if [ "${rec:5:1}" != " " ] || ! inside "$p"; then continue; fi
+      case ${rec:0:1} in
+        d) gone[ngone]=$p ngone=$((ngone + 1)) ;;
+        f)
+          if [ -f "$p" ]; then
+            # Back to git's mode for this path, from its index entry.
+            e=
+            IFS= read -r -d '' e < <(GIT_LITERAL_PATHSPECS=1 g ls-files -s -z -- "$p")
+            if [ "${e#*$'\t'}" = "$p" ]; then
+              case ${e%% *} in
+                100755) chmod -- 0755 "$p" ;;
+                100644) chmod -- 0644 "$p" ;;
+              esac
+            fi
+          fi
+          ;;
+      esac
+    done <"$applied" 3<"$tmp/gone"
+    # Parents come before children in a manifest: removed in reverse.
+    while [ "$ngone" -gt 0 ]; do
+      ngone=$((ngone - 1))
+      if [ -d "${gone[ngone]}" ]; then rmdir -- "${gone[ngone]}" 2>/dev/null; fi
+    done
+  fi
+  cp "$manifest" "$repo/.applied.tmp" && mv -f "$repo/.applied.tmp" "$applied" ||
+    fail "could not record the manifest"
+fi
+
+g update-index -q --refresh >/dev/null 2>&1
+g diff-files --name-only | sed 's/^/devkit-kept /'
+# One snapshot is kept: what the last one had and this one does not goes.
+if [ -n "$pack" ]; then
+  r repack -a -d -q >/dev/null 2>&1 && r prune --expire=now >/dev/null 2>&1
+fi
+echo "devkit-synced $incoming"

@@ -41,7 +41,8 @@ const (
 const DefaultFile = "devkit.yaml"
 
 // LockDir is reserved beside devkit.yaml for host-side state and is never
-// copied into the VM. devkit writes nothing there today.
+// copied into the VM. devkit clone keeps its bare repository there; for a
+// copied project devkit writes nothing there.
 const LockDir = ".devkit"
 
 // Config is the parsed devkit.yaml.

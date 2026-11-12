@@ -237,7 +237,7 @@ network:
 
 | `source` | What happens | Notes |
 |---|---|---|
-| `copy` | The directory is copied into the VM on `up` and `sync` | Default. Sync does not copy VM changes back to your working tree. A git checkout gets a `.git` like a fresh clone's, see below. |
+| `copy` | The directory is synced into the VM on `up` and `sync`: what changed on the Mac arrives, what changed in the VM is kept | Default. Nothing is copied back to your working tree. A git checkout gets a `.git` like a fresh clone's, see below. |
 | `git` | `devkit clone <url>` creates a bare clone on the Mac; the VM checks out the files | Supports private repositories. `sync` fetches on the Mac and fast-forwards the VM. |
 | `mount` | The directory is mounted read-only | Opt in. `mount_writable: true` lets the sandbox edit your files. |
 
@@ -258,6 +258,35 @@ Uncommitted changes arrive as working-tree changes. You can use `git status`,
 `git diff` and `git commit`, and run tools such as husky inside the VM. Later
 syncs preserve the VM's repository because it may contain new commits. Files in
 the copied commit are included even if `exclude` names them.
+
+Each sync records the directory, exactly as `tar` with your `exclude` list
+sends it, as a snapshot in a private repository in `~/.devkit/<vm>/sync.git`,
+never your own repository and never in the project directory, which gains
+nothing; `devkit rm` deletes it with the VM. The VM merges the change
+from the last snapshot it took, the way `git checkout` carries local edits
+across a branch switch:
+
+- A file changed only on the Mac is updated, or deleted if you deleted it.
+- A file changed only in the VM is kept, committed or not, and `sync` lists
+  it. So is anything the VM made that the Mac does not have, such as
+  `node_modules` or build output.
+- A file changed on both sides, or a file the Mac adds where the VM already
+  made a different one, stops the sync: nothing is applied and the files are
+  listed. `devkit sync --overwrite` takes the Mac's version of exactly those
+  files. `devkit up` reports the same and comes up without syncing.
+- Something in the VM in the way of the Mac's changes, such as a directory
+  where the Mac now has a file, also stops the sync, with git's reason and
+  nothing applied. Move it in the VM and sync again; `--overwrite` does not
+  cover this.
+
+Only what the VM lacks is sent. Bytes are copied as they are on disk: no
+`.gitattributes`, filters or line-ending conversion apply, on either side,
+and none of your git config or hooks are used. Modes, symlinks and empty
+directories follow the Mac. Unchanged files are not rewritten; a changed file
+gets the time of the sync. Named pipes and device files are not copied and
+are reported. The project's own repository in the VM is a separate matter:
+the sync never touches it, so after a sync it sees the Mac's changes as
+uncommitted changes.
 
 ### Cloning a repository
 
@@ -477,7 +506,7 @@ Hardhat and Foundry verify; install Foundry with `install:` and pin its version.
 | `devkit init [repo-url]` | Write `devkit.yaml`. Flags: `--name`, `--toolchain`, `--node`, `--network`, `--force` |
 | `devkit up` | Create or start the VM, sync source, install toolchains and dependencies. Flags: `--network`, `--no-sync`, `--no-install`, `--relock`, `--no-security-updates` |
 | `devkit shell [cmd]` | Shell in the VM, or run a command |
-| `devkit sync` | Copy the directory again; for a cloned project, fetch upstream on the Mac and fast-forward the VM |
+| `devkit sync` | Bring the Mac's changes in and keep the VM's; stops if a file changed on both sides (`--overwrite` takes the Mac's). For a cloned project, fetch upstream on the Mac and fast-forward the VM |
 | `devkit push [branch]` | Review commits made in the VM and push them from your Mac with your own credentials. Flags: `--remote`, `--to`, `--yes`, `--force-with-lease` |
 | `devkit logs [-f] [-n N]` | Egress audit log; under `network.enforce: host`, the host proxy's log on the Mac |
 | `devkit connect` | IDE connection instructions |

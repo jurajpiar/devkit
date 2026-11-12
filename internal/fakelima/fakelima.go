@@ -72,6 +72,23 @@ case "$1" in
         tail -n +3 "$f"; exit "$code" ;;
       esac
     done
+    # A VM that applies every copy sync it is sent, without doing so.
+    if [ -f "$d/accept-copysync" ]; then
+      case "$cmd" in *"devkit-sync \""*)
+        c="$(printf '%s\n' "$cmd" | sed -n "s/.*'\([0-9a-f]\{40\}\)' [01]; echo devkit-exit=.*/\1/p" | tail -n 1)"
+        printf 'devkit-synced %s\ndevkit-exit=0\n' "$c"; exit 0 ;;
+      esac
+    fi
+    # A local guest runs what no rule answered, in bash, with its
+    # directory as HOME; a tar stream saved above is its input.
+    if [ -f "$d/guest" ]; then
+      in=/dev/null
+      [ -n "${n:-}" ] && in="$d/stdin.$n"
+      HOME="$(cat "$d/guest")" bash -c "$cmd" < "$in"; exit $?
+    fi
+    exit 0 ;;
+  copy)
+    if [ -f "$d/guest" ]; then cp "$2" "${3#*:}" || exit 1; fi
     exit 0 ;;
 esac
 exit 0
@@ -120,6 +137,30 @@ func (f *Fake) OnShell(pattern, out string, code int) {
 	f.n++
 	body := fmt.Sprintf("%s\n%d\n%s", pattern, code, out)
 	if err := os.WriteFile(filepath.Join(f.dir, "shell.d", fmt.Sprintf("%03d", f.n)), []byte(body), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// LocalGuest makes the fake a VM made of a local directory, which it
+// returns: "shell" commands that no OnShell rule answers run in bash with
+// that directory as HOME (and a tar stream as their input), and "copy"
+// copies the file to the destination path as given. It replaces
+// AcceptCopySync: the guest applies copy syncs itself.
+func (f *Fake) LocalGuest() string {
+	f.t.Helper()
+	os.Remove(filepath.Join(f.dir, "accept-copysync"))
+	home := f.t.TempDir()
+	if err := os.WriteFile(filepath.Join(f.dir, "guest"), []byte(home), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	return home
+}
+
+// AcceptCopySync makes the fake confirm every copy sync script it is
+// sent, as a VM that applied the snapshot would, without applying it.
+func (f *Fake) AcceptCopySync() {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.dir, "accept-copysync"), nil, 0o644); err != nil {
 		f.t.Fatal(err)
 	}
 }

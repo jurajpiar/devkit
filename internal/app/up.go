@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -185,8 +186,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	noSync, _ := cmd.Flags().GetBool("no-sync")
+	// A workspace that cannot be synced because files changed on both
+	// sides does not stop the VM coming up: it is reported now and again
+	// at the end.
+	var notSynced *notSyncedError
 	if !noSync {
-		if err := syncSource(ctx, cfg, cwd); err != nil {
+		if err := syncSource(ctx, cfg, cwd, false); errors.As(err, &notSynced) {
+			fmt.Printf("Warning: %v\n", notSynced)
+		} else if err != nil {
 			return err
 		}
 	}
@@ -225,6 +232,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Shell:   devkit shell\n")
 	fmt.Printf("  IDE:     ssh %s   (VS Code / Cursor Remote-SSH, folder ~/%s)\n", cfg.SSHHost(), provision.WorkspaceDir)
 	fmt.Printf("  Audit:   devkit logs\n")
+	if notSynced != nil {
+		fmt.Printf("\nThe workspace was NOT synced (see above). %s\n", notSynced.remedy())
+	}
 	return nil
 }
 
@@ -270,17 +280,16 @@ func waitForService(ctx context.Context, name string) error {
 	return fmt.Errorf("egress proxy did not start inside the VM:\n%s", out)
 }
 
-// syncSource puts the project code into ~/workspace in the VM.
-func syncSource(ctx context.Context, cfg *project.Config, cwd string) error {
+// syncSource puts the project code into ~/workspace in the VM. overwrite,
+// for a copied project only, takes this Mac's version of files changed on
+// both sides; without it such files make the sync return a
+// *notSyncedError, having changed nothing.
+func syncSource(ctx context.Context, cfg *project.Config, cwd string, overwrite bool) error {
 	name := cfg.VMName()
 	ws := "$HOME/" + provision.WorkspaceDir
 	switch cfg.Source {
 	case project.SourceCopy:
-		fmt.Printf("Copying %s into the VM\n", cwd)
-		if err := lima.PipeTar(ctx, name, cwd, ws, cfg.Exclude); err != nil {
-			return err
-		}
-		return syncGit(ctx, name, cwd, ws, false, cfg.Exclude)
+		return syncCopy(ctx, cfg, cwd, ws, overwrite)
 	case project.SourceGit:
 		if isDir(bareRepo(cwd)) {
 			return syncGit(ctx, name, bareRepo(cwd), ws, true, nil)

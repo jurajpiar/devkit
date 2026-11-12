@@ -162,26 +162,30 @@ connect` prints the steps); its terminal, language server and extensions then
 run in the VM too.
 
 In A you have two copies, and devkit copies one way only, from your Mac into
-the VM. So choose a side and stay on it:
+the VM. You can edit on either side. `devkit sync` (and `devkit up`) brings
+in what changed on your Mac since the last sync, deletes what you deleted
+there, and keeps what you changed in the VM:
 
-- **Edit on your Mac, run in the VM.** The simplest. After a change,
-  `devkit sync` copies the directory in again, and you run the tests there:
+```console
+$ devkit sync
+Syncing /Users/you/code/example-repo into the VM
+Kept the VM's own changes, which now differ from this Mac: internal/config/config.go
+Keeping the VM's own git repository
+$ devkit shell go test ./...
+```
 
-  ```console
-  $ devkit sync
-  Copying /Users/you/code/example-repo into the VM
-  Keeping the VM's own git repository
-  $ devkit shell go test ./...
-  ```
+If the same file changed on both sides since the last sync, `sync` changes
+nothing, lists the files and stops. Run `devkit sync --overwrite` to take
+your Mac's version of exactly those files; the VM's other changes stay. To
+keep the VM's version, commit it in the VM or copy it out first. If
+something in the VM is in the way of the Mac's change, such as a directory
+where your Mac now has a file, `sync` says so and changes nothing: move it
+in the VM and sync again.
 
-  You commit and push on your Mac as you always have.
-
-- **Edit in the VM**, over Remote-SSH, as in B. Then stop syncing: `devkit
-  sync`, and a plain `devkit up`, replace every file in the VM that also
-  exists on your Mac with the Mac's copy. An uncommitted edit in the VM is
-  gone; a committed one is still in the VM's git (`git checkout -- <file>`
-  brings it back). Use `devkit up --no-sync` when you change `devkit.yaml`,
-  and get your work out with `devkit push` (step 5).
+Editing on your Mac means editing only: the project's tests, builds and
+installs run in the VM (habit 1). Nothing comes back the other way. Commit
+and push on your Mac what you did there, as you always have; get work done
+in the VM out with `devkit push` (step 5).
 
 **Ports.** A web app the project serves is not forwarded to your Mac by
 devkit until you list its port: add `forward: [3000]` under `network` and run
@@ -216,7 +220,7 @@ firewall and is not listed.
 Read it after an install. A dependency that reaches for a host you did not
 expect is the thing to notice, whether it was allowed or blocked. When a
 build genuinely needs another host, add it to `network.allow` and run
-`devkit up` (in A, `devkit up --no-sync` if you edit in the VM); the change
+`devkit up`; the change
 is one line you can see in a diff. To watch the sandbox refuse a fuller set
 of escape attempts, run `examples/hostile-project`.
 
@@ -284,9 +288,10 @@ To push to your fork rather than the upstream, add the remote on the Mac
 
 ## 6. Keep up with upstream
 
-**A:** pull on your Mac, then copy the result in: `git pull && devkit sync`.
-Mind the rule from step 4 if you edit in the VM, and the third habit below
-if the commits you are pulling came from the VM.
+**A:** pull on your Mac, then bring the result in: `git pull && devkit sync`.
+If the pull changed a file you also changed in the VM, `sync` stops and
+says which (step 4). Mind the third habit below if the commits you are
+pulling came from the VM.
 
 **B:** your Mac fetches and hands the new commits to the VM, which never
 talks to the remote itself.
@@ -360,7 +365,8 @@ across yourself.
 5. **Add hosts one at a time,** and only ones you would trust with the
    project's source: an allowed host is also somewhere data can go.
 6. **Read `devkit logs` after installs,** and `devkit audit` now and then.
-7. **In A, edit on one side.** `devkit sync` overwrites the VM from the Mac.
+7. **In A, read what `devkit sync` says.** It keeps your VM edits and stops
+   when a file changed on both sides; `--overwrite` takes the Mac's version.
 8. **Delete VMs freely.** They are meant to be disposable.
 
 What each control does and does not guarantee is in

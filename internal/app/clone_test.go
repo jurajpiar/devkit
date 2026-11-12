@@ -147,7 +147,7 @@ func TestGitSourceDeliversTheCloneToTheVM(t *testing.T) {
 	cfg, err := project.Load(filepath.Join(dir, "devkit.yaml"))
 	must(t, err)
 	f.Reset()
-	if err := syncSource(context.Background(), cfg, dir); err != nil {
+	if err := syncSource(context.Background(), cfg, dir, false); err != nil {
 		t.Fatal(err)
 	}
 	calls := f.Calls()
