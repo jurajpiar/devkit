@@ -984,3 +984,38 @@ func TestCopySyncEmptiedDirectoryInTheWay(t *testing.T) {
 		})
 	}
 }
+
+// An edit in the VM that keeps the size and puts the time back is still a
+// change: the inode's change time gives it away, so the Mac's edit to the
+// same file is a conflict and the VM's bytes stay.
+func TestCopySyncSeesAnEditThatKeepsSizeAndTime(t *testing.T) {
+	f := newCopyFixture(t)
+	put(t, filepath.Join(f.mac, "a.txt"), "aaaa\n")
+	put(t, filepath.Join(f.mac, "key"), "k\n")
+	chmod(t, filepath.Join(f.mac, "key"), 0o600)
+	f.mustSync()
+	// An old time, recorded by a sync that changes nothing, so the index
+	// entry is not "racy" and git trusts its stat data.
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	must(t, os.Chtimes(f.vm.ws("a.txt"), old, old))
+	if res := f.mustSync(); len(res.Kept) != 0 {
+		t.Fatalf("a time alone, or the manifest's chmod, is not a change: kept %q", res.Kept)
+	}
+	// git may keep the change time in whole seconds: the edit must fall in
+	// a later second than the one the index recorded.
+	time.Sleep(1100 * time.Millisecond)
+	// In place: same inode, same size, the old time put back.
+	fh, err := os.OpenFile(f.vm.ws("a.txt"), os.O_WRONLY, 0)
+	must(t, err)
+	_, err = fh.WriteString("bbbb\n")
+	must(t, err)
+	must(t, fh.Close())
+	must(t, os.Chtimes(f.vm.ws("a.txt"), old, old))
+
+	put(t, filepath.Join(f.mac, "a.txt"), "cccc\n")
+	res := f.sync(false)
+	if res.Synced || strings.Join(res.Conflicts, ",") != "a.txt" {
+		t.Fatalf("want a conflict on a.txt, got %+v", res)
+	}
+	f.wantVM("a.txt", "bbbb\n")
+}

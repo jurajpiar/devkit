@@ -61,8 +61,11 @@ fi
 # project's .gitattributes ask for. info/attributes outranks it.
 mkdir -p "$repo/info" &&
   printf '* -text -eol -ident -filter -working-tree-encoding\n' >"$repo/info/attributes" || fail "could not write $repo/info/attributes"
-# A Linux work tree; a changed inode time alone is not a change.
-for kv in core.trustctime=false core.filemode=true core.symlinks=true core.ignorecase=false \
+# A Linux work tree. The inode's change time is trusted: an edit that
+# keeps the size and puts the modification time back is still seen. A
+# change time that moved alone (the manifest's chmod) only makes the
+# refresh rehash that file.
+for kv in core.trustctime=true core.filemode=true core.symlinks=true core.ignorecase=false \
   core.precomposeunicode=false core.protectNTFS=false core.protectHFS=false core.autocrlf=false \
   core.quotePath=true core.untrackedCache=false core.fsmonitor=false core.splitIndex=false gc.auto=0; do
   r config "${kv%%=*}" "${kv#*=}" || fail "could not configure $repo"
