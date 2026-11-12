@@ -946,3 +946,41 @@ func TestCopySyncCleansUpWhenTheScriptDidNotRun(t *testing.T) {
 		})
 	}
 }
+
+// The Mac deleting dir/child while keeping dir (now empty) does not make
+// the merge remove whatever the VM put at dir: a symlink or file there is
+// in the way.
+func TestCopySyncEmptiedDirectoryInTheWay(t *testing.T) {
+	for _, symlink := range []bool{true, false} {
+		t.Run(fmt.Sprintf("symlink %v", symlink), func(t *testing.T) {
+			f := newCopyFixture(t)
+			put(t, filepath.Join(f.mac, "dir/child"), "c\n")
+			put(t, filepath.Join(f.mac, "keep.txt"), "k\n")
+			f.mustSync()
+			must(t, os.RemoveAll(f.vm.ws("dir")))
+			if symlink {
+				must(t, os.Symlink(t.TempDir(), f.vm.ws("dir")))
+			} else {
+				put(t, f.vm.ws("dir"), "the VM's\n")
+			}
+			must(t, os.Remove(filepath.Join(f.mac, "dir/child")))
+			put(t, filepath.Join(f.mac, "late.txt"), "late\n")
+			before := workspaceState(t, f.vm.ws(""))
+			index := read(t, filepath.Join(f.vm.vmRepo(), "index"))
+			mac, vm := f.syncedCommit(), f.vmSynced()
+			res := f.sync(false)
+			// A file there is refused by git's own rehearsal (dir/child
+			// cannot be checked through it); a symlink only by the
+			// manifest's preflight.
+			if res.Synced || !strings.Contains(strings.Join(res.Refused, "\n"), "dir") {
+				t.Fatalf("want a refusal naming dir, got %+v", res)
+			}
+			if workspaceState(t, f.vm.ws("")) != before || read(t, filepath.Join(f.vm.vmRepo(), "index")) != index {
+				t.Error("a refused sync changed the workspace or the index")
+			}
+			if f.syncedCommit() != mac || f.vmSynced() != vm {
+				t.Error("a refused sync moved a record")
+			}
+		})
+	}
+}

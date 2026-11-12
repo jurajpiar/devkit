@@ -167,8 +167,8 @@ fi
 # above it, must be free or a directory already, or be a file or symlink
 # the merge removes (one the last snapshot had and the Mac deleted; one the
 # VM changed is in conflict and, as above, counted as --overwrite leaves
-# it). Paths are raw here, so git is asked about each with a literal
-# pathspec rather than matched against its quoted lists.
+# it). Paths are raw here, so git is asked about each by name rather than
+# matched against its quoted lists.
 blocks() {
   local rest=$1 part cur=
   case $rest in '' | /* | */) return 1 ;; esac
@@ -180,8 +180,13 @@ blocks() {
     case $part in '' | . | .. | [.][gG][iI][tT]) return 1 ;; esac
     cur=${cur:+$cur/}$part
     if [ -L "$cur" ] || { [ -e "$cur" ] && [ ! -d "$cur" ]; }; then
-      if [ -n "$(GIT_LITERAL_PATHSPECS=1 g diff-tree -r --name-only --diff-filter=D "$old" "$incoming" -- "$cur")" ]; then
-        return 1 # the merge removes it, and nothing below it exists
+      # The merge removes it only if the last snapshot had a file or
+      # symlink at exactly this path and the new one has none there.
+      # <tree>:<path> names that one entry, never what is below it, and
+      # takes the raw path as it is (no component is . or ..).
+      if [ "$(r cat-file -t "$rold:$cur" 2>/dev/null)" = blob ] &&
+        [ "$(r cat-file -t "$incoming:$cur" 2>/dev/null)" != blob ]; then
+        return 1 # nothing below it exists either
       fi
       blocked=$cur
       return 0
