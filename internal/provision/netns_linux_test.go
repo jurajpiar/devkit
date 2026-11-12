@@ -84,6 +84,24 @@ func TestNetnsFirewall(t *testing.T) {
 		n.expectNoRide(t, "root", "the sandbox cannot ride root's tracked DNS flow during the hold")
 	})
 
+	// tools.containers: docker. Docker's account carries its containers'
+	// traffic, so the hold covers it as well.
+	t.Run("boot hold with docker", func(t *testing.T) {
+		n.applyHoldFrom(t, dockerParams(nil))
+		n.expect(t, "docker", "tcp", "10.231.0.3", 443, false, "Docker's account during the hold")
+		n.expect(t, "docker", "tcp", "127.0.0.1", 7777, false, "Docker's account to loopback during the hold (the proxy)")
+		n.expect(t, "sandbox", "tcp", "10.231.0.3", 443, false, "the sandbox during the hold")
+		n.expect(t, "root", "tcp", "10.231.0.3", 443, true, "root keeps its downloads during the hold")
+	})
+
+	t.Run("docker account after the firewall", func(t *testing.T) {
+		n.applyFirewall(t, "allowlist", 0, "proxy")
+		n.expect(t, "docker", "tcp", "10.231.0.3", 443, false, "Docker's account direct to the internet")
+		n.expect(t, "docker", "udp", "10.231.0.2", 53, false, "Docker's account's DNS")
+		n.expect(t, "docker", "tcp", "10.231.0.2", 22, false, "Docker's account to the Mac")
+		n.expect(t, "docker", "tcp", "127.0.0.1", 7777, true, "Docker's account to loopback, where the proxy listens")
+	})
+
 	// network.enforce: host. The Mac's service on 5432 stands in for the
 	// host proxy: the proxy's account may reach it and nothing else.
 	t.Run("host enforcement", func(t *testing.T) {
@@ -141,7 +159,8 @@ func newNetns(t *testing.T) *netns {
 	// proxy's account by its real name, which the firewall matches on.
 	ensureUser(t, "dkt-sandbox", false)
 	ensureUser(t, "devkit-proxy", true)
-	for role, name := range map[string]string{"sandbox": "dkt-sandbox", "proxy": "devkit-proxy", "resolved": "systemd-resolve"} {
+	ensureUser(t, "dkt-docker", true)
+	for role, name := range map[string]string{"sandbox": "dkt-sandbox", "proxy": "devkit-proxy", "resolved": "systemd-resolve", "docker": "dkt-docker"} {
 		if u, err := user.Lookup(name); err == nil {
 			n.uids[role], n.gids[role] = u.Uid, u.Gid
 		}
@@ -330,7 +349,13 @@ func (n *netns) applyFirewallFrom(t *testing.T, s, confBody string) {
 
 func (n *netns) applyHold(t *testing.T) {
 	t.Helper()
-	s, err := System(params(func(c *project.Config) {}))
+	n.applyHoldFrom(t, params(func(c *project.Config) {}))
+}
+
+// applyHoldFrom runs the boot-hold generator of p's system script.
+func (n *netns) applyHoldFrom(t *testing.T, p Params) {
+	t.Helper()
+	s, err := System(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +371,7 @@ func (n *netns) applyHold(t *testing.T) {
 		t.Fatal("the generator no longer writes /usr/local/sbin/devkit-boot-hold; update this test")
 	}
 	hold := filepath.Join(n.dir, "hold.sh")
-	gen := "set -euo pipefail\nDEVKIT_USER=dkt-sandbox\nSANDBOX_UID=" + n.uids["sandbox"] + "\n" +
+	gen := "set -euo pipefail\nDEVKIT_USER=dkt-sandbox\nSANDBOX_UID=" + n.uids["sandbox"] + "\nDOCKER_UID=" + n.uids["docker"] + "\n" +
 		strings.ReplaceAll(body, "/usr/local/sbin/devkit-boot-hold", hold)
 	genPath := filepath.Join(n.dir, "hold-gen.sh")
 	os.WriteFile(genPath, []byte(gen), 0o755)

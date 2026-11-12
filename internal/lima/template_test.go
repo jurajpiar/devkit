@@ -102,3 +102,28 @@ func TestRenderMount(t *testing.T) {
 		t.Errorf("mount not rendered read-only:\n%s", out)
 	}
 }
+
+// Lima's own rootless containerd is for containers: true only. With docker
+// the daemon is devkit's, under an account of its own.
+func TestContainerdOnlyForContainersTrue(t *testing.T) {
+	for v, want := range map[project.Containers]bool{
+		project.ContainersOff:        false,
+		project.ContainersContainerd: true,
+		project.ContainersDocker:     false,
+	} {
+		c := project.Default()
+		c.Name = "demo"
+		c.Tools.Containers = v
+		out, err := Render(TemplateInput{Config: c, User: "alice", HostDir: "/Users/alice/demo", EgressSHA256: "deadbeef"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("%q: rendered config is not valid YAML: %v", v, err)
+		}
+		if got := doc["containerd"].(map[string]any)["user"]; got != want {
+			t.Errorf("containers %q: containerd.user = %v, want %v", v, got, want)
+		}
+	}
+}

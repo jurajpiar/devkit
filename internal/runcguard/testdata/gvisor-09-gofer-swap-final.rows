@@ -1,0 +1,9 @@
+# Copied verbatim from spikes/gvisor/results/09-gofer-timing.log, lines 98-103:
+# the same gofer 5 ms after create: final.
+# Each row is "fstype root at mountpoint"; the recorder kept no devices.
+      overlay / at /
+      ext4 /home/jurajpiar.guest/workspace at /w
+      ext4 /var/lib/devkit-docker/run at /s
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/a8cb54ed3a84308a682808c5b67e6987c3756a48096fe78bd1ece772df8883e3/resolv.conf at /etc/resolv.conf
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/a8cb54ed3a84308a682808c5b67e6987c3756a48096fe78bd1ece772df8883e3/hostname at /etc/hostname
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/a8cb54ed3a84308a682808c5b67e6987c3756a48096fe78bd1ece772df8883e3/hosts at /etc/hosts

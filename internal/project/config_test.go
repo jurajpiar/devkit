@@ -1,6 +1,7 @@
 package project
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ func TestDefaults(t *testing.T) {
 	if len(c.Network.Allow) == 0 || len(c.Exclude) == 0 {
 		t.Fatal("allowlist and exclude seeds should not be empty")
 	}
-	if c.Sudo || c.Tools.Containers || c.Network.AllowHost {
+	if c.Sudo || c.Tools.Containers.Enabled() || c.Network.AllowHost {
 		t.Fatal("privileged options must default to off")
 	}
 }
@@ -241,6 +242,137 @@ func TestEnforce(t *testing.T) {
 		}
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: want an error naming %q, got %v", label, c.want, err)
+		}
+	}
+}
+
+func TestContainersValues(t *testing.T) {
+	for src, want := range map[string]Containers{
+		"":                             ContainersOff,
+		"\n  containers: false\n":      ContainersOff,
+		"\n  containers: true\n":       ContainersContainerd,
+		"\n  containers: docker\n":     ContainersDocker,
+		"\n  containers: \"docker\"\n": ContainersDocker,
+	} {
+		c, err := Parse([]byte("name: a\ntools:" + src + "\n  manager: none\n"))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if c.Tools.Containers != want {
+			t.Errorf("%q: got %q, want %q", src, c.Tools.Containers, want)
+		}
+		if c.Tools.Containers.Enabled() != (want != ContainersOff) ||
+			c.Tools.Containers.Containerd() != (want == ContainersContainerd) ||
+			c.Tools.Containers.Docker() != (want == ContainersDocker) {
+			t.Errorf("%q: the predicates disagree with %q", src, want)
+		}
+		// Saved and loaded again, the value and its YAML form survive.
+		path := filepath.Join(t.TempDir(), "devkit.yaml")
+		if err := c.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Load(path)
+		if err != nil {
+			t.Fatalf("%q: reload: %v", src, err)
+		}
+		if got.Tools.Containers != want {
+			t.Errorf("%q: round trip gave %q", src, got.Tools.Containers)
+		}
+		data, _ := os.ReadFile(path)
+		form := map[Containers]string{ContainersOff: "containers: false\n", ContainersContainerd: "containers: true\n", ContainersDocker: "containers: docker\n"}[want]
+		if !strings.Contains(string(data), form) {
+			t.Errorf("%q: saved file should say %q:\n%s", src, form, data)
+		}
+	}
+}
+
+func TestContainersRejects(t *testing.T) {
+	for label, src := range map[string]string{
+		"unknown word":   "name: a\ntools:\n  containers: podman\n",
+		"yes is no bool": "name: a\ntools:\n  containers: yes\n",
+		"a list":         "name: a\ntools:\n  containers: [docker]\n",
+		"a number":       "name: a\ntools:\n  containers: 1\n",
+	} {
+		if _, err := Parse([]byte(src)); err == nil {
+			t.Errorf("%s: expected an error for %q", label, src)
+		}
+	}
+	_, err := Parse([]byte("name: a\nsource: mount\ntools:\n  containers: docker\n"))
+	if err == nil || !strings.Contains(err.Error(), "ID-mapped") || !strings.Contains(err.Error(), "source: copy or git") {
+		t.Errorf("docker with source: mount must be refused, saying why: %v", err)
+	}
+	for _, src := range []string{"copy", "git\nrepo: https://x.com/a.git"} {
+		if _, err := Parse([]byte("name: a\nsource: " + src + "\ntools:\n  containers: docker\n")); err != nil {
+			t.Errorf("docker with source: %s should be valid: %v", src, err)
+		}
+	}
+	if _, err := Parse([]byte("name: a\nsource: mount\ntools:\n  containers: true\n")); err != nil {
+		t.Errorf("containerd with source: mount stays valid: %v", err)
+	}
+}
+
+func TestContainerRuntimeValues(t *testing.T) {
+	for src, want := range map[string]ContainerRuntime{
+		"":                                RuntimeRunc,
+		"\n  container_runtime: runc\n":   RuntimeRunc,
+		"\n  container_runtime: gvisor\n": RuntimeGvisor,
+		"\n  container_runtime: gvisor-hostnet\n": RuntimeGvisorHostnet,
+	} {
+		c, err := Parse([]byte("name: a\ntools:\n  containers: docker" + src + "\n  manager: none\n"))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if c.Tools.ContainerRuntime != want {
+			t.Errorf("%q: got %q, want %q", src, c.Tools.ContainerRuntime, want)
+		}
+		if c.Tools.ContainerRuntime.Gvisor() != (want != RuntimeRunc) {
+			t.Errorf("%q: Gvisor() disagrees with %q", src, want)
+		}
+		hasZstd := false
+		for _, p := range c.AptPackages() {
+			hasZstd = hasZstd || p == "zstd"
+		}
+		if hasZstd != (want != RuntimeRunc) {
+			t.Errorf("%q: zstd belongs to the gVisor modes only: %v", src, c.AptPackages())
+		}
+		path := filepath.Join(t.TempDir(), "devkit.yaml")
+		if err := c.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Load(path)
+		if err != nil || got.Tools.ContainerRuntime != want {
+			t.Fatalf("%q: round trip gave %q, %v", src, got.Tools.ContainerRuntime, err)
+		}
+		data, _ := os.ReadFile(path)
+		if has := strings.Contains(string(data), "container_runtime"); has != (want != RuntimeRunc) {
+			t.Errorf("%q: container_runtime should be saved only when it is not the default:\n%s", src, data)
+		}
+		if want != RuntimeRunc && !strings.Contains(string(data), "container_runtime: "+string(want)+"\n") {
+			t.Errorf("%q: saved file should say %s:\n%s", src, want, data)
+		}
+	}
+	if got := map[ContainerRuntime]string{RuntimeRunc: "runc", RuntimeGvisor: "runsc", RuntimeGvisorHostnet: "runsc-hostnet"}; got[RuntimeRunc] != RuntimeRunc.DockerName() ||
+		got[RuntimeGvisor] != RuntimeGvisor.DockerName() || got[RuntimeGvisorHostnet] != RuntimeGvisorHostnet.DockerName() {
+		t.Error("Docker's names for the runtimes are runc, runsc and runsc-hostnet")
+	}
+}
+
+func TestContainerRuntimeRejects(t *testing.T) {
+	for _, v := range []string{"runsc", "kata", "gVisor", "gvisor-hostinet", "true", "[gvisor]"} {
+		_, err := Parse([]byte("name: a\ntools:\n  containers: docker\n  container_runtime: " + v + "\n"))
+		if err == nil {
+			t.Errorf("container_runtime %q should be refused", v)
+		}
+	}
+	for _, containers := range []string{"false", "true"} {
+		for _, v := range []string{"gvisor", "gvisor-hostnet"} {
+			_, err := Parse([]byte("name: a\ntools:\n  containers: " + containers + "\n  container_runtime: " + v + "\n"))
+			if err == nil || !strings.Contains(err.Error(), "needs tools.containers: docker") {
+				t.Errorf("containers: %s with %s must be refused, saying docker is needed: %v", containers, v, err)
+			}
+		}
+		if _, err := Parse([]byte("name: a\ntools:\n  containers: " + containers + "\n  container_runtime: runc\n")); err != nil {
+			t.Errorf("runc is valid without docker: %v", err)
 		}
 	}
 }

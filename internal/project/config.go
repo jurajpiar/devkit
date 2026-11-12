@@ -80,11 +80,109 @@ type Tools struct {
 	Versions map[string]string `yaml:"versions,omitempty"`
 	// Node is shorthand for versions.node, kept for older configs.
 	Node string `yaml:"node,omitempty"`
-	// Containers installs rootless containerd and nerdctl inside the VM.
-	Containers bool `yaml:"containers"`
+	// Containers chooses a container engine inside the VM: false (none),
+	// true (Lima's rootless containerd and nerdctl) or docker (rootless
+	// Docker under an account of its own). See Containers.
+	Containers Containers `yaml:"containers"`
+	// ContainerRuntime is Docker's default runtime: runc (the default), or
+	// gVisor's runsc in one of two network modes. Only with containers:
+	// docker. See ContainerRuntime.
+	ContainerRuntime ContainerRuntime `yaml:"container_runtime,omitempty"`
 	// Packages are extra apt packages.
 	Packages []string `yaml:"packages,omitempty"`
 }
+
+// Containers is the value of tools.containers. In devkit.yaml it is false,
+// true or docker; anything else is kept as written so that Validate can
+// name it.
+type Containers string
+
+// Values of Containers.
+const (
+	ContainersOff        Containers = ""
+	ContainersContainerd Containers = "true"
+	ContainersDocker     Containers = "docker"
+)
+
+// Enabled reports whether any container engine is on.
+func (c Containers) Enabled() bool { return c != ContainersOff }
+
+// Containerd reports whether Lima's rootless containerd is on.
+func (c Containers) Containerd() bool { return c == ContainersContainerd }
+
+// Docker reports whether rootless Docker under its own account is on.
+func (c Containers) Docker() bool { return c == ContainersDocker }
+
+// UnmarshalYAML takes a YAML boolean or a string.
+func (c *Containers) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode {
+		return fmt.Errorf("tools.containers must be false, true or docker")
+	}
+	if n.Tag == "!!bool" {
+		var b bool
+		if err := n.Decode(&b); err != nil {
+			return err
+		}
+		*c = ContainersOff
+		if b {
+			*c = ContainersContainerd
+		}
+		return nil
+	}
+	*c = Containers(n.Value)
+	if n.Value == "false" {
+		*c = ContainersOff
+	}
+	return nil
+}
+
+// MarshalYAML writes the form devkit.yaml uses: a boolean, or docker.
+func (c Containers) MarshalYAML() (any, error) {
+	switch c {
+	case ContainersOff:
+		return false, nil
+	case ContainersContainerd:
+		return true, nil
+	}
+	return string(c), nil
+}
+
+// ContainerRuntime is the value of tools.container_runtime.
+type ContainerRuntime string
+
+// Values of ContainerRuntime.
+const (
+	// RuntimeRunc runs containers on the VM's kernel, as Docker does by
+	// default.
+	RuntimeRunc ContainerRuntime = "runc"
+	// RuntimeGvisor runs them under gVisor's user-space kernel, with
+	// gVisor's own network stack. Docker's embedded DNS does not answer
+	// there, so Compose service names do not resolve.
+	RuntimeGvisor ContainerRuntime = "gvisor"
+	// RuntimeGvisorHostnet runs them under gVisor with socket calls passed
+	// to the VM's kernel, inside the container's network namespace, so
+	// service names resolve; file, process and memory calls stay in gVisor.
+	RuntimeGvisorHostnet ContainerRuntime = "gvisor-hostnet"
+)
+
+// Gvisor reports whether containers run under gVisor by default.
+func (r ContainerRuntime) Gvisor() bool {
+	return r == RuntimeGvisor || r == RuntimeGvisorHostnet
+}
+
+// DockerName is the name Docker knows the default runtime by.
+func (r ContainerRuntime) DockerName() string {
+	switch r {
+	case RuntimeGvisor:
+		return "runsc"
+	case RuntimeGvisorHostnet:
+		return "runsc-hostnet"
+	}
+	return "runc"
+}
+
+// IsZero lets omitempty leave the default out of a saved devkit.yaml.
+func (r ContainerRuntime) IsZero() bool { return r == "" || r == RuntimeRunc }
 
 // VM sizes the virtual machine.
 type VM struct {
@@ -220,6 +318,9 @@ func (c *Config) applyDefaults() {
 			c.Tools.Manager = ManagerMise
 		}
 	}
+	if c.Tools.ContainerRuntime == "" {
+		c.Tools.ContainerRuntime = RuntimeRunc
+	}
 	if c.Network.Allow == nil {
 		c.Network.Allow = append([]string(nil), DefaultAllow...)
 	}
@@ -319,6 +420,24 @@ func (c *Config) Validate() error {
 	if c.MountWritable && c.Source != SourceMount {
 		return fmt.Errorf("mount_writable only applies to source: mount")
 	}
+	switch c.Tools.Containers {
+	case ContainersOff, ContainersContainerd:
+	case ContainersDocker:
+		if c.Source == SourceMount {
+			return fmt.Errorf("tools.containers: docker cannot be combined with source: mount: the workspace is shared with Docker's account by an ID-mapped mount, which the VM's kernel does not support on a virtiofs mount; use source: copy or git")
+		}
+	default:
+		return fmt.Errorf("tools.containers must be false, true or docker (got %q)", string(c.Tools.Containers))
+	}
+	switch c.Tools.ContainerRuntime {
+	case "", RuntimeRunc:
+	case RuntimeGvisor, RuntimeGvisorHostnet:
+		if !c.Tools.Containers.Docker() {
+			return fmt.Errorf("tools.container_runtime: %s needs tools.containers: docker (gVisor is set up as a Docker runtime)", c.Tools.ContainerRuntime)
+		}
+	default:
+		return fmt.Errorf("tools.container_runtime must be runc, gvisor or gvisor-hostnet (got %q)", string(c.Tools.ContainerRuntime))
+	}
 	switch c.Network.Mode {
 	case NetworkOpen, NetworkAllowlist, NetworkNone:
 	default:
@@ -413,12 +532,27 @@ func (c *Config) SSHHost() string {
 	return "devkit-" + c.Name
 }
 
+// DockerPackages are what tools.containers: docker installs: the daemon,
+// Compose and buildx, what rootless mode runs on, the user D-Bus session the
+// systemd cgroup driver talks to, and acl for the socket's access list.
+var DockerPackages = []string{
+	"docker.io", "docker-compose-v2", "docker-buildx", "rootlesskit", "slirp4netns",
+	"uidmap", "dbus-user-session", "acl",
+}
+
 // AptPackages are the packages root installs: tools.packages plus those the
-// enabled services need.
+// enabled services and container engine need.
 func (c *Config) AptPackages() []string {
 	pkgs := append([]string(nil), c.Tools.Packages...)
 	if c.Services.Postgres != nil {
 		pkgs = append(pkgs, PostgresPackage)
+	}
+	if c.Tools.Containers.Docker() {
+		pkgs = append(pkgs, DockerPackages...)
+		if c.Tools.ContainerRuntime.Gvisor() {
+			// gVisor's release archive is compressed with zstd.
+			pkgs = append(pkgs, "zstd")
+		}
 	}
 	return pkgs
 }

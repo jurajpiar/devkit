@@ -1,0 +1,10 @@
+# Copied verbatim from spikes/gvisor/results/09-gofer-timing.log, lines 86-92:
+# the gofer of a container whose bind source was swapped for a symlink to /var/lib/devkit-docker/run (a8cb54ed...), 1 ms after create: the tree built under the gofer's own tmpfs.
+# Each row is "fstype root at mountpoint"; the recorder kept no devices.
+      tmpfs / at /
+      overlay / at /root
+      ext4 /home/jurajpiar.guest/workspace at /root/w
+      ext4 /var/lib/devkit-docker/run at /root/s
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/a8cb54ed3a84308a682808c5b67e6987c3756a48096fe78bd1ece772df8883e3/resolv.conf at /root/etc/resolv.conf
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/a8cb54ed3a84308a682808c5b67e6987c3756a48096fe78bd1ece772df8883e3/hostname at /root/etc/hostname
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/a8cb54ed3a84308a682808c5b67e6987c3756a48096fe78bd1ece772df8883e3/hosts at /root/etc/hosts

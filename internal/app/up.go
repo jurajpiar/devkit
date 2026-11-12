@@ -88,14 +88,16 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// The egress proxy is mandatory for allowlist mode and provides the audit
-	// log in open mode. Air-gapped VMs do not need it.
+	// The guest binary is the egress proxy, mandatory for allowlist mode and
+	// the audit log in open mode, and Docker's API filter and runtime guard,
+	// without which Docker does not run. Air-gapped VMs without Docker do
+	// not need it.
 	var proxyBin []byte
 	var proxySHA string
-	if cfg.Network.Mode != project.NetworkNone {
+	if needsGuestBinary(cfg) {
 		proxyBin, err = egressProxyBinary(ctx)
 		if err != nil {
-			if cfg.Network.Mode == project.NetworkAllowlist {
+			if cfg.Network.Mode == project.NetworkAllowlist || cfg.Tools.Containers.Docker() {
 				return err
 			}
 			fmt.Printf("Warning: %v\nContinuing without the audit log.\n", err)
@@ -175,7 +177,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	warnIfUnconfined(ctx, cfg)
 
 	if proxyBin != nil {
-		if err := installProxy(ctx, name, proxyBin, proxySHA); err != nil {
+		if err := installProxy(ctx, cfg, proxyBin, proxySHA); err != nil {
 			return err
 		}
 	}
@@ -188,6 +190,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if !noSync {
 		if err := syncSource(ctx, cfg, cwd); err != nil {
 			return err
+		}
+	}
+	// The user provisioning wrote the Docker client's proxy settings before
+	// this sync could bring the project's Compose files; written again now,
+	// so their service names are exempt from the proxy.
+	if cfg.Tools.Containers.Docker() {
+		if out, err := lima.Exec(ctx, name, provision.DockerConfigHelper); err != nil {
+			fmt.Printf("Warning: could not update the Docker client's proxy settings: %v %s\n", err, printable(out))
 		}
 	}
 
@@ -228,12 +238,21 @@ func runUp(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// installProxy drops the proxy binary where root picks it up, then waits
-// for the service. Skipped when the VM already runs this exact binary.
-func installProxy(ctx context.Context, name string, bin []byte, sha string) error {
+// needsGuestBinary reports whether the VM runs devkit's guest binary: the
+// egress proxy whenever the VM has network, and Docker's API filter and
+// runtime guard whenever it has Docker. stalevm mirrors this exactly, since
+// the binary's hash is part of the provisioning fingerprint.
+func needsGuestBinary(cfg *project.Config) bool {
+	return cfg.Network.Mode != project.NetworkNone || cfg.Tools.Containers.Docker()
+}
+
+// installProxy drops the guest binary where root picks it up, then waits
+// for what runs it. Skipped when the VM already has this exact binary.
+func installProxy(ctx context.Context, cfg *project.Config, bin []byte, sha string) error {
+	name := cfg.VMName()
 	out, _ := lima.Exec(ctx, name, fmt.Sprintf("sha256sum %s 2>/dev/null | cut -d' ' -f1", provision.EgressBinary))
 	if strings.TrimSpace(out) == sha {
-		return waitForService(ctx, name)
+		return waitForGuestBinary(ctx, cfg)
 	}
 
 	tmp, err := os.CreateTemp("", "devkit-egressproxy-*")
@@ -254,7 +273,47 @@ func installProxy(ctx context.Context, name string, bin []byte, sha string) erro
 	if _, err := lima.Exec(ctx, name, fmt.Sprintf("mv %s %s/egressproxy", guestTmp, provision.DropDir)); err != nil {
 		return fmt.Errorf("stage egress proxy: %w", err)
 	}
-	return waitForService(ctx, name)
+	return waitForGuestBinary(ctx, cfg)
+}
+
+// waitForGuestBinary waits for the egress proxy when the VM has network,
+// and for Docker through its API filter when it has Docker. On a first boot,
+// or after an upgrade, provisioning ran before this binary was installed and
+// left Docker unstarted (its runtimes are this binary); the install step
+// starts it, and this is where a daemon or filter that does not come up
+// fails devkit up then.
+func waitForGuestBinary(ctx context.Context, cfg *project.Config) error {
+	if cfg.Network.Mode != project.NetworkNone {
+		if err := waitForService(ctx, cfg.VMName()); err != nil {
+			return err
+		}
+	}
+	if cfg.Tools.Containers.Docker() {
+		return waitForDockerFilter(ctx, cfg.VMName())
+	}
+	return nil
+}
+
+// dockerWait bounds devkit up's wait for Docker through its API filter.
+const dockerWait = 120 * time.Second
+
+func waitForDockerFilter(ctx context.Context, name string) error {
+	// docker version fails unless the daemon answers through the filter.
+	check := "timeout 10 docker --host unix://" + provision.FilterSocket + " version >/dev/null 2>&1 && echo filter-ok"
+	// The daemon may be cold-starting here (the install step just started
+	// it), so this allows what provisioning allows the start and the
+	// filter together.
+	deadline := time.Now().Add(dockerWait)
+	for time.Now().Before(deadline) {
+		out, _ := lima.Exec(ctx, name, check)
+		if strings.TrimSpace(out) == "filter-ok" {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	out, _ := lima.Exec(ctx, name, "systemctl status --no-pager devkit-dockerd.service "+provision.FilterUnit+".socket "+provision.FilterUnit+".service 2>&1 | tail -n 30; "+
+		"journalctl -u devkit-dockerd.service -n 10 --no-pager -o cat 2>/dev/null")
+	return fmt.Errorf("Docker did not answer through its API filter inside the VM within %s:\n%s", dockerWait, out)
 }
 
 func waitForService(ctx context.Context, name string) error {
@@ -293,7 +352,10 @@ func syncSource(ctx context.Context, cfg *project.Config, cwd string) error {
 			return nil
 		}
 		fmt.Printf("Cloning %s (%s) inside the VM\n", cfg.Repo, cfg.Branch)
-		return lima.ExecStream(ctx, name, fmt.Sprintf("rm -rf %s && git clone --branch %q %q %s", ws, cfg.Branch, cfg.Repo, ws))
+		// Emptied, not removed: with tools.containers: docker the daemon's
+		// ID-mapped mount holds this directory, and would keep pointing at a
+		// removed one until the VM restarts.
+		return lima.ExecStream(ctx, name, fmt.Sprintf("mkdir -p %s && find %s -mindepth 1 -maxdepth 1 -exec rm -rf {} + && git clone --branch %q %q %s", ws, ws, cfg.Branch, cfg.Repo, ws))
 	case project.SourceMount:
 		fmt.Println("Host directory is mounted at ~/workspace")
 		return nil

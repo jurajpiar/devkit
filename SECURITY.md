@@ -200,6 +200,12 @@ containerd needs them. That mode relies on AppArmor, including its exemptions.
 Turning containers off closes namespaces again on the next boot. If the kernel
 lacks the switch, provisioning warns and uses AppArmor alone.
 
+`tools.containers: docker` also leaves the kernel switch on, but closes the
+exemptions: the three programs rootless Docker needs (`rootlesskit`, `runc`,
+`slirp4netns`) are executable only by Docker's own account, and every other
+stock AppArmor profile that exempts a program is disabled. For the sandbox
+user, a namespace then carries no capabilities, as without containers.
+
 ### Kernel module loading
 
 Kernel modules add executable code to the guest kernel. Socket families, network
@@ -220,15 +226,84 @@ The `AF_ALG` kernel crypto socket family is separately blocked from loading and
 unloaded if present. This removes a source of kernel attack surface; it does not
 protect against bugs in other reachable kernel code.
 
+### Docker's API filter and runtime guard
+
+With `tools.containers: docker` the daemon runs rootless under its own account,
+and its socket is reachable only by devkit's API filter, which runs under
+another account, not root. The sandbox user's `DOCKER_HOST` is the filter's
+socket.
+
+The filter forwards a call only if it is in its table and its body decodes
+strictly (exact field names, no duplicates, no unknown fields) and validates. It
+forwards its own re-encoding of the body, never the client's bytes, so the
+daemon reads what was checked. It refuses privileged containers, added
+capabilities beyond Docker's defaults and two harmless ones, the VM's
+namespaces, devices, sysctls, security-option changes, runtimes other than the
+configured one, published ports beyond loopback, and bind mounts from outside
+the workspace. It drops `NET_RAW` from every container. Ports are loopback on
+every network, not only Docker's default bridge: a network made through the
+filter gets loopback as its default publishing address, a binding with no
+address gets `127.0.0.1`, and `-P`, a connect or a start that would publish on
+the default address of a network made before the filter set it is refused.
+
+Some calls are judged by what the daemon has stored: a container's runtime,
+privileges and published ports before it starts, its mounts before files are
+copied through them, a network's publishing address before a container that
+publishes joins it. The filter asks the daemon first and refuses unless the
+answer is a 200 that parses (a 404 is passed back as the daemon's own), and the
+call then goes to the full ID it was given, so a rename cannot swap the
+container in between.
+
+The daemon resolves bind paths after that check, and the workspace is the
+sandbox user's to rearrange in between. So a runtime guard in front of `runc`,
+and under gVisor in front of `runsc`, reads the mounts each container actually
+got, before its process starts, and deletes the container unless they come
+from the workspace, Docker's volumes, the container's own `hosts`, `hostname`
+and `resolv.conf`, or (with `runc`) its own cgroup. Under gVisor the mounts
+are those of the container's gofer, the host process that opens its files for
+gVisor's sandbox; the guard recognises it by what a container cannot forge
+(the real `runsc` by device and inode, the guard's own uid, the sandbox's
+parent, the container's bundle), refuses unless exactly one process is all
+of these, and requires the sandbox's own mount table to hold only a new
+tmpfs at its root and, until the container starts, a new tmpfs at `/proc`
+and a new proc at `/proc/sandbox-proc`.
+`docker cp` is refused for a container with a bind mount: to copy, the daemon
+makes the container's mounts itself, outside the runtime and so outside the
+guard, and followed a bind source swapped for a symlink after the check.
+For the same reason it is refused for a container with a volume that the
+daemon does not show, when asked by name, to be a `local` one without
+options: a volume made before the filter existed may be
+`type=none,o=bind,device=<path>`, a bind mount by another name.
+
+Limits: under gVisor, `runsc create` returns while the gofer and the sandbox
+are still building their mount tables. After `create` the guard waits, up to
+five seconds, for each table to reach its final form (the gofer's root the
+container's overlay, the sandbox's a new tmpfs, each alone at `/`), judges
+the first final table, and refuses if either never gets there. It relies on
+the gofer making every bind mount before it moves into the container's root,
+as the pinned release does (recorded on a real VM, and checked by the
+end-to-end tests). As a check that does not rest on that, the guard reads
+both tables again when the shim asks `runsc start` to run the container, as
+`runsc state` names them, and refuses unless they are final and pass. A bind
+made after `start` would not be checked, so a gVisor upgrade must pass those
+tests first. A container made
+before the filter is
+started through it only if its runtime, privileges and ports pass, not the
+rest of what the filter refuses at creation; one the
+daemon restarts on its own is not seen by the filter at all. BuildKit's session stream is not parsed, and its build
+steps run under its own `runc`, outside the guard and outside gVisor. The
+Docker account is the boundary for containers: container root is that account.
+
 ### Further isolation with gVisor
 
-Kernel restrictions cannot rule out every privilege-escalation bug. An
-additional sandbox such as gVisor could run project processes behind a userspace
-kernel inside the VM, reducing their direct access to the guest kernel.
+Kernel restrictions cannot rule out every privilege-escalation bug. With
+`tools.containers: docker`, `tools.container_runtime: gvisor` runs containers
+behind gVisor's userspace kernel inside the VM, reducing their direct access to
+the guest kernel. It has compatibility and performance costs; see the README.
 
-This is an opt-in roadmap item. It has compatibility and performance costs, and
-an IDE's remote processes would need to run inside the extra sandbox to benefit.
-The VM would still provide the boundary between the guest kernel and your Mac.
+Project processes outside containers, and an IDE's remote processes, do not run
+under it: extending it to them remains a roadmap item. The VM still provides the
+boundary between the guest kernel and your Mac.
 
 ### Configuration validation
 

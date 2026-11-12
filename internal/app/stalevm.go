@@ -89,11 +89,11 @@ func warnIfStaleWithin(ctx context.Context, cfg *project.Config, w io.Writer, d 
 // expectedProvisionID is the fingerprint this binary would write for cfg, or
 // "" if it cannot be computed (e.g. the proxy binary is unavailable).
 func expectedProvisionID(ctx context.Context, cfg *project.Config) string {
-	// Mirror up exactly: in none mode no proxy is dropped in and up renders
-	// with an empty hash, so the fingerprint must be computed the same way
-	// or every air-gapped VM would look stale.
+	// Mirror up exactly: in none mode without Docker no guest binary is
+	// dropped in and up renders with an empty hash, so the fingerprint must
+	// be computed the same way or every air-gapped VM would look stale.
 	sha := ""
-	if cfg.Network.Mode != project.NetworkNone {
+	if needsGuestBinary(cfg) {
 		bin, err := egressProxyBinary(ctx)
 		if err != nil {
 			return ""

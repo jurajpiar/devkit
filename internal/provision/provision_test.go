@@ -392,9 +392,22 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 		t.Skipf("needs GNU sed (%s)", sed)
 	}
 	limaBlock := "#LIMA-START\nHTTP_PROXY=http://host.proxy:3128\nhttp_proxy=http://host.proxy:3128\nPATH=/usr/bin\n#LIMA-END\n"
-	for _, mode := range []string{project.NetworkAllowlist, project.NetworkNone} {
-		t.Run(mode, func(t *testing.T) {
-			s, err := System(params(func(c *project.Config) { c.Network.Mode = mode }))
+	for _, v := range []struct {
+		mode   string
+		docker bool
+	}{{project.NetworkAllowlist, false}, {project.NetworkNone, false}, {project.NetworkAllowlist, true}} {
+		mode := v.mode
+		name := mode
+		if v.docker {
+			name += "-docker"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, err := System(params(func(c *project.Config) {
+				c.Network.Mode = mode
+				if v.docker {
+					c.Tools.Containers = project.ContainersDocker
+				}
+			}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -415,7 +428,7 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			frag = strings.ReplaceAll(frag, "sed -i", sed+" -i")
 			frag = strings.ReplaceAll(frag, "id devkit-proxy >/dev/null 2>&1 || useradd", "true || useradd")
 			script := "set -eu\nstep() { :; }\nMODE=" + mode + "\n" + frag
-			if err := os.WriteFile(env, []byte("LANG=C\n"+limaBlock+"STALE=1\nHTTP_PROXY=http://old:1\n"), 0o644); err != nil {
+			if err := os.WriteFile(env, []byte("LANG=C\n"+limaBlock+"STALE=1\nHTTP_PROXY=http://old:1\nDOCKER_HOST=unix:///old.sock\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			run := func() string {
@@ -442,6 +455,9 @@ func TestEnvironmentEditsAreIdempotent(t *testing.T) {
 			}
 			if mode == project.NetworkAllowlist && !strings.Contains(first, "HTTPS_PROXY=http://127.0.0.1:3128\n") {
 				t.Errorf("devkit proxy line missing:\n%s", first)
+			}
+			if n := strings.Count(first, "\nDOCKER_HOST="); v.docker != (n == 1) || n > 1 {
+				t.Errorf("DOCKER_HOST should be set once with docker and not otherwise (%d):\n%s", n, first)
 			}
 		})
 	}

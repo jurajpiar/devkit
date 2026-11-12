@@ -1,0 +1,4 @@
+516 515 253:1 /var/lib/devkit-docker/run /s rw,nosuid,relatime - ext4 /dev/root rw,discard,errors=remount-ro,commit=30
+517 515 253:1 /var/lib/devkit-docker/.local/share/docker/containers/3838dd52bee162d57bf41f30be092d6cae650bced4ef594c6916ca2bdac1c01d/resolv.conf /etc/resolv.conf rw,nosuid,relatime - ext4 /dev/root rw
+518 515 253:1 /var/lib/devkit-docker/.local/share/docker/containers/3838dd52bee162d57bf41f30be092d6cae650bced4ef594c6916ca2bdac1c01d/hostname /etc/hostname rw,nosuid,relatime - ext4 /dev/root rw,disca
+519 515 253:1 /var/lib/devkit-docker/.local/share/docker/containers/3838dd52bee162d57bf41f30be092d6cae650bced4ef594c6916ca2bdac1c01d/hosts /etc/hosts rw,nosuid,relatime - ext4 /dev/root rw,discard,err

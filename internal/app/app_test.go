@@ -71,6 +71,75 @@ func TestRenderConfigParses(t *testing.T) {
 	}
 }
 
+// devkit init leaves containers off, names docker beside it, and lists the
+// hosts a Docker Hub pull needs as a commented example: allowing a registry
+// is the owner's decision.
+func TestRenderConfigContainers(t *testing.T) {
+	c := project.Default()
+	c.Name = "demo"
+	out := renderConfig(c)
+	if strings.Count(out, "containers: false") != 1 || !strings.Contains(out, "\n  containers: false ") {
+		t.Fatalf("init should write containers: false exactly once:\n%s", out)
+	}
+	line := out[strings.Index(out, "  containers: false"):]
+	if line = line[:strings.Index(line, "\n")]; !strings.Contains(line, "docker") {
+		t.Errorf("the containers line should mention docker: %q", line)
+	}
+	got, err := project.Parse([]byte(out))
+	if err != nil || got.Tools.Containers != project.ContainersOff {
+		t.Fatalf("containers should parse as off: %v %q", err, got.Tools.Containers)
+	}
+	for _, h := range []string{"registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "production.cloudfront.docker.com", `"**.r2.cloudflarestorage.com"`} {
+		if !strings.Contains(out, "  #   - "+h+"\n") {
+			t.Errorf("init should list %s as a commented allowlist entry:\n%s", h, out)
+		}
+	}
+	for _, h := range got.Network.Allow {
+		if strings.Contains(h, "docker") {
+			t.Errorf("Docker Hub must not be allowed by default: %s", h)
+		}
+	}
+	docker, err := project.Parse([]byte(strings.Replace(out, "containers: false", "containers: docker", 1)))
+	if err != nil || !docker.Tools.Containers.Docker() {
+		t.Fatalf("containers: docker should parse: %v", err)
+	}
+	if strings.Count(out, "  allow:\n") != 1 {
+		t.Errorf("the allowlist should open once:\n%s", out)
+	}
+}
+
+// devkit init names container_runtime in a comment after the containers
+// line, so that the first match of an uncommented setting is the one a user
+// (or the e2e test) adds. Each edit in the acceptance test's sequence parses.
+func TestRenderConfigContainerRuntime(t *testing.T) {
+	c := project.Default()
+	c.Name = "demo"
+	out := renderConfig(c)
+	if !strings.Contains(out, "\n  containers: false ") || !strings.Contains(out, "\n  # container_runtime: runc ") ||
+		strings.Index(out, "# container_runtime:") < strings.Index(out, "containers: false") {
+		t.Fatalf("init should name container_runtime in a comment after containers:\n%s", out)
+	}
+	got, err := project.Parse([]byte(out))
+	if err != nil || got.Tools.ContainerRuntime != project.RuntimeRunc {
+		t.Fatalf("the default should parse as runc: %v", err)
+	}
+	cfg := strings.Replace(out, "containers: false", "containers: docker\n  container_runtime: gvisor\n  # was: false", 1)
+	for _, step := range []struct {
+		from, to string
+		want     project.ContainerRuntime
+	}{
+		{"", "", project.RuntimeGvisor},
+		{"container_runtime: gvisor", "container_runtime: gvisor-hostnet", project.RuntimeGvisorHostnet},
+		{"container_runtime: gvisor-hostnet", "container_runtime: runc", project.RuntimeRunc},
+	} {
+		cfg = strings.Replace(cfg, step.from, step.to, 1)
+		got, err := project.Parse([]byte(cfg))
+		if err != nil || got.Tools.ContainerRuntime != step.want {
+			t.Fatalf("want %s: %v\n%s", step.want, err, cfg)
+		}
+	}
+}
+
 func TestSSHBlockAddRemove(t *testing.T) {
 	c := project.Default()
 	c.Name = "demo"

@@ -1,0 +1,10 @@
+# Copied verbatim from spikes/gvisor/results/09-gofer-timing.log, lines 73-79:
+# the gofer of a container with --init, a workspace bind and a volume (da4e9171...), 1 ms after create: already final.
+# Each row is "fstype root at mountpoint"; the recorder kept no devices.
+      overlay / at /
+      ext4 /usr/bin/docker-init at /sbin/docker-init
+      ext4 /home/jurajpiar.guest/workspace at /w
+      ext4 /var/lib/devkit-docker/.local/share/docker/volumes/gtv/_data at /v
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/da4e917141e1c0eea95362dc30ac691e0f1dcdb33533ed6a51496bc48a9c4e24/resolv.conf at /etc/resolv.conf
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/da4e917141e1c0eea95362dc30ac691e0f1dcdb33533ed6a51496bc48a9c4e24/hostname at /etc/hostname
+      ext4 /var/lib/devkit-docker/.local/share/docker/containers/da4e917141e1c0eea95362dc30ac691e0f1dcdb33533ed6a51496bc48a9c4e24/hosts at /etc/hosts

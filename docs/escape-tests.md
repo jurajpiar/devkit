@@ -157,7 +157,8 @@ tampered with, which is outside the sandbox entirely.
 **Attempt:** Become root.
 
 **Control:** No general sudo access; io_uring, unprivileged BPF and `AF_ALG` off; unprivileged
-user namespaces refused (unless `containers: true`); module loading locked after
+user namespaces refused (unless `containers: true`; with `containers: docker`,
+open to Docker's own account only); module loading locked after
 provisioning; security updates at boot.
 
 **Limit:** A kernel bug in a subsystem still reachable and not yet in the

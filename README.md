@@ -187,7 +187,8 @@ tools:
   versions:             # mise tool: version, seeded by devkit init
     node: "22"
     go: "1.27"
-  containers: false     # rootless containerd + nerdctl inside the VM
+  containers: false     # true: rootless containerd + nerdctl; docker: rootless Docker
+  # container_runtime: runc  # with docker: gvisor | gvisor-hostnet, see Docker
   packages: [pkg-config]  # extra apt packages
 
 # install: make deps    # replaces the lockfile-based install devkit picks
@@ -326,7 +327,9 @@ Unprivileged user namespaces are refused outright
 (`kernel.unprivileged_userns_clone = 0`), including to the programs Ubuntu's
 AppArmor profiles exempt, such as `rootlesskit` or `podman` installed from
 `tools.packages`; root is unaffected. `containers: true` leaves them open, under
-AppArmor's restriction alone, because rootless containerd needs them. Kernel
+AppArmor's restriction alone, because rootless containerd needs them.
+`containers: docker` leaves them on in the kernel but closes them, through
+AppArmor, to every account except Docker's own (see [Docker](#docker)). Kernel
 module loading is locked, for root too, as the last step of provisioning, after
 the firewall is up and what the configuration needs is loaded; every boot locks
 it again. A tool that needs a module nothing loaded beforehand then fails; set
@@ -396,6 +399,202 @@ Containers are opt-in. With `containers: true` the VM gets rootless containerd
 and `nerdctl` for databases and services. It also leaves unprivileged user
 namespaces open, which rootless containerd needs, and loads the bridge, overlay
 and netfilter modules containers use before module loading is locked.
+`containers: docker` gives Docker instead, described next.
+
+### Docker
+
+With `containers: docker` the VM gets Docker, Compose and buildx,
+run rootless under an account of its own, `devkit-docker`, never as root and
+never as the sandbox user. The reason is user namespaces: rootless Docker
+needs them with capabilities inside, and only that account gets them. Ubuntu's
+AppArmor profiles exempt `rootlesskit`, `runc` and `slirp4netns` by path; devkit
+makes those three executable by the account only, and disables every other
+stock profile that exempts a program, so for the sandbox user user namespaces
+stay as closed as without containers. The sandbox user reaches Docker with
+no setup: `DOCKER_HOST` points every session at devkit's API filter (below),
+never at the daemon's own socket, which only the filter can reach. The
+rootful `docker.service` is masked and never runs.
+
+Containers have the network the rest of the VM has. Their traffic leaves
+through `slirp4netns`, under the account's UID, which the firewall rejects
+everywhere except the VM's loopback (and what `allow_host` or `dns: resolvers`
+open to the whole VM), so the only way out is the egress proxy,
+with its allowlist and its log. The daemon reaches the proxy at 10.0.2.2,
+which is the VM's loopback as seen from a container; that also means a
+container can reach anything else listening on the VM's 127.0.0.1, such as
+`services: [postgres]`. On every boot the account is held off the network
+like the sandbox user, and the daemon starts only after the firewall, so a
+container with `--restart always` gets nothing before it.
+
+The workspace is shared with the daemon, and nothing else is. The daemon mounts
+`~/workspace` over itself with your IDs mapped to the account's, in its own
+mount namespace, so container root is you on disk: what a container writes in
+a bind mount of the workspace belongs to you, and what you or `devkit sync`
+write is writable from the container. A bind mount of anything else in your
+home, such as `~/.ssh`, fails: the account may only pass through your home
+directory, not read it. `source: mount` cannot be combined with
+`containers: docker`: virtiofs, which carries the mount, does not support
+ID-mapped mounts on the VM's kernel. Use `source: copy` or `git`.
+
+devkit writes the proxy into the Docker client's `~/.docker/config.json`, and
+Docker passes it to every container and build as `http_proxy` and the like.
+`no_proxy` names `localhost`, the loopback addresses, and the services and
+`container_name`s of the Compose files at the workspace root and one directory
+below, so one service reaches another by name. A name that is not a plain
+name is left out. Run `devkit up` again after adding a Compose service. Some
+clients ignore `no_proxy`, busybox `wget` among them; tell those to skip the
+proxy for service names (`wget -Y off`).
+
+Docker Hub is not allowed by default: allowing a registry is your decision. A
+pull from it needs these hosts in `network.allow`:
+
+```yaml
+    - registry-1.docker.io
+    - auth.docker.io
+    - production.cloudflare.docker.com
+    - production.cloudfront.docker.com
+    - "**.r2.cloudflarestorage.com"
+```
+
+### What Docker may be asked for
+
+Anyone who can use the daemon's socket can
+ask it for anything the account may do: privileged containers, extra
+capabilities, the VM's namespaces, bind mounts of whatever the account can
+read. So the sandbox user never gets that socket. It gets devkit's API
+filter, `devkit-dockerfilter`, a small proxy on `/run/devkit/docker.sock`
+that runs under an account of its own (not root), and forwards a call only
+when the call is in its table and its settings are ones it knows to be
+harmless. Everything else is refused, including what it does not recognise:
+an unknown endpoint, query parameter or field is a refusal, not a pass. A
+refusal looks like this:
+
+```
+Error response from daemon: devkit: refused: POST /containers/create: HostConfig.Privileged is not allowed
+```
+
+and is logged, one line with the method, path and reason, never a request
+body, in the filter's journal (`journalctl -u devkit-dockerfilter`, with
+`sudo: true`).
+
+Refused, because each widens the VM kernel's surface or reaches past the
+container: `--privileged`; devices and device rules; sysctls; the VM's
+PID, IPC, UTS, cgroup or user namespace and `--network host`; security
+options other than `no-new-privileges` (no seccomp, AppArmor or system-path
+changes); a cgroup parent, a volume driver, storage options, a negative OOM
+score, real-time CPU and block I/O device settings. Capabilities: Docker's
+default set, which a container may add back after `--cap-drop ALL`, plus
+`IPC_LOCK` and `NET_BIND_SERVICE`; nothing else, and never `ALL`. `NET_RAW`
+is dropped from every container, so raw sockets and `ping` inside a
+container do not work. Published ports bind to the VM's loopback only
+(`127.0.0.1` or `::1`), on every network: Docker's own setting covers its
+default bridge only, so the filter gives every network you make, which
+includes every Compose project's, loopback as its default address, and a
+port published with no address gets `127.0.0.1`. A network made by an
+earlier devkit has no such default: `-P` on it is refused until it is made
+again (`docker network rm`, or `docker compose down`). The runtime is fixed
+by `tools.container_runtime`: asking for another by name, `runc` included,
+is refused. Logs stay in the
+VM (`json-file`, `local` or `none`). Bind mounts must come from the
+workspace: a bind of `/etc`, your home, `~/.ssh` or Docker's own files is
+refused, by its path as written and by where its symlinks lead; named
+volumes use the `local` driver with no options, so a volume cannot bind a
+path either. `docker exec --privileged`, `docker update`, plugins, swarm,
+services, secrets and configs are unavailable. Builds work, as do
+`docker compose`, `docker cp`, `attach`, `exec` and the rest of everyday
+use, with one exception: `docker cp` to or from a container with a bind
+mount is refused. To copy files, the daemon makes the container's mounts
+itself, without the runtime and so without the check below, and it would
+follow a bind source you had since replaced with a symlink. The files of a
+bind mount are in the workspace already; for the rest, `docker exec
+<container> cat <file>` or `tar` works. Containers with only tmpfs mounts
+and plain volumes are copied to and from as usual; a volume made before
+devkit, with a driver other than `local` or with options (which can bind a
+path), is refused like a bind mount.
+
+The filter checks the request, but the daemon resolves a bind's path later,
+when the container starts, and the workspace is yours to rearrange in
+between: a directory that passed can be a symlink to the daemon's sockets
+by then. So every container runs through a second check, devkit's runtime
+guard, which Docker runs in place of the runtime: `devkit-runc-guard` as the
+default runtime with `runc`, and under gVisor as `runsc` itself (see
+gVisor). It lets the real runtime set the container up, reads the mounts
+actually made before the container's first process starts (under gVisor,
+those of gVisor's gofer, the process that opens a container's files for
+it), and deletes the container unless each one comes from
+the workspace, a Docker volume, or the three files Docker gives each
+container from its own directory (`hosts`, `hostname`, `resolv.conf`, never
+those of another container, nor the settings Docker keeps beside them). The
+error then reads `devkit: refused: a mount comes from outside the
+workspace`.
+
+What this does not cover. BuildKit's own stream (`docker build` with
+buildx, and Compose builds) is passed through unparsed; BuildKit runs build
+steps with its own `runc`, not through the guard and not under gVisor, and
+takes no host paths, and the daemon refuses the `security.insecure`
+entitlement. The
+Docker account is the trust boundary for containers: container root is that
+account, so what the account may read or write, a container may too, inside
+the workspace and outside it. A container made before the filter existed is
+started through it only if its runtime, privileges and published ports
+are ones it would allow today; the rest
+of its settings are not checked again. One with a restart policy is restarted by the daemon itself at
+boot, unchecked, so remove containers made by an earlier devkit (`docker
+rm -f`) after upgrading. Turning `containers: docker` off stops the daemon and the
+filter and puts back what devkit changed in AppArmor and file modes; the
+accounts and the images are kept.
+
+### gVisor
+
+`tools.container_runtime` chooses what runs Docker's containers.
+`runc`, the default, runs them on the VM's kernel, as Docker normally does.
+`gvisor` makes gVisor's `runsc` the daemon's default runtime: a container's
+system calls reach gVisor's kernel, which runs in user space, and only a small
+filtered set of calls reaches the VM's kernel. It needs `containers: docker`.
+
+```yaml
+tools:
+  containers: docker
+  container_runtime: gvisor   # runc | gvisor | gvisor-hostnet
+```
+
+With `gvisor` a container also gets gVisor's own network stack. Docker's
+built-in DNS does not answer there, so Compose services cannot reach one
+another by name. `gvisor-hostnet` runs `runsc` with `--network=host`: socket
+calls go to the VM kernel's network stack, inside the container's own network
+namespace, so service names work, while file, process and memory calls stay
+behind gVisor. What it gives up is gVisor's network stack: the VM kernel's
+networking code is within a container's reach again. In both modes a container still has
+only the network described above: the firewall and the proxy apply as they do
+to `runc`. `--cap-add NET_ADMIN` is refused under every runtime.
+
+What it costs, from one run of each on an arm64 Mac, without KVM: starting
+and stopping a container, and file I/O, took about as long as under `runc`;
+spawning processes was about 3.5 times slower. `runsc` runs with
+`--ignore-cgroups`, so memory and CPU limits set on a container are not
+enforced under gVisor. Builds are not covered: `docker build` runs its `RUN`
+steps with BuildKit, which has its own `runc` worker.
+
+The runtime is a control, not a default: the API filter allows only the
+configured gVisor runtime by name, so `docker run --runtime=runc` (or the
+other gVisor mode) is refused. The runtime guard stands in front of `runsc`
+as it does in front of `runc` (see above): the daemon's `runsc` and
+`runsc-hostnet` are the guard, which runs the real `runsc`, waits for the
+container's gofer and gVisor's sandbox to finish setting up, checks the
+gofer's mounts and that the sandbox holds none of the VM's own, and checks
+both again when the container is started, before its first process runs. A bind source
+swapped for a symlink while a container starts is refused as it is under
+`runc`. Switching back to `runc` takes gVisor out of the daemon's
+configuration and leaves its files installed.
+
+Root installs gVisor at boot from Google's release bucket,
+`storage.googleapis.com/gvisor/releases/release/<release>/<arch>/`, one
+archive per architecture, with the release and the archive's SHA-512 pinned in
+`internal/provision/provision.go`. The archive is checked before it is
+unpacked, and it is downloaded again only when the pin changes. The pinned
+checksum was taken from the `.sha512` file published beside the archive, at
+the same origin, so it pins the bytes devkit was tested with, not who
+published them.
 
 ## Toolchains
 
@@ -506,6 +705,7 @@ Hardhat and Foundry verify; install Foundry with `install:` and pin its version.
 | mise | GitHub release pinned in `internal/provision/provision.go` | SHA-256 pinned; the pin was taken from the release's `SHASUMS256.txt` after checking its GPG signature (fingerprint `2485 3EC9 F655 CE80 B48E 6C3A 8B81 C9D1 7413 A06D`). No install script is run |
 | Toolchains via mise | nodejs.org, dl.google.com, GitHub releases, as mise documents per tool | mise's per-tool checks (Node: `SHASUMS256.txt` plus OpenPGP; Go: published `.sha256`; Python, Ruby: GitHub attestations), then pinned by URL and checksum in the VM's `mise.lock` |
 | Nix | releases.nixos.org, version pinned in `internal/provision/provision.go` | SHA-256 pinned, cross-checked against the hash in the official installer |
+| gVisor (`container_runtime: gvisor` or `gvisor-hostnet`) | storage.googleapis.com, release pinned in `internal/provision/provision.go` | SHA-512 pinned, taken from the `.sha512` file beside the archive: it pins the bytes, not the publisher |
 | Nix packages | cache.nixos.org, flake inputs | Nix verifies the cache's Ed25519 signature; `flake.lock` pins every input by hash |
 | apt packages | Ubuntu archives | Ubuntu's signing keys shipped in the image |
 | Project dependencies | Whatever the lockfile says, inside the sandbox | Lockfile integrity hashes, enforced by `npm ci` and friends |
@@ -515,6 +715,8 @@ Hardhat and Foundry verify; install Foundry with `install:` and pin its version.
 Bump the image deliberately: update the release path and both digests together
 from the `SHA256SUMS` file for that release. Bump mise and Nix the same way:
 verify the upstream signature, then change the version and both hashes.
+gVisor's pin has no signature check behind it: change the release and both
+SHA-512 pins together, from the `.sha512` files for that release.
 
 ## Project layout
 
@@ -544,11 +746,10 @@ tests/e2e             creates a real VM and checks the guarantees
 - Rust toolchain verification: pin `rustup-init` by hash in devkit until mise
   verifies it.
 - Foundry as a first-class, hash-pinned install for Solidity projects.
-- An opt-in inner sandbox (gVisor) that runs project processes behind a
-  userspace kernel, so a guest kernel exploit meets it before the real kernel.
-  Defence in depth against the one case the VM boundary does not cover, a
-  privilege escalation reaching the host's loopback; see SECURITY.md for the
-  trade-offs.
+- gVisor for project processes outside containers. `tools.container_runtime`
+  already runs Docker's containers behind gVisor's userspace kernel; a shell,
+  a test run or an IDE's remote processes still run on the guest kernel
+  directly. See SECURITY.md for the trade-offs.
 
 ## Licence
 

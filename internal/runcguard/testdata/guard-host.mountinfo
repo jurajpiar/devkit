@@ -1,0 +1,18 @@
+300 299 253:1 / / rw,relatime master:1 - ext4 /dev/root rw,discard,errors=remount-ro,commit=30
+301 300 0:5 / /dev rw,nosuid,relatime master:2 - devtmpfs devtmpfs rw,size=4034220k,nr_inodes=1008555,mode=755,inode64
+302 301 0:24 / /dev/pts rw,nosuid,noexec,relatime master:3 - devpts devpts rw,gid=5,mode=620,ptmxmode=000
+303 301 0:25 / /dev/shm rw,nosuid,nodev master:4 - tmpfs tmpfs rw,inode64
+304 301 0:57 / /dev/mqueue rw,nosuid,nodev,noexec,relatime master:5 - mqueue mqueue rw
+305 300 0:22 / /proc rw,nosuid,nodev,noexec,relatime master:6 - proc proc rw
+306 305 0:40 / /proc/sys/fs/binfmt_misc rw,relatime master:7 - autofs systemd-1 rw,fd=32,pgrp=1,timeout=0,minproto=5,maxproto=5,direct
+307 300 0:21 / /sys rw,nosuid,nodev,noexec,relatime master:8 - sysfs sysfs rw
+308 307 0:30 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime master:9 - cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot
+309 307 0:7 / /sys/kernel/security rw,nosuid,nodev,noexec,relatime master:10 - securityfs securityfs rw
+310 300 0:26 / /run rw,nosuid,nodev,noexec,relatime master:11 - tmpfs tmpfs rw,size=807008k,mode=755,inode64
+311 310 0:45 / /run/user/999 rw,nosuid,nodev,relatime master:12 - tmpfs tmpfs rw,size=403504k,nr_inodes=100876,mode=700,uid=999,gid=991,inode64
+312 300 254:16 / /boot rw,relatime master:13 - ext4 /dev/vda16 rw
+313 300 0:46 / /etc rw,relatime - tmpfs tmpfs rw,inode64
+314 310 0:47 / /run rw,relatime - tmpfs tmpfs rw,inode64
+315 300 253:1 /home/jurajpiar.guest/workspace /home/jurajpiar.guest/workspace rw,relatime,idmapped master:1 - ext4 /dev/root rw,discard,errors=remount-ro,commit=30
+316 300 0:51 / /var/lib/devkit-docker/.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/54/fs/rootfs rw,relatime - overlay overlay rw,lowerdir=/x,upperdir=/y,workdir=/z
+317 300 0:52 / /var/lib/devkit-docker/.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/60/fs/rootfs rw,relatime - overlay overlay rw,lowerdir=/x,upperdir=/y,workdir=/z
